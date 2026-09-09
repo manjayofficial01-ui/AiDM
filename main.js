@@ -5,6 +5,7 @@ const { DownloadManager } = require('./src/download-manager');
 const { ClipboardMonitor } = require('./src/clipboard-monitor');
 const { IPCServer } = require('./src/server');
 const { AiService } = require('./src/ai-service');
+const twitterResolver = require('./src/twitter-resolver');
 
 let mainWindow;
 let tray = null;
@@ -219,6 +220,34 @@ function createWindow() {
 // ── IPC Handlers ──────────────────────────────────────────────────────────────
 
 ipcMain.handle('add-download', async (event, opts) => {
+  // Twitter/X: a status URL is a web page, not a file — adding it directly
+  // would download the tweet's HTML. Resolve it to the real MP4 variants and
+  // show the normal quality picker instead. Guarded by isTweetUrl(), which is
+  // deliberately strict so media URLs (twimg paths contain 19-digit ids) are
+  // never mistaken for a tweet.
+  try {
+    if (opts && opts.url && twitterResolver.isTweetUrl(opts.url)) {
+      const { tweetId, videos } = await twitterResolver.resolveTweetVideos(opts.url);
+      const payload = {
+        pageUrl: opts.url,
+        pageTitle: `Tweet ${tweetId}`,
+        videos: videos.map(v => ({
+          url: v.url,
+          quality: v.quality || (v.bitrate ? `${Math.round(v.bitrate / 1000)}kbps` : 'auto'),
+          resolution: v.width && v.height ? `${v.width}x${v.height}` : null,
+          format: v.isMp4 ? 'mp4' : 'hls',
+          isMp4: v.isMp4,
+          codec: null,
+          size: null,
+        })),
+      };
+      downloadManager.emit('video-detected', payload);
+      return { twitterResolved: true, tweetId, videos: payload.videos };
+    }
+  } catch (e) {
+    // Resolution failed (image-only tweet, deleted, offline…). Fall through and
+    // let the URL be added normally rather than silently swallowing the request.
+  }
   return downloadManager.addDownload(opts);
 });
 

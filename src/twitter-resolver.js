@@ -77,6 +77,16 @@ function extractTweetId(input) {
   return m ? m[1] : null;
 }
 
+// Strict "is this a tweet permalink?" test. Unlike extractTweetId this does NOT
+// fall back to matching any long digit run, because media URLs such as
+// video.twimg.com/ext_tw_video/1001551417340022785/... also contain 19-digit
+// ids and must not be mistaken for a tweet.
+function isTweetUrl(input) {
+  if (!input) return false;
+  return /^https?:\/\/(?:www\.|mobile\.)?(?:twitter\.com|x\.com)\//i.test(String(input).trim()) &&
+         /\/status(?:es)?\/\d{5,25}/i.test(String(input));
+}
+
 function httpsGetJson(url, { timeoutMs = 15000, headers = {} } = {}) {
   return new Promise((resolve, reject) => {
     let parsed;
@@ -197,6 +207,7 @@ module.exports = {
   resolveTweetVideos,
   pickBestVariant,
   extractTweetId,
+  isTweetUrl,
   syndicationToken,
   variantsFromSyndication,
 };
