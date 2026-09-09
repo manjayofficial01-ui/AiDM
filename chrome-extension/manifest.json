@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "AiDM - Download Manager",
   "description": "Intercept downloads and send them to AiDM Download Manager. Supports video detection, batch downloads, and one-click acceleration.",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "permissions": [
     "downloads",
     "downloads.open",

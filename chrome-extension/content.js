@@ -21,6 +21,7 @@
     /stream.*video/i,
     /video.*cdn/i,
     /\.cdn\./i,
+    /twimg\.com/i,        // Twitter / X video CDN (direct MP4 variants)
   ];
 
   // Xtream-Codes style streams: /live|movie|series/user/pass/id.ext
@@ -270,6 +271,22 @@
     // Extract format from URL
     const extMatch = url.match(/\.(\w{2,4})(\?|#|$)/);
     if (extMatch) info.format = extMatch[1].toLowerCase();
+
+    // Twitter / X: the MP4 variant's resolution is encoded in its path, e.g.
+    // .../ext_tw_video/.../pu/vid/1280x720/<id>.mp4  →  720p.
+    const twRes = url.match(/\/vid\/(\d{2,5})x(\d{2,5})/i);
+    if (twRes) {
+      const h = parseInt(twRes[2], 10);
+      const label = h + 'p';
+      if (QUALITY_MAP[label]) {
+        info.quality = label;
+        info.resolution = QUALITY_MAP[label].resolution;
+      } else {
+        info.quality = label;
+        info.resolution = parseInt(twRes[1], 10) + 'x' + h;
+      }
+      info.encrypted = false;
+    }
 
     // Try URL parameters for quality hints
     const qualityPatterns = [

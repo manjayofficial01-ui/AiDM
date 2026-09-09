@@ -1,4 +1,5 @@
 const http = require('http');
+const twitterResolver = require('./twitter-resolver.js');
 
 // Headers the extension is allowed to attach to a download so the desktop
 // engine can replay anti-hotlink checks (Referer/Origin/UA). Everything
@@ -46,7 +47,7 @@ class IPCServer {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           status: 'running',
-          version: '2.1.0',
+          version: require('../package.json').version,
           name: 'AiDM',
           downloads: this.dm.getAllDownloads().length,
           active: this.dm.getAllDownloads().filter(d => d.status === 'downloading').length,
@@ -115,6 +116,48 @@ class IPCServer {
           } catch (err) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: err.message }));
+          }
+        });
+        return;
+      }
+
+      // POST /api/resolve-twitter — resolve a tweet URL to direct MP4 variants
+      // Body: { url: "https://x.com/<user>/status/<id>" }
+      //
+      // X hides the direct MP4s inside its GraphQL/syndication metadata rather
+      // than exposing them to the page, and the syndication endpoint is NOT
+      // reachable from page JS (CORS is limited to platform.twitter.com). So
+      // the extension hands us the tweet URL and we resolve it here in Node,
+      // then emit `video-detected` so the UI shows the normal quality picker.
+      if (req.method === 'POST' && req.url === '/api/resolve-twitter') {
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', async () => {
+          try {
+            const { url, pageTitle } = JSON.parse(body || '{}');
+            const { tweetId, videos } = await twitterResolver.resolveTweetVideos(url);
+
+            // Shape matches what /api/video-detected sends to the UI.
+            const payload = {
+              pageUrl: url,
+              pageTitle: pageTitle || `Tweet ${tweetId}`,
+              videos: videos.map(v => ({
+                url: v.url,
+                quality: v.quality || (v.bitrate ? `${Math.round(v.bitrate / 1000)}kbps` : 'auto'),
+                resolution: v.width && v.height ? `${v.width}x${v.height}` : null,
+                format: v.isMp4 ? 'mp4' : 'hls',
+                isMp4: v.isMp4,
+                codec: null,
+                size: null,
+              })),
+            };
+            this.dm.emit('video-detected', payload);
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, tweetId, videos: payload.videos }));
+          } catch (err) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: err.message }));
           }
         });
         return;

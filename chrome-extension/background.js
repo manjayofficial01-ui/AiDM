@@ -69,6 +69,44 @@ try {
   chrome.tabs.onRemoved.addListener((tabId) => { tabStreams.delete(tabId); });
 } catch (e) {}
 
+// ── Twitter / X tweet pages ────────────────────────────────────────────────
+// X does not expose the direct MP4 URLs to the page (they live in GraphQL /
+// syndication metadata), and the syndication endpoint is CORS-restricted to
+// platform.twitter.com so page JS can't read it. Instead of sniffing, we hand
+// the tweet URL to the AiDM app, which resolves the real MP4 variants
+// server-side with no login required. This works even when the timeline JSON
+// is server-rendered or compressed — the usual reason detection fails.
+const TWEET_URL_RE = /^https?:\/\/(?:www\.|mobile\.)?(?:twitter\.com|x\.com)\/(?:i\/web\/)?(?:[^/]+\/)?status(?:es)?\/(\d{5,25})/i;
+const resolvedTweets = new Map(); // tweetId -> last attempt time
+const TWEET_RETRY_MS = 60 * 1000;
+
+function maybeResolveTweet(url) {
+  try {
+    if (!url) return;
+    const m = TWEET_URL_RE.exec(url);
+    if (!m) return;
+    const tweetId = m[1];
+    const now = Date.now();
+    const last = resolvedTweets.get(tweetId) || 0;
+    if (now - last < TWEET_RETRY_MS) return;
+    resolvedTweets.set(tweetId, now);
+
+    fetch(`${AIDM_API}/api/resolve-twitter`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    }).catch(() => {
+      resolvedTweets.delete(tweetId); // app not running — allow a retry later
+    });
+  } catch (e) { /* swallow */ }
+}
+
+try {
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (changeInfo.status === 'complete' && tab && tab.url) maybeResolveTweet(tab.url);
+  });
+} catch (e) { /* tabs API unavailable */ }
+
 function getTabStreams(tabId) {
   const now = Date.now();
   return (tabStreams.get(tabId) || [])

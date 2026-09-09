@@ -2,9 +2,41 @@ const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { URL } = require('url');
 const { v4: uuidv4 } = require('uuid');
 const { EventEmitter } = require('events');
+
+/**
+ * Parse the first #EXT-X-KEY tag of an HLS playlist.
+ * Returns { method, uri, iv, keyformat } or null when the playlist is clear.
+ * METHODS: NONE (clear), AES-128 (decryptable), SAMPLE-AES (DRM - unsupported).
+ */
+function parseHlsKey(text) {
+  const m = String(text || '').match(/#EXT-X-KEY:([^\r\n]*)/i);
+  if (!m) return null;
+  const attrs = m[1];
+  const get = (name) => {
+    const re = new RegExp(name + '\\s*=\\s*(?:"([^"]*)"|([^,]*))', 'i');
+    const mm = attrs.match(re);
+    if (!mm) return null;
+    return mm[1] !== undefined ? mm[1] : (mm[2] !== undefined ? mm[2].trim() : null);
+  };
+  return {
+    method: (get('METHOD') || 'NONE').toUpperCase(),
+    uri: get('URI'),
+    iv: get('IV'),
+    keyformat: get('KEYFORMAT'),
+  };
+}
+
+/**
+ * Read #EXT-X-MEDIA-SEQUENCE (used to derive implicit AES IVs).
+ */
+function parseHlsMediaSequence(text) {
+  const m = String(text || '').match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/i);
+  return m ? parseInt(m[1], 10) : 0;
+}
 
 /**
  * AiDM Multi-Segment Download Engine
@@ -470,7 +502,9 @@ class DownloadEngine extends EventEmitter {
             }
             return;
           }
-          if (res.statusCode !== 200) {
+          // 2xx are all successes: 200 = whole body, 206 = partial content
+          // (returned when we ask for a byte range with `Range:`).
+          if (res.statusCode < 200 || res.statusCode >= 300) {
             res.resume();
             reject(new Error(`HTTP ${res.statusCode} for ${currentUrl}`));
             return;
@@ -479,7 +513,7 @@ class DownloadEngine extends EventEmitter {
           res.on('data', (c) => chunks.push(c));
           res.on('end', () => {
             const buf = Buffer.concat(chunks);
-            resolve({ buf, text: buf.toString('utf8'), finalUrl: currentUrl });
+            resolve({ buf, text: buf.toString('utf8'), finalUrl: currentUrl, status: res.statusCode });
           });
           res.on('error', reject);
         });
@@ -557,7 +591,24 @@ class DownloadEngine extends EventEmitter {
 
       // 2. Master playlist? Pick the highest-resolution variant.
       if (/#EXT-X-STREAM-INF/i.test(text)) {
-        if (/#EXT-X-SESSION-KEY/i.test(text)) return fail('DRM-protected stream is not supported');
+        // #EXT-X-SESSION-KEY is only DRM when it isn't plain AES-128. Twitter/X
+        // master playlists carry SESSION-KEY:METHOD=AES-128, which is decryptable,
+        // so only refuse genuine DRM (SAMPLE-AES / custom key systems).
+        const skm = text.match(/#EXT-X-SESSION-KEY:([^\r\n]*)/i);
+        if (skm) {
+          const getA = (name) => {
+            const re = new RegExp(name + '\\s*=\\s*(?:"([^"]*)"|([^,]*))', 'i');
+            const mm = skm[1].match(re);
+            if (!mm) return null;
+            return mm[1] !== undefined ? mm[1] : (mm[2] !== undefined ? mm[2].trim() : null);
+          };
+          const sm = (getA('METHOD') || 'NONE').toUpperCase();
+          const skf = (getA('KEYFORMAT') || 'identity').toLowerCase();
+          const isPlainAes = sm === 'AES-128' && (skf === 'identity' || skf === '' || skf === 'null');
+          if (sm !== 'NONE' && !isPlainAes) {
+            return fail('DRM-protected stream is not supported');
+          }
+        }
         const variants = parseHlsMaster(text, baseUrl);
         if (!variants.length) return fail('Stream playlist has no playable variants');
         variants.sort((a, b) => (b.height - a.height) || (b.bandwidth - a.bandwidth));
@@ -572,16 +623,52 @@ class DownloadEngine extends EventEmitter {
         baseUrl = fetched.finalUrl;
       }
 
-      // 3. Refuse encrypted and live streams
-      if (/#EXT-X-KEY/i.test(text)) return fail('Encrypted stream (AES-128/DRM) is not supported');
+      // 3. Encryption. Ordinary AES-128 with a fetchable key IS supported —
+      //    that's exactly what Twitter/X (and many CDNs) serve. Only genuine
+      //    DRM (SAMPLE-AES / custom KEYFORMAT) is refused.
+      const keyInfo = parseHlsKey(text);
+      let aesKey = null;
+      let aesIv = null;
+      if (keyInfo && keyInfo.method !== 'NONE') {
+        const kf = (keyInfo.keyformat || 'identity').toLowerCase();
+        if (keyInfo.method === 'AES-128' && (kf === 'identity' || kf === '' || kf === 'null')) {
+          if (!keyInfo.uri) return fail('Encrypted stream (AES-128) has no key URI');
+          let keyUrl;
+          try { keyUrl = new URL(keyInfo.uri, baseUrl).href; }
+          catch (e) { return fail('Encrypted stream has an invalid key URI'); }
+          try {
+            const kr = await this._fetchUrl(keyUrl, { headers, onRequest: trackReq });
+            if (!kr.buf || kr.buf.length < 16) return fail('Invalid AES-128 key (expected 16 bytes)');
+            aesKey = kr.buf.slice(0, 16);
+          } catch (err) {
+            return fail('Could not fetch decryption key: ' + err.message);
+          }
+          download.currentReq = null;
+          if (download.cancelled || download.status === 'paused') return;
+          if (keyInfo.iv) {
+            const ivBuf = Buffer.from(String(keyInfo.iv).replace(/^0x/i, ''), 'hex');
+            if (ivBuf.length === 16) aesIv = ivBuf;
+          }
+        } else {
+          return fail('Unsupported stream protection: ' + keyInfo.method +
+            (kf && kf !== 'identity' ? ' (' + kf + ')' : '') + ' — DRM is not supported');
+        }
+      }
+
       if (!/#EXT-X-ENDLIST/i.test(text)) return fail('Live streams are not supported — only finished videos');
 
-      const { mapUri, segs } = parseHlsMedia(text, baseUrl);
+      const { mapUri, mapRange, segs } = parseHlsMedia(text, baseUrl);
+      const mediaSeq = parseHlsMediaSequence(text);
       if (!segs.length) return fail('Stream playlist contains no segments');
       if (segs.length > 5000) return fail('Stream too long (>5000 segments)');
 
-      // 4. Download init segment + media segments sequentially, append to .ts
-      const queue = mapUri ? [mapUri, ...segs] : segs;
+      // 4. Download init segment + media segments sequentially, append to .ts.
+      //    Every queue entry is `{url, range}`; `range` is set for
+      //    #EXT-X-BYTERANGE segments, which must be fetched with a Range header
+      //    instead of downloading the whole underlying resource each time.
+      const queue = [];
+      if (mapUri) queue.push({ url: mapUri, range: mapRange });
+      for (const s of segs) queue.push(s);
       const fd = fs.openSync(filepath, 'w');
       let writePos = 0;
       try {
@@ -589,11 +676,23 @@ class DownloadEngine extends EventEmitter {
           if (download.cancelled || download.status === 'paused') return;
           let buf = null;
           let lastErr = null;
+          const seg = queue[i];
           for (let attempt = 0; attempt < 3; attempt++) {
             try {
-              const r = await this._fetchUrl(queue[i], { headers, timeoutMs: 45000, onRequest: trackReq });
+              const segHeaders = seg.range
+                ? Object.assign({}, headers, {
+                    Range: `bytes=${seg.range.offset}-${seg.range.offset + seg.range.length - 1}`,
+                  })
+                : headers;
+              const r = await this._fetchUrl(seg.url, { headers: segHeaders, timeoutMs: 45000, onRequest: trackReq });
               download.currentReq = null;
               buf = r.buf;
+              // Some CDNs ignore `Range:` and answer 200 with the whole
+              // resource. Carve out the requested sub-range ourselves so the
+              // assembled stream stays byte-correct.
+              if (seg.range && r.status !== 206 && buf.length > seg.range.length) {
+                buf = buf.slice(seg.range.offset, seg.range.offset + seg.range.length);
+              }
               break;
             } catch (err) {
               lastErr = err;
@@ -602,6 +701,24 @@ class DownloadEngine extends EventEmitter {
             }
           }
           if (!buf) return fail(`Segment ${i + 1}/${queue.length} failed: ${lastErr ? lastErr.message : 'unknown error'}`);
+
+          // AES-128: decrypt this segment before writing. The init/map segment
+          // (when present) is never encrypted, so skip index 0 in that case.
+          if (aesKey && !(mapUri && i === 0)) {
+            const seqIndex = mapUri ? i - 1 : i;
+            let iv = aesIv;
+            if (!iv) {
+              iv = Buffer.alloc(16);
+              iv.writeUInt32BE(mediaSeq + seqIndex, 12);
+            }
+            try {
+              const decipher = crypto.createDecipheriv('aes-128-cbc', aesKey, iv);
+              buf = Buffer.concat([decipher.update(buf), decipher.final()]);
+            } catch (e) {
+              return fail('Failed to decrypt segment ' + (seqIndex + 1) + ': ' + e.message);
+            }
+          }
+
           fs.writeSync(fd, buf, 0, buf.length, writePos);
           writePos += buf.length;
           download.downloadedSize = writePos;
@@ -661,29 +778,78 @@ function parseHlsMaster(text, baseUrl) {
 }
 
 /**
- * Parse an HLS media playlist into init-segment + segment URLs.
- * @returns { mapUri: string|null, segs: string[] }
+ * Parse `#EXT-X-BYTERANGE:<n>[@<o>]`.
+ * Per RFC 8216 4.3.2.2: when the offset is omitted, the sub-range starts at
+ * the byte right after the previous byte-ranged segment (0 if there is none).
+ * @param {string} line   the raw playlist line
+ * @param {number} fallbackOffset offset to use when `@<o>` is absent
+ * @returns {{length:number, offset:number}|null}
+ */
+function parseHlsByterange(line, fallbackOffset) {
+  const m = /^#EXT-X-BYTERANGE:(\d+)(?:@(\d+))?\s*$/i.exec(String(line || '').trim());
+  if (!m) return null;
+  const length = parseInt(m[1], 10);
+  if (!Number.isFinite(length) || length < 0) return null;
+  const offset = m[2] !== undefined ? parseInt(m[2], 10) : (Number.isFinite(fallbackOffset) ? fallbackOffset : 0);
+  if (!Number.isFinite(offset) || offset < 0) return null;
+  return { length, offset };
+}
+
+/**
+ * Parse an HLS media playlist into an init segment + media segments.
+ *
+ * Segments are returned as descriptors rather than bare strings, because a
+ * segment may be a byte sub-range of a larger resource (`#EXT-X-BYTERANGE`).
+ * Twitter/X and several CDNs serve playlists like that, and downloading the
+ * whole resource for each segment would produce a corrupt file.
+ *
+ * @returns {{ mapUri: string|null, mapRange: {length:number,offset:number}|null,
+ *             segs: Array<{url:string, range:{length:number,offset:number}|null}> }}
  */
 function parseHlsMedia(text, baseUrl) {
   const lines = String(text || '').split('\n');
   let mapUri = null;
+  let mapRange = null;
   const segs = [];
+  let pendingRange = null;
+  let nextOffset = 0; // rolling offset for `@`-less byte ranges
+
   for (const raw of lines) {
     const line = raw.trim();
     if (!line) continue;
+
     if (line.toUpperCase().startsWith('#EXT-X-MAP:')) {
       const m = /URI="([^"]+)"/i.exec(line);
       if (m) {
         try { mapUri = new URL(m[1], baseUrl).toString(); } catch (e) {}
+        // #EXT-X-MAP may carry its own BYTERANGE="<n>[@<o>]" attribute.
+        const br = /BYTERANGE="(\d+)(?:@(\d+))?"/i.exec(line);
+        if (br) {
+          const length = parseInt(br[1], 10);
+          const offset = br[2] !== undefined ? parseInt(br[2], 10) : 0;
+          if (Number.isFinite(length) && Number.isFinite(offset)) mapRange = { length, offset };
+        }
       }
       continue;
     }
+
+    if (line.toUpperCase().startsWith('#EXT-X-BYTERANGE:')) {
+      const r = parseHlsByterange(line, nextOffset);
+      if (r) {
+        pendingRange = r;
+        nextOffset = r.offset + r.length;
+      }
+      continue;
+    }
+
     if (line.startsWith('#')) continue;
+
     try {
-      segs.push(new URL(line, baseUrl).toString());
+      segs.push({ url: new URL(line, baseUrl).toString(), range: pendingRange });
     } catch (e) {}
+    pendingRange = null;
   }
-  return { mapUri, segs };
+  return { mapUri, mapRange, segs };
 }
 
-module.exports = { DownloadEngine, parseHlsMaster, parseHlsMedia };
+module.exports = { DownloadEngine, parseHlsMaster, parseHlsMedia, parseHlsKey, parseHlsMediaSequence };
