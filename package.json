@@ -1,0 +1,70 @@
+{
+  "name": "aidm",
+  "version": "2.1.0",
+  "description": "AiDM - AI-Powered Download Manager | Classic IDM-style UI with modern tech",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder --win",
+    "dist:win": "electron-builder --win nsis"
+  },
+  "keywords": [
+    "download-manager",
+    "electron",
+    "idm",
+    "multi-thread",
+    "chrome-extension"
+  ],
+  "author": "AiDM",
+  "license": "MIT",
+  "dependencies": {
+    "mime-types": "^2.1.35",
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "electron": "^28.3.3",
+    "electron-builder": "^26.15.3",
+    "png-to-ico": "^3.0.2"
+  },
+  "build": {
+    "appId": "com.aidm.app",
+    "productName": "AiDM",
+    "copyright": "Copyright (c) 2026 AiDM",
+    "files": [
+      "main.js",
+      "preload.js",
+      "package.json",
+      "src/**/*",
+      "ui/**/*",
+      "build/icon.ico"
+    ],
+    "extraResources": [
+      {
+        "from": "chrome-extension/",
+        "to": "chrome-extension/",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.ico",
+      "artifactName": "AiDM-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "allowElevation": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "AiDM",
+      "uninstallDisplayName": "AiDM Download Manager",
+      "deleteAppDataOnUninstall": false
+    }
+  }
+}

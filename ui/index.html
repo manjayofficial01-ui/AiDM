@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AiDM - Download Manager</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Title Bar -->
+  <div class="titlebar" id="titlebar">
+    <div class="titlebar-left">
+      <div class="app-icon"><img src="icon.png" class="app-icon-img" alt="AiDM"></div>
+      <span class="app-title">AiDM <span class="app-subtitle">Download Manager</span></span>
+    </div>
+    <div class="titlebar-controls">
+      <button class="title-btn" id="btn-minimize" title="Minimize">─</button>
+      <button class="title-btn" id="btn-maximize" title="Maximize">□</button>
+      <button class="title-btn btn-close" id="btn-close" title="Close">✕</button>
+    </div>
+  </div>
+
+  <!-- Toolbar -->
+  <div class="toolbar">
+    <div class="toolbar-group">
+      <button class="tool-btn primary" id="btn-add-url" title="Add URL (Ctrl+N)">
+        <span class="btn-icon">＋</span> Add URL
+      </button>
+      <button class="tool-btn" id="btn-pause-all" title="Pause All">
+        <span class="btn-icon">⏸</span> Pause All
+      </button>
+      <button class="tool-btn" id="btn-resume-all" title="Resume All">
+        <span class="btn-icon">▶</span> Resume All
+      </button>
+      <button class="tool-btn" id="btn-delete" title="Remove selected from list (Del)">
+        <span class="btn-icon">🗑</span> Delete
+      </button>
+      <button class="tool-btn" id="btn-delete-all" title="Remove all downloads from list">
+        <span class="btn-icon">🧹</span> Delete All
+      </button>
+      <button class="tool-btn" id="btn-refresh" title="Refresh list (F5)">
+        <span class="btn-icon">🔄</span> Refresh
+      </button>
+    </div>
+    <div class="toolbar-group">
+      <div class="speed-display">
+        <span class="speed-label">Speed:</span>
+        <span class="speed-value" id="total-speed">0 B/s</span>
+      </div>
+      <div class="status-display">
+        <span class="status-label">Active:</span>
+        <span class="status-value" id="active-count">0</span>
+      </div>
+    </div>
+    <div class="toolbar-group">
+      <button class="tool-btn" id="btn-ai-assistant" title="AI Assistant (TokenHarbor)">
+        <span class="btn-icon">✨</span> AI Assistant
+      </button>
+      <button class="tool-btn" id="btn-settings" title="Settings">
+        <span class="btn-icon">⚙</span> Settings
+      </button>
+    </div>
+  </div>
+
+  <!-- Main Content -->
+  <div class="main-content">
+    <!-- Category Sidebar -->
+    <div class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">CATEGORIES</div>
+        <div class="sidebar-item active" data-category="all">
+          <span class="cat-icon">📁</span> All Downloads
+          <span class="cat-count" id="count-all">0</span>
+        </div>
+        <div class="sidebar-item" data-category="downloading">
+          <span class="cat-icon">⬇️</span> Downloading
+          <span class="cat-count" id="count-active">0</span>
+        </div>
+        <div class="sidebar-item" data-category="completed">
+          <span class="cat-icon">✅</span> Completed
+          <span class="cat-count" id="count-completed">0</span>
+        </div>
+        <div class="sidebar-item" data-category="queued">
+          <span class="cat-icon">📋</span> Queued
+          <span class="cat-count" id="count-queued">0</span>
+        </div>
+        <div class="sidebar-item" data-category="pending">
+          <span class="cat-icon">⏳</span> Pending
+          <span class="cat-count" id="count-pending">0</span>
+        </div>
+        <div class="sidebar-item" data-category="error">
+          <span class="cat-icon">❌</span> Errors
+          <span class="cat-count" id="count-error">0</span>
+        </div>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-title">FILE TYPES</div>
+        <div class="sidebar-item" data-category="video">
+          <span class="cat-icon">🎬</span> Videos
+        </div>
+        <div class="sidebar-item" data-category="audio">
+          <span class="cat-icon">🎵</span> Music
+        </div>
+        <div class="sidebar-item" data-category="document">
+          <span class="cat-icon">📄</span> Documents
+        </div>
+        <div class="sidebar-item" data-category="archive">
+          <span class="cat-icon">📦</span> Archives
+        </div>
+        <div class="sidebar-item" data-category="software">
+          <span class="cat-icon">💿</span> Software
+        </div>
+      </div>
+    </div>
+
+    <!-- Download List -->
+    <div class="download-area">
+      <div class="search-bar">
+        <input type="text" id="search-input" placeholder="🔍 Search downloads..." />
+      </div>
+
+      <div class="download-table-container">
+        <table class="download-table" id="download-table">
+          <thead>
+            <tr>
+              <th class="col-check"><input type="checkbox" id="select-all" /></th>
+              <th class="col-name" data-col="name">File Name<span class="col-resizer" title="Drag to resize • Double-click to reset"></span></th>
+              <th class="col-size" data-col="size">Size<span class="col-resizer" title="Drag to resize • Double-click to reset"></span></th>
+              <th class="col-progress" data-col="progress">Progress<span class="col-resizer" title="Drag to resize • Double-click to reset"></span></th>
+              <th class="col-speed" data-col="speed">Speed<span class="col-resizer" title="Drag to resize • Double-click to reset"></span></th>
+              <th class="col-status" data-col="status">Status<span class="col-resizer" title="Drag to resize • Double-click to reset"></span></th>
+              <th class="col-actions" data-col="actions">Actions<span class="col-resizer" title="Drag to resize • Double-click to reset"></span></th>
+            </tr>
+          </thead>
+          <tbody id="download-list"></tbody>
+        </table>
+        <div class="empty-state" id="empty-state">
+          <div class="empty-icon">⬇️</div>
+          <div class="empty-text">No downloads yet</div>
+          <div class="empty-hint">Click "Add URL", paste a link, or browse the web — AiDM will intercept downloads automatically</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Status Bar -->
+  <div class="status-bar">
+    <div class="status-left">
+      <span class="status-item" id="status-total">Total: 0 files</span>
+      <span class="status-item" id="status-downloaded">Completed: 0</span>
+    </div>
+    <div class="status-right">
+      <span class="status-item clipboard-indicator" id="clipboard-status">
+        📋 Clipboard: <span class="indicator-dot active"></span>
+      </span>
+      <span class="status-item" id="status-connection">🔌 Extension: Connected</span>
+    </div>
+  </div>
+
+  <!-- ═══ MODALS ═══════════════════════════════════════════════════════════ -->
+
+  <!-- Add URL Modal -->
+  <div class="modal-overlay" id="modal-overlay" style="display:none;">
+    <div class="modal" id="add-url-modal">
+      <div class="modal-header">
+        <h3>⬇️ Add New Download</h3>
+        <button class="modal-close" id="modal-close">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>Download URL</label>
+          <input type="text" id="input-url" placeholder="https://example.com/file.zip" />
+        </div>
+        <div class="form-row">
+        <div class="form-group">
+          <label>File Name</label>
+          <div class="path-input">
+            <input type="text" id="input-filename" placeholder="Auto-detect" />
+            <button class="tool-btn small" id="btn-ai-filename" title="Suggest clean filename with AI">✨</button>
+          </div>
+        </div>
+          <div class="form-group">
+            <label>Segments</label>
+            <select id="input-segments">
+              <option value="1">1 (Stable)</option>
+              <option value="2">2</option>
+              <option value="4">4</option>
+              <option value="8" selected>8 (Recommended)</option>
+              <option value="16">16 (Fast)</option>
+              <option value="32">32 (Max)</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Category</label>
+          <select id="input-category">
+            <option value="auto">Auto-detect</option>
+            <option value="video">🎬 Video</option>
+            <option value="audio">🎵 Music</option>
+            <option value="document">📄 Document</option>
+            <option value="archive">📦 Archive</option>
+            <option value="software">💿 Software</option>
+            <option value="image">🖼️ Image</option>
+            <option value="other">📁 Other</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Save To</label>
+          <div class="path-input">
+            <input type="text" id="input-savepath" placeholder="Default folder (based on category)" />
+            <button class="tool-btn small" id="btn-browse">Browse</button>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="tool-btn" id="btn-cancel-add">Cancel</button>
+        <button class="tool-btn primary" id="btn-start-download">⬇️ Start Download</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Video Quality Picker Modal -->
+  <div class="modal-overlay" id="quality-overlay" style="display:none;">
+    <div class="modal quality-modal">
+      <div class="modal-header">
+        <h3>🎬 Select Video Quality</h3>
+        <button class="modal-close" id="quality-close">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="quality-page-info">
+          <div class="quality-page-title" id="quality-page-title"></div>
+          <div class="quality-page-url" id="quality-page-url"></div>
+        </div>
+        <div class="quality-list" id="quality-list">
+          <!-- Quality options populated by JS -->
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="tool-btn" id="btn-cancel-quality">Cancel</button>
+        <button class="tool-btn primary" id="btn-download-quality" disabled>⬇️ Download Selected</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Folder Approval Modal (for ask-every-time) -->
+  <div class="modal-overlay" id="approval-overlay" style="display:none;">
+    <div class="modal approval-modal">
+      <div class="modal-header">
+        <h3>📁 Choose Download Location</h3>
+        <button class="modal-close" id="approval-close">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="approval-file-info">
+          <div class="form-group">
+            <label>File name — edit, type a new one, or paste</label>
+            <div class="path-input">
+              <input type="text" id="approval-filename" spellcheck="false" autocomplete="off" />
+              <button class="tool-btn small" id="btn-approval-paste" title="Paste name from clipboard">📋 Paste</button>
+              <button class="tool-btn small" id="btn-approval-reset" title="Restore the detected file name">↺ Reset</button>
+            </div>
+            <div class="approval-hint" id="approval-filename-hint"></div>
+          </div>
+          <div class="approval-category" id="approval-category"></div>
+        </div>
+        <div class="form-group">
+          <label>Save to folder</label>
+          <div class="path-input">
+            <input type="text" id="approval-savepath" />
+            <button class="tool-btn small" id="btn-browse-approval">Browse</button>
+          </div>
+        </div>
+        <div class="form-group toggle" style="margin-top:8px;">
+          <label>Remember for this category</label>
+          <input type="checkbox" id="approval-remember" />
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="tool-btn" id="btn-reject-approval">Cancel</button>
+        <button class="tool-btn primary" id="btn-approve">✅ Start Download</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings Modal -->
+  <div class="modal-overlay" id="settings-overlay" style="display:none;">
+    <div class="modal settings-modal">
+      <div class="modal-header">
+        <h3>⚙ Settings</h3>
+        <button class="modal-close" id="settings-close">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="settings-section">
+          <h4>Download Settings</h4>
+          <div class="form-group">
+            <label>Max Concurrent Downloads</label>
+            <input type="number" id="setting-concurrent" min="1" max="10" value="3" />
+          </div>
+          <div class="form-group">
+            <label>Default Segments per File</label>
+            <select id="setting-segments">
+              <option value="4">4</option>
+              <option value="8" selected>8</option>
+              <option value="16">16</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Default Save Path (fallback)</label>
+            <div class="path-input">
+              <input type="text" id="setting-savepath" />
+              <button class="tool-btn small" id="btn-browse-settings">Browse</button>
+            </div>
+          </div>
+          <div class="form-group toggle">
+            <label>Ask download location every time</label>
+            <input type="checkbox" id="setting-ask-location" />
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <h4>Category Save Paths</h4>
+          <p class="settings-hint">Files are automatically saved to these folders based on type. Leave empty to use the default path above.</p>
+
+          <div class="category-path-row">
+            <span class="category-path-label">🎬 Videos</span>
+            <div class="path-input category-path-input">
+              <input type="text" id="cat-path-video" placeholder="Default" />
+              <button class="tool-btn small btn-browse-cat" data-cat="video">Browse</button>
+            </div>
+          </div>
+
+          <div class="category-path-row">
+            <span class="category-path-label">🎵 Music</span>
+            <div class="path-input category-path-input">
+              <input type="text" id="cat-path-audio" placeholder="Default" />
+              <button class="tool-btn small btn-browse-cat" data-cat="audio">Browse</button>
+            </div>
+          </div>
+
+          <div class="category-path-row">
+            <span class="category-path-label">📄 Documents</span>
+            <div class="path-input category-path-input">
+              <input type="text" id="cat-path-document" placeholder="Default" />
+              <button class="tool-btn small btn-browse-cat" data-cat="document">Browse</button>
+            </div>
+          </div>
+
+          <div class="category-path-row">
+            <span class="category-path-label">📦 Archives</span>
+            <div class="path-input category-path-input">
+              <input type="text" id="cat-path-archive" placeholder="Default" />
+              <button class="tool-btn small btn-browse-cat" data-cat="archive">Browse</button>
+            </div>
+          </div>
+
+          <div class="category-path-row">
+            <span class="category-path-label">💿 Software</span>
+            <div class="path-input category-path-input">
+              <input type="text" id="cat-path-software" placeholder="Default" />
+              <button class="tool-btn small btn-browse-cat" data-cat="software">Browse</button>
+            </div>
+          </div>
+
+          <div class="category-path-row">
+            <span class="category-path-label">🖼️ Images</span>
+            <div class="path-input category-path-input">
+              <input type="text" id="cat-path-image" placeholder="Default" />
+              <button class="tool-btn small btn-browse-cat" data-cat="image">Browse</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <h4>AI Assistant — TokenHarbor</h4>
+          <p class="settings-hint">OpenAI-compatible gateway at <code>https://tokenharbor.ai/v1</code>. Primary: <code>mimo-v2.5:free</code>, fallback: <code>deepseek-v4-flash:free</code>. Prefer the <code>TOKENHARBOR_API_KEY</code> env var — the field below is only a local fallback.</p>
+          <div class="form-group toggle">
+            <label>Enable AI features</label>
+            <input type="checkbox" id="setting-ai-enabled" checked />
+          </div>
+          <div class="form-group">
+            <label>Base URL</label>
+            <input type="text" id="setting-ai-baseurl" placeholder="https://tokenharbor.ai/v1" />
+          </div>
+          <div class="form-group">
+            <label>API Key (stored only in local settings file)</label>
+            <div class="path-input">
+              <input type="password" id="setting-ai-key" placeholder="thk_live_… or set TOKENHARBOR_API_KEY env var" />
+              <button class="tool-btn small" id="btn-ai-test" title="Test AI connection">Test</button>
+            </div>
+            <div class="settings-hint" id="ai-status-hint">Not tested yet.</div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Primary model</label>
+              <select id="setting-ai-primary">
+                <option value="mimo-v2.5:free">mimo-v2.5:free (reasoning)</option>
+                <option value="deepseek-v4-flash:free">deepseek-v4-flash:free (fast)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Fallback model</label>
+              <select id="setting-ai-fallback">
+                <option value="deepseek-v4-flash:free">deepseek-v4-flash:free (fast)</option>
+                <option value="mimo-v2.5:free">mimo-v2.5:free (reasoning)</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <h4>Features</h4>
+          <div class="form-group toggle">
+            <label>Clipboard Monitoring</label>
+            <input type="checkbox" id="setting-clipboard" checked />
+          </div>
+          <div class="form-group toggle">
+            <label>Browser Integration (intercept all downloads)</label>
+            <input type="checkbox" id="setting-browser" checked />
+          </div>
+          <div class="form-group toggle">
+            <label>Desktop Notifications</label>
+            <input type="checkbox" id="setting-notifications" checked />
+          </div>
+          <div class="form-group toggle">
+            <label>Auto-Resume on Restart</label>
+            <input type="checkbox" id="setting-autoresume" checked />
+          </div>
+          <div class="form-group toggle">
+            <label>Start AiDM when Windows starts</label>
+            <input type="checkbox" id="setting-launch-startup" checked />
+          </div>
+          <div class="form-group toggle">
+            <label>Keep running in tray when window is closed</label>
+            <input type="checkbox" id="setting-minimize-tray" checked />
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="tool-btn" id="btn-cancel-settings">Cancel</button>
+        <button class="tool-btn primary" id="btn-save-settings">💾 Save Settings</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- AI Assistant Modal -->
+  <div class="modal-overlay" id="ai-overlay" style="display:none;">
+    <div class="modal settings-modal">
+      <div class="modal-header">
+        <h3>✨ AI Assistant (TokenHarbor)</h3>
+        <button class="modal-close" id="ai-close">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="settings-hint" id="ai-model-hint">Primary mimo-v2.5:free → fallback deepseek-v4-flash:free</div>
+        <div id="ai-history" style="max-height:300px;overflow-y:auto;margin:10px 0;display:flex;flex-direction:column;gap:8px;"></div>
+        <div class="form-group">
+          <label>Ask about downloads, filenames, errors…</label>
+          <div class="path-input">
+            <input type="text" id="ai-input" placeholder="e.g. Why did my .zip fail with 403?" />
+            <button class="tool-btn primary small" id="btn-ai-send">Send</button>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="tool-btn" id="btn-ai-close2">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Context Menu -->
+  <div class="context-menu" id="context-menu" style="display:none;">
+    <div class="ctx-item" data-action="pause">⏸ Pause</div>
+    <div class="ctx-item" data-action="resume">▶ Resume</div>
+    <div class="ctx-item" data-action="cancel">❌ Cancel</div>
+    <div class="ctx-divider"></div>
+    <div class="ctx-item" data-action="open-file">📂 Open File</div>
+    <div class="ctx-item" data-action="open-folder">📁 Open Containing Folder</div>
+    <div class="ctx-item" data-action="copy-url">🔗 Copy URL</div>
+    <div class="ctx-divider"></div>
+    <div class="ctx-item danger" data-action="remove">🗑 Remove</div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

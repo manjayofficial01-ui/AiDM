@@ -1,0 +1,53 @@
+{
+  "manifest_version": 3,
+  "name": "AiDM - Download Manager",
+  "description": "Intercept downloads and send them to AiDM Download Manager. Supports video detection, batch downloads, and one-click acceleration.",
+  "version": "1.1.0",
+  "permissions": [
+    "downloads",
+    "downloads.open",
+    "activeTab",
+    "tabs",
+    "contextMenus",
+    "storage",
+    "notifications",
+    "webRequest",
+    "cookies"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["interceptor.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": true
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["interceptor.js"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "AiDM Download Manager"
+  },
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  }
+}
