@@ -143,7 +143,8 @@ function variantsFromSyndication(json) {
   (json.mediaDetails || []).forEach(push);
   if (json.quoted_tweet) (json.quoted_tweet.mediaDetails || []).forEach(push);
 
-  for (const media of buckets) {
+  for (let mi = 0; mi < buckets.length; mi++) {
+    const media = buckets[mi];
     const variants = (media && media.video_info && media.video_info.variants) || [];
     for (const v of variants) {
       const url = v && v.url;
@@ -161,6 +162,7 @@ function variantsFromSyndication(json) {
         width: res ? res.width : 0,
         height: res ? res.height : 0,
         quality: res ? `${res.height}p` : null,
+        mediaIndex: mi, // which attachment of the tweet this belongs to
       });
     }
   }
@@ -180,6 +182,16 @@ function variantsFromSyndication(json) {
  * @param {string} input  tweet URL or numeric id
  * @returns {Promise<{tweetId: string, videos: Array}>}
  */
+// Keep a suggested filename filesystem-safe and reasonably short.
+function safeName(s, fallback) {
+  const cleaned = String(s || '')
+    .replace(/[^\w.-]+/g, '_')
+    .replace(/_{2,}/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 60);
+  return cleaned || fallback;
+}
+
 async function resolveTweetVideos(input) {
   const tweetId = extractTweetId(input);
   if (!tweetId) throw new Error('Not a Twitter/X status URL');
@@ -191,7 +203,48 @@ async function resolveTweetVideos(input) {
   const json = await httpsGetJson(url);
   const videos = variantsFromSyndication(json);
   if (!videos.length) throw new Error('No video found on this tweet (it may be image-only, age-restricted, or deleted)');
-  return { tweetId, videos };
+
+  // Twitter's real filenames are opaque hashes (e.g. Du6ODfDSnDJ3rQqd.mp4),
+  // which is useless in a download folder. Suggest something meaningful:
+  //   twitter_<author>_<tweetId>_<720p>.mp4
+  const author = safeName(json && json.user && json.user.screen_name, 'unknown');
+  // A tweet can hold up to 4 videos — without the attachment number they would
+  // all get the same filename and overwrite each other on disk.
+  const mediaCount = new Set(videos.map(v => v.mediaIndex || 0)).size;
+  videos.forEach(v => {
+    const tag = v.height ? `${v.height}p` : (v.bitrate ? `${Math.round(v.bitrate / 1000)}k` : 'auto');
+    const part = mediaCount > 1 ? `_v${(v.mediaIndex || 0) + 1}` : '';
+    v.filename = `twitter_${author}_${tweetId}${part}_${tag}.${v.isMp4 ? 'mp4' : 'm3u8'}`;
+  });
+
+  return { tweetId, videos, author };
+}
+
+/**
+ * Convert resolver variants into the shape the UI's quality picker expects.
+ * Single source of truth — used by both the HTTP API and the add-download IPC.
+ *
+ * A tweet can carry several videos (up to 4). Without a marker the picker would
+ * list e.g. 12 entries all reading "720p" with no way to tell them apart, so we
+ * prefix the resolution with "Video N" whenever there is more than one.
+ */
+function toPickerVideos(videos) {
+  const list = videos || [];
+  const mediaCount = new Set(list.map(v => v.mediaIndex || 0)).size;
+  return list.map(v => {
+    const res = v.width && v.height ? `${v.width}x${v.height}` : '';
+    const prefix = mediaCount > 1 ? `Video ${(v.mediaIndex || 0) + 1}` : '';
+    return {
+      url: v.url,
+      filename: v.filename,
+      quality: v.quality || (v.bitrate ? `${Math.round(v.bitrate / 1000)}kbps` : 'auto'),
+      resolution: prefix ? (res ? `${prefix} · ${res}` : prefix) : (res || null),
+      format: v.isMp4 ? 'mp4' : 'hls',
+      isMp4: v.isMp4,
+      codec: null,
+      size: null,
+    };
+  });
 }
 
 /**
@@ -205,6 +258,7 @@ function pickBestVariant(videos) {
 
 module.exports = {
   resolveTweetVideos,
+  toPickerVideos,
   pickBestVariant,
   extractTweetId,
   isTweetUrl,

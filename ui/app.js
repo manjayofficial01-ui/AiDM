@@ -677,6 +677,9 @@ async function downloadSelectedQuality() {
 
   await window.aidm.addDownload({
     url: video.url,
+    // Twitter's own filenames are opaque hashes; the resolver suggests a
+    // readable one (twitter_<author>_<id>_<720p>.mp4) when it has one.
+    filename: video.filename || undefined,
     quality: {
       label: video.quality?.toUpperCase() || 'Unknown',
       resolution: video.resolution,

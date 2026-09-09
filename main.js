@@ -231,15 +231,7 @@ ipcMain.handle('add-download', async (event, opts) => {
       const payload = {
         pageUrl: opts.url,
         pageTitle: `Tweet ${tweetId}`,
-        videos: videos.map(v => ({
-          url: v.url,
-          quality: v.quality || (v.bitrate ? `${Math.round(v.bitrate / 1000)}kbps` : 'auto'),
-          resolution: v.width && v.height ? `${v.width}x${v.height}` : null,
-          format: v.isMp4 ? 'mp4' : 'hls',
-          isMp4: v.isMp4,
-          codec: null,
-          size: null,
-        })),
+        videos: twitterResolver.toPickerVideos(videos),
       };
       downloadManager.emit('video-detected', payload);
       return { twitterResolved: true, tweetId, videos: payload.videos };

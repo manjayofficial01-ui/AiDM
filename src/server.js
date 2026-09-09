@@ -139,17 +139,10 @@ class IPCServer {
 
             // Shape matches what /api/video-detected sends to the UI.
             const payload = {
+              url,
               pageUrl: url,
               pageTitle: pageTitle || `Tweet ${tweetId}`,
-              videos: videos.map(v => ({
-                url: v.url,
-                quality: v.quality || (v.bitrate ? `${Math.round(v.bitrate / 1000)}kbps` : 'auto'),
-                resolution: v.width && v.height ? `${v.width}x${v.height}` : null,
-                format: v.isMp4 ? 'mp4' : 'hls',
-                isMp4: v.isMp4,
-                codec: null,
-                size: null,
-              })),
+              videos: twitterResolver.toPickerVideos(videos),
             };
             this.dm.emit('video-detected', payload);
 
