@@ -1216,6 +1216,135 @@
     return !video.paused && !video.ended && video.readyState > 2;
   }
 
+  // ── Playback gate ──────────────────────────────────────────────────────────
+  // The capsule is strictly playback-gated: it must NEVER appear on page load,
+  // on hover, or on a Play click. It appears only once the element fires
+  // `playing` (i.e. frames are really being produced) and disappears on
+  // `pause` / `ended` / removal / loss of visibility.
+  //
+  // Per-video state lives in a WeakMap, so a given <video> gets exactly one set
+  // of listeners and one IntersectionObserver for its whole lifetime — SPA
+  // navigation and late-injected players can never produce duplicate icons or
+  // stacked listeners. Entries die with the element (WeakMap) and are torn
+  // down explicitly by destroyCapsule() when the node is detached.
+
+  const playbackGate = new WeakMap(); // video -> { playing, visible, io, handlers }
+
+  // Events that mean "playback really started". `play` is deliberately NOT in
+  // this list: it fires the instant play() is called, long before any frame is
+  // rendered (and even when the play promise later rejects).
+  const PLAY_EVTS = ['playing'];
+  // Events that mean "playback stopped / no longer usable".
+  // NOTE: `waiting`, `stalled` and `suspend` are intentionally excluded — they
+  // fire while playback is still in progress (rebuffering, full buffer) and
+  // would make the pill flicker.
+  const STOP_EVTS = ['pause', 'ended', 'emptied', 'abort', 'error'];
+
+  function gateFor(video) {
+    let g = playbackGate.get(video);
+    if (g) return g;
+
+    g = { playing: false, visible: true, io: null, handlers: [] };
+
+    const set = (v) => {
+      if (g.playing === v) return;
+      g.playing = v;
+      scheduleSyncCapsules();
+    };
+
+    const onPlay = () => set(true);
+    const onStop = () => set(false);
+
+    PLAY_EVTS.forEach(evt => {
+      video.addEventListener(evt, onPlay);
+      g.handlers.push([evt, onPlay]);
+    });
+    STOP_EVTS.forEach(evt => {
+      video.addEventListener(evt, onStop);
+      g.handlers.push([evt, onStop]);
+    });
+
+    // Seed the state: videos injected already-playing (SPA routes, carousels)
+    // never fire `playing` because they started before we saw them.
+    try {
+      g.playing = !video.paused && !video.ended && video.readyState >= 3;
+    } catch (e) {
+      g.playing = false;
+    }
+
+    // Fast, event-driven visibility so the pill vanishes the moment the player
+    // is scrolled away, switched to another tab of the SPA, or hidden.
+    try {
+      g.io = new IntersectionObserver((entries) => {
+        let changed = false;
+        for (const en of entries) {
+          if (en.target === video && g.visible !== en.isIntersecting) {
+            g.visible = en.isIntersecting;
+            changed = true;
+          }
+        }
+        if (changed) scheduleSyncCapsules();
+      }, { threshold: 0 });
+      g.io.observe(video);
+    } catch (e) {
+      g.io = null;
+      g.visible = true;
+    }
+
+    playbackGate.set(video, g);
+    return g;
+  }
+
+  /** Detach every listener/observer we installed for this video. */
+  function ungateVideo(video) {
+    const g = playbackGate.get(video);
+    if (!g) return;
+    if (g.io) { try { g.io.disconnect(); } catch (e) {} g.io = null; }
+    (g.handlers || []).forEach(([evt, fn]) => {
+      try { video.removeEventListener(evt, fn); } catch (e) {}
+    });
+    g.handlers = [];
+    playbackGate.delete(video);
+  }
+
+  /**
+   * Is this video *actually* playing right now?
+   * Event state is authoritative; the live element properties are re-checked
+   * as a cheap safety net (covers players that mutate .paused/.src directly).
+   */
+  function isActuallyPlaying(video) {
+    const g = gateFor(video);
+    if (!g.playing || !g.visible) return false;
+    try {
+      if (video.paused || video.ended || video.readyState < 2) return false;
+    } catch (e) {
+      return false;
+    }
+    return true;
+  }
+
+  function hideCapsule(video) {
+    const st = capsuleState.get(video);
+    if (!st) return;
+    try { st.wrap.style.display = 'none'; } catch (e) {}
+    try { st.panel.style.display = 'none'; } catch (e) {}
+    if (openCapsuleVideo === video) openCapsuleVideo = null;
+  }
+
+  /** Full teardown: overlay + listeners + observers for a removed video. */
+  function destroyCapsule(video) {
+    const st = capsuleState.get(video);
+    if (st) {
+      try { st.wrap.remove(); } catch (e) {}
+      try { st.panel.remove(); } catch (e) {}
+    }
+    capsuleState.delete(video);
+    capsuleVideos.delete(video);
+    dragOffsets.delete(video);
+    ungateVideo(video);
+    if (openCapsuleVideo === video) openCapsuleVideo = null;
+  }
+
   function ensureCapsule(video) {
     const shadow = getCapsuleHost();
     if (!shadow) return null;
@@ -1245,8 +1374,27 @@
     shadow.appendChild(wrap);
 
     const st = { wrap, btn, count, panel };
+
+    // Never leave a previous (stale/disconnected) wrapper behind — that is how
+    // duplicate pills used to pile up on SPA navigation.
+    const prev = capsuleState.get(video);
+    if (prev && prev.wrap && prev.wrap !== wrap) {
+      try { prev.wrap.remove(); } catch (e) {}
+    }
+
     capsuleState.set(video, st);
     capsuleVideos.add(video);
+
+    // Keep the overlay completely transparent to the page: a click on the pill
+    // must not reach the player (pause/play toggle, ad links, custom controls)
+    // nor any page-level document handler. These run in the bubble phase inside
+    // the shadow tree, so stopPropagation() here also stops the composed event
+    // from ever escaping to the host element / document.
+    ['mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu',
+     'pointerup', 'touchstart', 'touchend', 'wheel'].forEach((evt) => {
+      wrap.addEventListener(evt, (e) => { e.stopPropagation(); }, false);
+    });
+    btn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); });
 
     // Drag to move (click without drag toggles the panel)
     btn.addEventListener('pointerdown', (e) => {
@@ -1506,16 +1654,11 @@
     // Ensure host is attached to active container (e.g. fullscreen element)
     getCapsuleHost();
 
-    // Remove capsules whose video was detached (SPA navigation, e.g. YouTube)
-    capsuleVideos.forEach(video => {
-      if (!video.isConnected) {
-        const st = capsuleState.get(video);
-        if (st && st.wrap.isConnected) st.wrap.remove();
-        capsuleState.delete(video);
-        capsuleVideos.delete(video);
-        dragOffsets.delete(video);
-        if (openCapsuleVideo === video) openCapsuleVideo = null;
-      }
+    // Remove capsules whose video was detached (SPA navigation, e.g. YouTube).
+    // destroyCapsule() also unbinds that video's playback listeners and its
+    // IntersectionObserver, so nothing leaks across route changes.
+    Array.from(capsuleVideos).forEach(video => {
+      if (!video.isConnected) destroyCapsule(video);
     });
 
     document.querySelectorAll('video').forEach(video => {
@@ -1532,21 +1675,18 @@
       const isBlob = (video.src && video.src.startsWith('blob:')) ||
                      (video.currentSrc && video.currentSrc.startsWith('blob:')) ||
                      mseBlobUrls.has(video.currentSrc);
-      // Page-level detections (flashvars, OG tags, sniffed streams, …) mean a
-      // visible player almost certainly has something downloadable — show the
-      // pill so the panel can be opened even before playback starts.
-      const pageHasVideos = detectedVideos.size > 0;
-      const downloadable = videoHasHttpSource(video) || isPlayingVideo(video) ||
-                           (isBlob && (video.readyState > 0 || interceptedMediaUrls.size > 0)) ||
-                           pageHasVideos;
+
+      // ── PLAYBACK GATE ────────────────────────────────────────────────────
+      // Hard requirement: no pill until the video is genuinely producing
+      // frames. Not on page load, not on hover, not on a Play click — only on
+      // the `playing` event (or an already-playing element we discovered late).
+      const playing = isActuallyPlaying(video);
+      const hasSource = videoHasHttpSource(video) || isBlob || !!video.currentSrc;
 
       let st = capsuleState.get(video);
 
-      if (!inView || !downloadable) {
-        if (st) {
-          st.wrap.style.display = 'none';
-          if (openCapsuleVideo === video) openCapsuleVideo = null;
-        }
+      if (!playing || !inView || !hasSource) {
+        if (st) hideCapsule(video);
         return;
       }
       if (!st || !st.wrap.isConnected) st = ensureCapsule(video);
