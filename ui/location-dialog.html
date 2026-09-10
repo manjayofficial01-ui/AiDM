@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Choose Download Location</title>
+<link rel="stylesheet" href="styles.css" />
+<style>
+  /* This window is a real top-level OS window (not an in-page overlay), so it
+     needs its own layout. It re-uses the app's light-blue IDM theme. */
+  html, body { height: 100%; }
+  body {
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: var(--font);
+    display: flex; flex-direction: column;
+    overflow: hidden; user-select: none;
+  }
+  .ld-titlebar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 9px 10px 9px 16px;
+    background: linear-gradient(180deg, #2f80d6, #1f67b8);
+    color: #fff; -webkit-app-region: drag; flex: 0 0 auto;
+  }
+  .ld-titlebar h1 { font-size: 13px; font-weight: 600; letter-spacing: .2px; }
+  .ld-close {
+    -webkit-app-region: no-drag; width: 26px; height: 24px;
+    background: transparent; border: none; color: #dbeafe;
+    font-size: 15px; cursor: pointer; border-radius: 4px;
+  }
+  .ld-close:hover { background: #e74c3c; color: #fff; }
+  .ld-body { padding: 16px 18px 6px; flex: 1 1 auto; overflow: auto; }
+  .ld-row { margin-bottom: 12px; }
+  .ld-label {
+    display: block; font-size: 11px; font-weight: 600;
+    color: var(--text-secondary); margin-bottom: 5px;
+    text-transform: uppercase; letter-spacing: .4px;
+  }
+  .ld-path { display: flex; gap: 6px; }
+  .ld-path input {
+    flex: 1 1 auto; min-width: 0; padding: 7px 9px; font-size: 12px;
+    font-family: var(--font-mono);
+    background: var(--bg-surface); color: var(--text-primary);
+    border: 1px solid var(--border); border-radius: var(--radius);
+    outline: none;
+  }
+  .ld-path input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-glow); }
+  .ld-cat {
+    display: inline-block; font-size: 11px; font-weight: 600;
+    color: var(--accent-dark); background: var(--bg-tertiary);
+    border: 1px solid var(--border); border-radius: 999px;
+    padding: 3px 10px; margin-bottom: 12px;
+  }
+  .ld-hint { font-size: 11px; color: var(--text-muted); margin-top: 5px; min-height: 14px; }
+  .ld-hint.warn { color: var(--warning); }
+  .ld-remember { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-secondary); }
+  .ld-remember input { accent-color: var(--accent); }
+  .ld-footer {
+    display: flex; justify-content: flex-end; gap: 8px;
+    padding: 12px 18px; border-top: 1px solid var(--border);
+    background: var(--bg-secondary); flex: 0 0 auto;
+  }
+  .ld-badge {
+    font-size: 10px; color: var(--text-muted); margin-right: auto;
+    align-self: center;
+  }
+</style>
+</head>
+<body>
+  <div class="ld-titlebar">
+    <h1>📁 Choose Download Location</h1>
+    <button class="ld-close" id="ld-close" title="Cancel (Esc)">✕</button>
+  </div>
+
+  <div class="ld-body">
+    <div class="ld-cat" id="ld-category">📁 File</div>
+
+    <div class="ld-row">
+      <label class="ld-label" for="ld-filename">File name</label>
+      <div class="ld-path">
+        <input type="text" id="ld-filename" spellcheck="false" autocomplete="off" />
+        <button class="tool-btn small" id="ld-paste" title="Paste name from clipboard">📋 Paste</button>
+        <button class="tool-btn small" id="ld-reset" title="Restore the detected file name">↺ Reset</button>
+      </div>
+      <div class="ld-hint" id="ld-hint">Renaming is applied before the first byte is written.</div>
+    </div>
+
+    <div class="ld-row">
+      <label class="ld-label" for="ld-savepath">Save to folder</label>
+      <div class="ld-path">
+        <input type="text" id="ld-savepath" spellcheck="false" autocomplete="off" />
+        <button class="tool-btn small" id="ld-browse">Browse…</button>
+      </div>
+    </div>
+
+    <label class="ld-remember">
+      <input type="checkbox" id="ld-remember" />
+      Remember this folder for the category
+    </label>
+  </div>
+
+  <div class="ld-footer">
+    <span class="ld-badge" id="ld-badge">AiDM</span>
+    <button class="tool-btn" id="ld-cancel">Cancel</button>
+    <button class="tool-btn primary" id="ld-ok">✅ Start Download</button>
+  </div>
+
+  <script src="location-dialog.js"></script>
+</body>
+</html>

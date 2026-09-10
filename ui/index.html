@@ -243,44 +243,6 @@
   </div>
 
   <!-- Folder Approval Modal (for ask-every-time) -->
-  <div class="modal-overlay" id="approval-overlay" style="display:none;">
-    <div class="modal approval-modal">
-      <div class="modal-header">
-        <h3>📁 Choose Download Location</h3>
-        <button class="modal-close" id="approval-close">✕</button>
-      </div>
-      <div class="modal-body">
-        <div class="approval-file-info">
-          <div class="form-group">
-            <label>File name — edit, type a new one, or paste</label>
-            <div class="path-input">
-              <input type="text" id="approval-filename" spellcheck="false" autocomplete="off" />
-              <button class="tool-btn small" id="btn-approval-paste" title="Paste name from clipboard">📋 Paste</button>
-              <button class="tool-btn small" id="btn-approval-reset" title="Restore the detected file name">↺ Reset</button>
-            </div>
-            <div class="approval-hint" id="approval-filename-hint"></div>
-          </div>
-          <div class="approval-category" id="approval-category"></div>
-        </div>
-        <div class="form-group">
-          <label>Save to folder</label>
-          <div class="path-input">
-            <input type="text" id="approval-savepath" />
-            <button class="tool-btn small" id="btn-browse-approval">Browse</button>
-          </div>
-        </div>
-        <div class="form-group toggle" style="margin-top:8px;">
-          <label>Remember for this category</label>
-          <input type="checkbox" id="approval-remember" />
-        </div>
-      </div>
-      <div class="modal-footer">
-        <button class="tool-btn" id="btn-reject-approval">Cancel</button>
-        <button class="tool-btn primary" id="btn-approve">✅ Start Download</button>
-      </div>
-    </div>
-  </div>
-
   <!-- Settings Modal -->
   <div class="modal-overlay" id="settings-overlay" style="display:none;">
     <div class="modal settings-modal">

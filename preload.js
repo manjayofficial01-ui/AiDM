@@ -44,6 +44,8 @@ contextBridge.exposeInMainWorld('aidm', {
 
   // Approval-dialog helpers
   readClipboard: () => ipcRenderer.invoke('read-clipboard'),
+  /** Ask the main process to open the topmost download-location dialog. */
+  requestLocation: (id) => ipcRenderer.invoke('request-location', { id }),
   setAlwaysOnTop: (on) => ipcRenderer.invoke('window-always-on-top', !!on),
 
   // Event listeners

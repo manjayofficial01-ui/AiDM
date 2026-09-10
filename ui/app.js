@@ -9,7 +9,6 @@ let activeCategory = 'all';
 let selectedIds = new Set();
 let contextTarget = null;
 let selectedQuality = null;  // for quality picker modal
-let pendingApprovalId = null; // for folder approval modal
 let marqueeEndTime = 0; // timestamp of last marquee drag — suppresses stray clicks
 
 const downloadList = document.getElementById('download-list');
@@ -434,11 +433,14 @@ function setupIPCListeners() {
   });
 
   // ── New: Ask-every-time approval ──────────────────────────────────────────
-  window.aidm.onDownloadAskLocation((data) => {
-    // Fall back to the event payload: the row may not have reached the
-    // renderer's local list yet, and the prompt must never be skipped.
-    const dl = downloads.find(d => d.id === data.id) || data;
-    showApprovalModal(dl);
+  window.aidm.onDownloadAskLocation(async (data) => {
+    // The topmost location dialog is opened by the main process. The list only
+    // needs to catch up so the row shows "Pending" while it is being answered.
+    try {
+      downloads = await window.aidm.getDownloads();
+      renderDownloads();
+      updateStats();
+    } catch (e) { /* no-op */ }
   });
 
   // ── New: Video quality detected ──────────────────────────────────────────
@@ -513,33 +515,6 @@ function setupEventListeners() {
   document.getElementById('btn-cancel-quality').addEventListener('click', hideQualityPicker);
   document.getElementById('btn-download-quality').addEventListener('click', downloadSelectedQuality);
 
-  // Approval modal
-  document.getElementById('approval-close').addEventListener('click', hideApprovalModal);
-  document.getElementById('btn-reject-approval').addEventListener('click', () => {
-    if (pendingApprovalId) window.aidm.rejectDownload(pendingApprovalId);
-    hideApprovalModal();
-  });
-  document.getElementById('btn-approve').addEventListener('click', approveDownload);
-  document.getElementById('btn-browse-approval').addEventListener('click', async () => {
-    const f = await window.aidm.selectFolder();
-    if (f) document.getElementById('approval-savepath').value = f;
-  });
-
-  // Editable file name: paste from clipboard, reset to the detected name,
-  // and Enter to confirm (standard Ctrl+V / right-click also work).
-  document.getElementById('btn-approval-paste').addEventListener('click', pasteApprovalFilename);
-  document.getElementById('btn-approval-reset').addEventListener('click', () => {
-    const el = document.getElementById('approval-filename');
-    el.value = approvalOriginalFilename;
-    el.focus();
-    selectFilenameStem();
-    setApprovalHint('Restored the detected file name.');
-  });
-  document.getElementById('approval-filename').addEventListener('focus', selectFilenameStem);
-  document.getElementById('approval-filename').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); approveDownload(); }
-  });
-
   // Settings modal
   document.getElementById('settings-close').addEventListener('click', hideSettingsModal);
   document.getElementById('btn-cancel-settings').addEventListener('click', hideSettingsModal);
@@ -571,7 +546,7 @@ function setupEventListeners() {
   document.addEventListener('keydown', (e) => {
     if (e.ctrlKey && e.key === 'n') { e.preventDefault(); showAddModal(); }
     if (e.key === 'F5') { e.preventDefault(); refreshList(); }
-    if (e.key === 'Escape') { hideAddModal(); hideSettingsModal(); hideQualityPicker(); hideApprovalModal(); hideContextMenu(); hideAiModal(); }
+    if (e.key === 'Escape') { hideAddModal(); hideSettingsModal(); hideQualityPicker(); hideContextMenu(); hideAiModal(); }
     if (e.key === 'Delete' && selectedIds.size > 0) selectedIds.forEach(id => handleAction('remove', id));
   });
 }
@@ -693,103 +668,16 @@ async function downloadSelectedQuality() {
   showNotification('Video download started');
 }
 
-// ── Approval Modal (Ask Every Time) ───────────────────────────────────────────
-
-let approvalOriginalFilename = '';
-
-/** Select the name without its extension, like Windows' rename does. */
-function selectFilenameStem() {
-  const el = document.getElementById('approval-filename');
-  if (!el) return;
-  const v = el.value;
-  const dot = v.lastIndexOf('.');
-  try {
-    el.focus();
-    el.setSelectionRange(0, dot > 0 ? dot : v.length);
-  } catch (e) { el.select(); }
-}
-
-function setApprovalHint(msg, warn) {
-  const el = document.getElementById('approval-filename-hint');
-  if (!el) return;
-  el.textContent = msg || '';
-  el.classList.toggle('warn', !!warn);
-}
+// ── Download-location dialog (Ask Every Time) ─────────────────────────────────
+//
+// The prompt is a dedicated, topmost window owned by the main process (see
+// main.js → showLocationDialog). It is NOT an in-page overlay any more, so it
+// can be raised above other applications while AiDM itself stays a normal
+// window. The renderer only asks the main process to open it.
 
 function showApprovalModal(dl) {
-  pendingApprovalId = dl.id;
-  approvalOriginalFilename = dl.filename || '';
-  document.getElementById('approval-filename').value = approvalOriginalFilename;
-  setApprovalHint('Renaming is applied before the first byte is written.');
-  const catLabel = { video: '🎬 Video', audio: '🎵 Music', document: '📄 Document',
-    archive: '📦 Archive', software: '💿 Software', image: '🖼️ Image', other: '📁 Other' };
-  document.getElementById('approval-category').textContent = catLabel[dl.category] || '📁 File';
-  document.getElementById('approval-savepath').value =
-    dl.savePath || dl.suggestedPath || settings.defaultSavePath || '';
-  document.getElementById('approval-remember').checked = false;
-  document.getElementById('approval-overlay').style.display = 'flex';
-  // Keep AiDM above every other window until the location is answered.
-  try { window.aidm.setAlwaysOnTop(true); } catch (e) {}
-  selectFilenameStem();
-}
-
-function hideApprovalModal() {
-  document.getElementById('approval-overlay').style.display = 'none';
-  pendingApprovalId = null;
-  approvalOriginalFilename = '';
-  setApprovalHint('');
-  try { window.aidm.setAlwaysOnTop(false); } catch (e) {}
-}
-
-async function pasteApprovalFilename() {
-  const el = document.getElementById('approval-filename');
-  let text = '';
-  try { text = (await window.aidm.readClipboard()) || ''; } catch (e) {}
-  text = String(text).trim();
-  if (!text) { setApprovalHint('Clipboard is empty or holds no text.', true); return; }
-  // A pasted URL/path — keep only the last segment.
-  const slash = Math.max(text.lastIndexOf('/'), text.lastIndexOf('\\'));
-  if (slash >= 0) text = text.slice(slash + 1);
-  const q = text.indexOf('?');
-  if (q > 0) text = text.slice(0, q);
-  try { text = decodeURIComponent(text); } catch (e) {}
-  if (!text) { setApprovalHint('Clipboard is empty or holds no text.', true); return; }
-  el.value = text;
-  el.focus();
-  setApprovalHint('Pasted — press Enter or Start Download.');
-}
-
-async function approveDownload() {
-  if (!pendingApprovalId) return;
-  const savePath = document.getElementById('approval-savepath').value.trim();
-  if (!savePath) return;
-
-  const filenameEl = document.getElementById('approval-filename');
-  const rawName = (filenameEl.value || '').trim();
-  // Never start a download with an empty name — restore the detected one.
-  let filename = rawName;
-  if (!filename) {
-    filename = approvalOriginalFilename;
-    filenameEl.value = filename;
-    setApprovalHint('File name was empty — using the detected name.', true);
-  }
-
-  // If "remember" is checked, save this path for the category
-  if (document.getElementById('approval-remember').checked) {
-    const dl = downloads.find(d => d.id === pendingApprovalId);
-    if (dl && dl.category) {
-      const newSettings = { ...settings, categoryPaths: { ...settings.categoryPaths, [dl.category]: savePath } };
-      await window.aidm.saveSettings(newSettings);
-      settings = newSettings;
-    }
-  }
-
-  await window.aidm.approveDownload(pendingApprovalId, savePath, filename);
-  hideApprovalModal();
-  // The row may have been renamed, so re-read the authoritative list.
-  downloads = await window.aidm.getDownloads();
-  renderDownloads();
-  updateStats();
+  if (!dl || !dl.id) return;
+  try { window.aidm.requestLocation(dl.id); } catch (e) { /* no-op */ }
 }
 
 // ── Settings Modal ────────────────────────────────────────────────────────────

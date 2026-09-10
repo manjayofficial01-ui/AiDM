@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu, nativeImage, screen, Notification } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { DownloadManager } = require('./src/download-manager');
@@ -6,6 +6,7 @@ const { ClipboardMonitor } = require('./src/clipboard-monitor');
 const { IPCServer } = require('./src/server');
 const { AiService } = require('./src/ai-service');
 const twitterResolver = require('./src/twitter-resolver');
+const locationDialog = require('./src/location-dialog');
 
 let mainWindow;
 let tray = null;
@@ -48,32 +49,6 @@ function showWindow() {
   if (!mainWindow.isVisible()) mainWindow.show();
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.focus();
-}
-
-// ── Approval dialog pinning ────────────────────────────────────────────────
-// When a download needs a save location, force the window above everything
-// (including full-screen browsers) until the user approves or rejects.
-const pendingApprovalIds = new Set();
-
-function raiseForApproval() {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  try {
-    mainWindow.setAlwaysOnTop(true, 'screen-saver');
-    mainWindow.moveTop();
-    if (!mainWindow.isVisible()) mainWindow.show();
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.focus();
-    mainWindow.flashFrame(true);
-    setTimeout(() => { try { mainWindow.flashFrame(false); } catch {} }, 1500);
-  } catch (e) {
-    console.warn('[AiDM] raiseForApproval failed:', e.message);
-  }
-}
-
-function releaseApprovalPin(id) {
-  if (id) pendingApprovalIds.delete(id);
-  if (pendingApprovalIds.size > 0) return; // another dialog still open
-  try { mainWindow.setAlwaysOnTop(false); } catch {}
 }
 
 function createTray() {
@@ -165,6 +140,13 @@ function createWindow() {
   clipboardMonitor = new ClipboardMonitor();
   ipcServer = new IPCServer(downloadManager);
 
+  // Topmost download-location dialog (its own window, not an in-page overlay)
+  locationDialog.init({
+    getMainWindow: () => mainWindow,
+    getDownloadManager: () => downloadManager,
+    getIconPath: () => getAppIcon(),
+  });
+
   // Forward all download events to renderer
   const events = [
     'download-added', 'download-progress', 'download-complete',
@@ -178,6 +160,11 @@ function createWindow() {
       }
     });
   });
+
+  // "Ask every time": raise the topmost location dialog. The download stays in
+  // "pending-approval" until the user picks a folder or cancels, so the
+  // workflow is modal without blocking any other application.
+  downloadManager.on('download-ask-location', (data) => locationDialog.requestLocation(data));
 
   clipboardMonitor.on('link-found', (url) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -264,9 +251,7 @@ ipcMain.handle('approve-download', async (event, { id, savePath }) => {
 });
 
 ipcMain.handle('reject-download', async (event, { id }) => {
-  const res = downloadManager.rejectDownload(id);
-  releaseApprovalPin(id);
-  return res;
+  return downloadManager.rejectDownload(id);
 });
 
 ipcMain.handle('get-downloads', async () => {
@@ -281,11 +266,25 @@ ipcMain.handle('open-folder', async (event, { folderPath }) => {
   shell.showItemInFolder(folderPath);
 });
 
-ipcMain.handle('select-folder', async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    properties: ['openDirectory'],
+// Re-open the topmost location dialog for a download that is still waiting
+// (e.g. the 📁 button on a "pending" row).
+ipcMain.handle('request-location', async (event, { id }) => {
+  if (!downloadManager || !id) return false;
+  const dl = downloadManager.getAllDownloads().find(d => d.id === id);
+  if (!dl) return false;
+  locationDialog.requestLocation({
+    id: dl.id,
+    filename: dl.filename,
+    category: dl.category,
+    suggestedPath: dl.savePath,
   });
-  return result.canceled ? null : result.filePaths[0];
+  return true;
+});
+
+ipcMain.handle('select-folder', async () => {
+  // Owned by the topmost location dialog when one is open, otherwise by a
+  // temporary topmost owner (created and destroyed inside pickFolder).
+  return locationDialog.pickFolder();
 });
 
 ipcMain.handle('window-minimize', () => mainWindow.minimize());
@@ -388,7 +387,11 @@ if (!gotLock) {
   app.whenReady().then(createWindow);
 }
 
-app.on('before-quit', () => { isQuitting = true; });
+app.on('before-quit', () => {
+  isQuitting = true;
+  // Never leave a topmost window or a temporary owner behind on exit.
+  locationDialog.teardown();
+});
 
 app.on('window-all-closed', () => {
   if (clipboardMonitor) clipboardMonitor.stop();
