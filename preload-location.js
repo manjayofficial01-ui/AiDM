@@ -6,6 +6,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('aidmLocation', {
   /** Receives { id, filename, category, suggestedPath } once, right after load. */
   init: (cb) => ipcRenderer.on('location-init', (_, data) => cb(data)),
+  /** Receives { id, filename, savePath } when the real name/path is learned. */
+  onPatch: (cb) => ipcRenderer.on('location-patch', (_, data) => cb(data)),
   /** Opens the native folder picker, owned by this (topmost) window. */
   browse: () => ipcRenderer.invoke('location-browse'),
   readClipboard: () => ipcRenderer.invoke('read-clipboard'),

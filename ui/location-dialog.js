@@ -17,6 +17,8 @@
 
   let payload = null;      // { id, filename, category, suggestedPath }
   let settled = false;     // guard: never answer twice
+  let userEditedName = false;
+  let userEditedPath = false;
 
   const CAT_LABEL = {
     video: '🎬 Video', audio: '🎵 Music', document: '📄 Document',
@@ -98,6 +100,7 @@
     try { text = decodeURIComponent(text); } catch (e) { /* keep as pasted */ }
     if (!text) { setHint('Clipboard is empty or holds no text.', true); return; }
     filenameEl.value = text;
+    userEditedName = true;
     filenameEl.focus();
     selectStem();
     setHint('Pasted — press Enter or Start Download.');
@@ -105,15 +108,27 @@
 
   el('ld-reset').addEventListener('click', () => {
     filenameEl.value = payload ? (payload.filename || '') : '';
+    userEditedName = false;
     filenameEl.focus();
     selectStem();
     setHint('Restored the detected file name.');
   });
 
+  el('ld-default').addEventListener('click', () => {
+    if (payload && payload.defaultPath) {
+      savePathEl.value = payload.defaultPath;
+      userEditedPath = false;
+      setPathHint();
+      setHint('Reset to the default download location.');
+    }
+  });
+
   filenameEl.addEventListener('focus', selectStem);
+  filenameEl.addEventListener('input', () => { userEditedName = true; });
   filenameEl.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); confirm(); }
   });
+  savePathEl.addEventListener('input', () => { userEditedPath = true; });
   savePathEl.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); confirm(); }
   });
@@ -122,17 +137,43 @@
     if (e.key === 'Escape') { e.preventDefault(); cancel(); }
   });
 
+  function setPathHint() {
+    const isDefault = !userEditedPath &&
+      payload && payload.defaultPath && savePathEl.value === payload.defaultPath;
+    el('ld-pathhint').textContent = isDefault
+      ? 'Default download location — change it only if you want to.'
+      : 'Pick a different folder with Browse…, or ↺ Default.';
+  }
+  savePathEl.addEventListener('input', setPathHint);
+
   // ── Data from the main process ────────────────────────────────────────────
   api.init((data) => {
     payload = data || {};
     catEl.textContent = CAT_LABEL[payload.category] || '📁 File';
     filenameEl.value = payload.filename || '';
-    savePathEl.value = payload.suggestedPath || payload.savePath || '';
+    savePathEl.value = payload.suggestedPath || payload.savePath || payload.defaultPath || '';
     rememberEl.checked = false;
     el('ld-badge').textContent = 'AiDM · waiting for a location';
     setHint('Renaming is applied before the first byte is written.');
+    setPathHint();
     // Focus the file name so typing works immediately (no focus-stealing loop:
     // this happens once, when the dialog is created).
     setTimeout(() => { filenameEl.focus(); selectStem(); }, 30);
+  });
+
+  // Live field updates (e.g. the file name learned from the server after the
+  // dialog opened). Never overwrite what the user has already typed.
+  api.onPatch((patch_) => {
+    if (!patch_ || !payload || patch_.id !== payload.id) return;
+    if (patch_.filename && !userEditedName) {
+      filenameEl.value = patch_.filename;
+      payload.filename = patch_.filename;
+      setHint('File name detected from the source.');
+      setTimeout(() => filenameEl.focus() && selectStem(), 0);
+    }
+    if (patch_.savePath && !userEditedPath) {
+      savePathEl.value = patch_.savePath;
+      setPathHint();
+    }
   });
 })();

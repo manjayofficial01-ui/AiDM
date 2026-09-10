@@ -252,6 +252,17 @@ function requestLocation(payload) {
   drain();
 }
 
+/**
+ * If the topmost dialog is currently open for `id`, push a field update into
+ * it (e.g. the file name learned from the server after the dialog opened).
+ * Only sent while no field has been edited by the user in the renderer, so it
+ * never clobbers manual input.
+ */
+function patch(id, patch_) {
+  if (!dialogWin || !dialogWin.webContents || dialogWin.isDestroyed()) return;
+  try { dialogWin.webContents.send('location-patch', { id, ...patch_ }); } catch (e) {}
+}
+
 async function drain() {
   if (draining) return;
   draining = true;
@@ -260,7 +271,7 @@ async function drain() {
       const item = queue.shift();
       let result = null;
       try {
-        result = await showDialog(item);
+        result = await showDialog({ ...item, defaultPath: item.defaultPath || item.suggestedPath });
       } catch (e) {
         console.warn('[AiDM] location dialog error:', e.message);
         result = null;
@@ -324,6 +335,7 @@ module.exports = {
   init,
   requestLocation,
   pickFolder,
+  patch,
   teardown,
   /** test/introspection helper */
   _currentWindow: () => dialogWin,

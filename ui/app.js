@@ -427,6 +427,20 @@ function setupIPCListeners() {
     updateStats();
   });
 
+  // File name/path refined (e.g. learned from the server before download):
+  // refresh the matching row so the title and any pending badge stay right.
+  window.aidm.onDownloadUpdated((data) => {
+    const dl = downloads.find(d => d.id === data.id);
+    if (dl) {
+      dl.filename = data.filename || dl.filename;
+      dl.category = data.category || dl.category;
+      dl.savePath = data.savePath || dl.savePath;
+      dl.filepath = data.filepath || dl.filepath;
+    }
+    renderDownloads();
+    updateStats();
+  });
+
   window.aidm.onClipboardLink((url) => {
     document.getElementById('input-url').value = url;
     showAddModal();

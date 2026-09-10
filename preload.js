@@ -56,6 +56,7 @@ contextBridge.exposeInMainWorld('aidm', {
   onDownloadPaused: (cb) => ipcRenderer.on('download-paused', (_, data) => cb(data)),
   onDownloadResumed: (cb) => ipcRenderer.on('download-resumed', (_, data) => cb(data)),
   onDownloadRemoved: (cb) => ipcRenderer.on('download-removed', (_, data) => cb(data)),
+  onDownloadUpdated: (cb) => ipcRenderer.on('download-updated', (_, data) => cb(data)),
   onClipboardLink: (cb) => ipcRenderer.on('clipboard-link', (_, url) => cb(url)),
   onDownloadAskLocation: (cb) => ipcRenderer.on('download-ask-location', (_, data) => cb(data)),
   onVideoDetected: (cb) => ipcRenderer.on('video-detected', (_, data) => cb(data)),

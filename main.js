@@ -151,7 +151,7 @@ function createWindow() {
   const events = [
     'download-added', 'download-progress', 'download-complete',
     'download-error', 'download-paused', 'download-resumed',
-    'download-removed', 'download-ask-location', 'video-detected',
+    'download-removed', 'download-updated', 'download-ask-location', 'video-detected',
   ];
   events.forEach(event => {
     downloadManager.on(event, (data) => {
@@ -165,6 +165,14 @@ function createWindow() {
   // "pending-approval" until the user picks a folder or cancels, so the
   // workflow is modal without blocking any other application.
   downloadManager.on('download-ask-location', (data) => locationDialog.requestLocation(data));
+  // (download-ask-location already carries suggestedPath = the default; the
+  //  dialog treats it as the default location and lets the user override it.)
+
+  // When the real file name is learned after the dialog opened, refresh the
+  // still-open dialog (and the pending row) with the improved name/path.
+  downloadManager.on('download-updated', (d) => {
+    locationDialog.patch(d.id, { filename: d.filename, savePath: d.savePath });
+  });
 
   clipboardMonitor.on('link-found', (url) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -276,7 +284,8 @@ ipcMain.handle('request-location', async (event, { id }) => {
     id: dl.id,
     filename: dl.filename,
     category: dl.category,
-    suggestedPath: dl.savePath,
+    suggestedPath: dl.savePath || dm.settings.defaultSavePath,
+    defaultPath: dm.settings.categoryPaths[dl.category] || dm.settings.defaultSavePath,
   });
   return true;
 });

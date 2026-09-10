@@ -1,6 +1,6 @@
 {
   "name": "aidm",
-  "version": "2.7.0",
+  "version": "2.8.0",
   "description": "AiDM - AI-Powered Download Manager | Classic IDM-style UI with modern tech",
   "main": "main.js",
   "scripts": {
@@ -32,14 +32,15 @@
     "appId": "com.aidm.app",
     "productName": "AiDM",
     "copyright": "Copyright (c) 2026 AiDM",
-    "files": [
-      "main.js",
-      "preload.js",
-      "package.json",
-      "src/**/*",
-      "ui/**/*",
-      "build/icon.ico"
-    ],
+  "files": [
+    "main.js",
+    "preload.js",
+    "preload-location.js",
+    "package.json",
+    "src/**/*",
+    "ui/**/*",
+    "build/icon.ico"
+  ],
     "extraResources": [
       {
         "from": "chrome-extension/",

@@ -39,6 +39,60 @@ function parseHlsMediaSequence(text) {
 }
 
 /**
+ * Pull the server's own file name out of a `Content-Disposition` header.
+ * `filename*` (RFC 5987, percent-encoded, usually UTF-8) wins over plain
+ * `filename`; both the quoted and the bare form are understood.
+ */
+function filenameFromContentDisposition(cd) {
+  if (!cd) return null;
+  const star = /filename\*\s*=\s*[^']*'[^']*'([^;]+)/i.exec(cd);
+  if (star && star[1]) {
+    try {
+      const n = decodeURIComponent(star[1].trim());
+      if (n) return n;
+    } catch (e) { /* fall through to plain filename */ }
+  }
+  const quoted = /filename\s*=\s*"([^"]*)"/i.exec(cd);
+  if (quoted && quoted[1].trim()) return quoted[1].trim();
+  const bare = /filename\s*=\s*([^;]+)/i.exec(cd);
+  if (bare && bare[1].trim()) return bare[1].trim();
+  return null;
+}
+
+/** Best-effort container extension for a Content-Type ('' when unknown). */
+function extFromMime(contentType) {
+  const mime = String(contentType || '').split(';')[0].trim().toLowerCase();
+  return MIME_EXT[mime] || '';
+}
+
+const MIME_EXT = {
+  'video/mp4': 'mp4', 'video/webm': 'webm', 'video/x-matroska': 'mkv',
+  'video/quicktime': 'mov', 'video/x-msvideo': 'avi', 'video/mpeg': 'mpeg',
+  'video/mp2t': 'ts', 'video/x-flv': 'flv', 'video/3gpp': '3gp',
+  'application/x-mpegurl': 'm3u8', 'application/vnd.apple.mpegurl': 'm3u8',
+  'application/dash+xml': 'mpd',
+  'audio/mpeg': 'mp3', 'audio/mp4': 'm4a', 'audio/x-m4a': 'm4a',
+  'audio/wav': 'wav', 'audio/x-wav': 'wav', 'audio/flac': 'flac',
+  'audio/ogg': 'ogg', 'audio/aac': 'aac', 'audio/webm': 'weba',
+  'audio/x-ms-wma': 'wma',
+  'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif',
+  'image/webp': 'webp', 'image/svg+xml': 'svg', 'image/bmp': 'bmp',
+  'image/tiff': 'tiff', 'image/x-icon': 'ico',
+  'application/pdf': 'pdf', 'application/zip': 'zip',
+  'application/x-zip-compressed': 'zip', 'application/x-rar-compressed': 'rar',
+  'application/x-7z-compressed': '7z', 'application/gzip': 'gz',
+  'application/x-tar': 'tar', 'application/x-bzip2': 'bz2',
+  'application/msword': 'doc',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+  'application/vnd.ms-excel': 'xls',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+  'application/vnd.ms-powerpoint': 'ppt',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
+  'text/plain': 'txt', 'text/csv': 'csv', 'text/html': 'html',
+  'application/json': 'json', 'application/epub+zip': 'epub',
+};
+
+/**
  * AiDM Multi-Segment Download Engine
  * Inspired by IDM's dynamic file segmentation technology
  * - Splits files into multiple segments for parallel downloading
@@ -52,7 +106,7 @@ class DownloadEngine extends EventEmitter {
     this.activeSegments = new Map(); // downloadId -> segment[]
   }
 
-  async startDownload({ id, url, filepath, totalSegments = 8, headers = {} }) {
+  async startDownload({ id, url, filepath, totalSegments = 8, headers = {}, meta: preProbed = null }) {
     const download = {
       id,
       url,
@@ -68,8 +122,12 @@ class DownloadEngine extends EventEmitter {
     };
 
     try {
-      // Step 1: Probe file size and check resume support
-      const meta = await this._probeFile(url, headers);
+      // Step 1: Probe file size and check resume support.
+      // `preProbed` lets the caller (which already probed to learn the real
+      // file name) skip a second round-trip.
+      const meta = (preProbed && typeof preProbed.contentLength === 'number')
+        ? preProbed
+        : await this._probeFile(url, headers);
       download.totalSize = meta.contentLength || 0;
       download.supportsRange = meta.supportsRange;
       download.finalUrl = meta.finalUrl || url;
@@ -128,99 +186,144 @@ class DownloadEngine extends EventEmitter {
     }
   }
 
-  _probeFile(url, extraHeaders = {}, redirectCount = 0) {
+  /**
+   * Open a request and resolve as soon as the response *headers* arrive.
+   * The caller owns the socket and must call `destroy()` when it has read
+   * what it needs — no body is ever buffered here.
+   */
+  _openRequest(url, { method = 'HEAD', headers = {}, timeout = 15000 } = {}) {
     return new Promise((resolve, reject) => {
-      if (redirectCount > 5) {
-        return reject(new Error('Too many redirects'));
-      }
       let parsed;
       try {
         parsed = new URL(url);
       } catch (e) {
         return reject(new Error(`Invalid URL: ${url}`));
       }
-
+      if (!['http:', 'https:'].includes(parsed.protocol)) {
+        return reject(new Error('Unsupported protocol: ' + parsed.protocol));
+      }
       const client = parsed.protocol === 'https:' ? https : http;
-      const defaultUA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
-
-      const opts = {
-        method: 'HEAD',
+      const req = client.request({
+        method,
         hostname: parsed.hostname,
         port: parsed.port,
         path: parsed.pathname + parsed.search,
-        headers: {
-          'User-Agent': defaultUA,
-          ...extraHeaders,
-        },
-        timeout: 15000,
-      };
-
-      const doProbe = (method) => {
-        opts.method = method;
-        if (method === 'GET') {
-          opts.headers = { ...opts.headers, 'Range': 'bytes=0-1' };
-        }
-
-        const req = client.request(opts, (res) => {
-          // Handle 3xx redirects
-          if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-            res.resume();
-            try {
-              const redirectUrl = new URL(res.headers.location, url).href;
-              return this._probeFile(redirectUrl, extraHeaders, redirectCount + 1).then(resolve, reject);
-            } catch (err) {
-              return reject(new Error(`Invalid redirect URL: ${res.headers.location}`));
-            }
-          }
-
-          // If HEAD is not allowed (405, 403, 501), fallback to GET with Range: bytes=0-1
-          if (method === 'HEAD' && (res.statusCode === 405 || res.statusCode === 403 || res.statusCode === 501)) {
-            res.resume();
-            return doProbe('GET');
-          }
-
-          let contentLength = parseInt(res.headers['content-length'], 10) || 0;
-          const acceptRanges = res.headers['accept-ranges'];
-          const contentRange = res.headers['content-range'];
-          let supportsRange = acceptRanges === 'bytes';
-
-          // If range probe was used (206 Partial Content)
-          if (res.statusCode === 206 && contentRange) {
-            supportsRange = true;
-            const match = contentRange.match(/\/(\d+|\*)$/);
-            if (match && match[1] !== '*') {
-              contentLength = parseInt(match[1], 10) || contentLength;
-            }
-          } else if (contentLength > 0) {
-            supportsRange = supportsRange || true;
-          }
-
-          resolve({
-            contentLength,
-            supportsRange,
-            finalUrl: url,
-            headers: res.headers,
-          });
-          res.resume();
+        headers,
+        timeout,
+      }, (res) => {
+        resolve({
+          status: res.statusCode,
+          headers: res.headers,
+          url,
+          destroy: () => {
+            try { res.destroy(); } catch (e) { /* already gone */ }
+            try { req.destroy(); } catch (e) { /* already gone */ }
+          },
         });
-
-        req.on('error', (err) => {
-          if (method === 'HEAD') {
-            return doProbe('GET');
-          }
-          reject(err);
-        });
-
-        req.on('timeout', () => {
-          req.destroy();
-          reject(new Error('Connection timeout during probe'));
-        });
-
-        req.end();
-      };
-
-      doProbe('HEAD');
+      });
+      req.on('error', reject);
+      req.on('timeout', () => {
+        try { req.destroy(); } catch (e) { /* already gone */ }
+        reject(new Error('Connection timeout during probe'));
+      });
+      req.end();
     });
+  }
+
+  /**
+   * Ask the server what we are about to download: size, whether it really
+   * honours `Range:`, and the file's own name.
+   *
+   * Range support is **observed, never inferred**. Plenty of CDNs answer HEAD
+   * with a `Content-Length` and then quietly ignore `Range:` on GET, which used
+   * to make every segment write the whole body at its own offset and produce a
+   * corrupt, oversized file. So we request two bytes and require a genuine
+   * `206 Partial Content` before splitting the download.
+   *
+   * Resolves `{ contentLength, supportsRange, finalUrl, contentType,
+   * contentDisposition, suggestedFilename, headers }`.
+   */
+  async _probeFile(url, extraHeaders = {}, redirectCount = 0) {
+    if (redirectCount > 5) throw new Error('Too many redirects');
+
+    const defaultUA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+    const headers = { 'User-Agent': defaultUA, ...extraHeaders };
+
+    const redirectTo = (r) => {
+      if (r.status >= 300 && r.status < 400 && r.headers.location) {
+        try { return new URL(r.headers.location, r.url).href; } catch (e) { return null; }
+      }
+      return null;
+    };
+
+    // 1) HEAD — cheap source of content-type, disposition and length.
+    let head = null;
+    try {
+      head = await this._openRequest(url, { method: 'HEAD', headers });
+    } catch (e) {
+      head = null; // many CDNs/edge nodes simply refuse HEAD
+    }
+    if (head) {
+      const loc = redirectTo(head);
+      if (loc) { head.destroy(); return this._probeFile(loc, extraHeaders, redirectCount + 1); }
+    }
+    if (!head || head.status === 405 || head.status === 403 || head.status === 501) {
+      if (head) head.destroy();
+      head = await this._openRequest(url, { method: 'GET', headers: { ...headers, Range: 'bytes=0-0' } });
+      const loc = redirectTo(head);
+      if (loc) { head.destroy(); return this._probeFile(loc, extraHeaders, redirectCount + 1); }
+    }
+
+    const contentType = head.headers['content-type'] || '';
+    const contentDisposition = head.headers['content-disposition'] || '';
+    let contentLength = parseInt(head.headers['content-length'], 10) || 0;
+
+    // 2) Prove range support with a real two-byte request.
+    let supportsRange = false;
+    let rangeProbe = null;
+    try {
+      rangeProbe = await this._openRequest(url, { method: 'GET', headers: { ...headers, Range: 'bytes=0-1' } });
+      const loc = redirectTo(rangeProbe);
+      if (loc) {
+        rangeProbe.destroy();
+        head.destroy();
+        return this._probeFile(loc, extraHeaders, redirectCount + 1);
+      }
+      if (rangeProbe.status === 206) {
+        supportsRange = true;
+        const cr = rangeProbe.headers['content-range'];
+        const m = cr && /\/(\d+|\*)\s*$/.exec(cr);
+        if (m && m[1] !== '*') contentLength = parseInt(m[1], 10) || contentLength;
+      } else if (rangeProbe.status === 200) {
+        // Range ignored — this response is the whole resource, so its length
+        // is the authoritative one.
+        const l = parseInt(rangeProbe.headers['content-length'], 10);
+        if (l) contentLength = l;
+        supportsRange = false;
+      }
+    } catch (e) {
+      // No usable answer: fall back to a single connection (still correct).
+      supportsRange = false;
+    } finally {
+      if (rangeProbe) rangeProbe.destroy();
+    }
+
+    const result = {
+      contentLength,
+      supportsRange,
+      finalUrl: url,
+      contentType,
+      contentDisposition,
+      suggestedFilename: filenameFromContentDisposition(contentDisposition),
+      headers: head.headers,
+    };
+    head.destroy();
+    return result;
+  }
+
+  /** Public probe — lets the manager learn the real file name up front. */
+  probeMeta(url, headers = {}) {
+    return this._probeFile(url, headers);
   }
 
   _createSegment({ downloadId, segmentIndex, url, filepath, start, end, headers }) {
@@ -288,11 +391,23 @@ class DownloadEngine extends EventEmitter {
         const writeOffset = start !== undefined ? start + segment.downloaded : segment.downloaded;
         const fd = fs.openSync(filepath, 'r+');
         let writePos = writeOffset;
+        // Hard cap: a segment may never write outside its own byte range. If a
+        // server ignores `Range:` and streams the whole body, the surplus is
+        // dropped instead of overwriting its neighbours' data.
+        const budget = end !== undefined ? (end - writeOffset + 1) : 0;
+        let written = 0;
 
         res.on('data', (chunk) => {
-          fs.writeSync(fd, chunk, 0, chunk.length, writePos);
-          writePos += chunk.length;
-          segment.downloaded += chunk.length;
+          let buf = chunk;
+          if (budget > 0) {
+            const room = budget - written;
+            if (room <= 0) return;
+            if (buf.length > room) buf = buf.slice(0, room);
+          }
+          fs.writeSync(fd, buf, 0, buf.length, writePos);
+          writePos += buf.length;
+          written += buf.length;
+          segment.downloaded += buf.length;
 
           // Update parent download
           const download = this.activeSegments.get(downloadId);
@@ -852,4 +967,12 @@ function parseHlsMedia(text, baseUrl) {
   return { mapUri, mapRange, segs };
 }
 
-module.exports = { DownloadEngine, parseHlsMaster, parseHlsMedia, parseHlsKey, parseHlsMediaSequence };
+module.exports = {
+  DownloadEngine,
+  parseHlsMaster,
+  parseHlsMedia,
+  parseHlsKey,
+  parseHlsMediaSequence,
+  filenameFromContentDisposition,
+  extFromMime,
+};

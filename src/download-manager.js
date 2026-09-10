@@ -1,4 +1,4 @@
-const { DownloadEngine } = require('./download-engine');
+const { DownloadEngine, extFromMime } = require('./download-engine');
 const { EventEmitter } = require('events');
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
@@ -223,16 +223,18 @@ class DownloadManager extends EventEmitter {
       headers: headers || null,      // allowlisted replay headers (Referer/Origin/UA)
       cookies: cookies || null,      // session cookies for authenticated downloads (KVS etc.)
       isHls: isHlsUrl(url),
+      _customPath: !!savePath,       // a folder was chosen — don't auto-move it on refine
     };
 
     this.downloads.set(id, download);
     this._persistDownloads();
     this.emit('download-added', download);
 
-    // Ask-every-time: emit a special event so the UI shows a folder picker
+    // Ask-every-time: resolve the real file name first, then raise the
+    // topmost location dialog pre-filled with it and the default folder.
     if (this.settings.askLocationEveryTime && !savePath) {
       download.status = 'pending-approval';
-      this.emit('download-ask-location', { id, filename: parsedName, category, suggestedPath: finalSavePath });
+      this._askLocation(download);
       return download;
     }
 
@@ -284,11 +286,33 @@ class DownloadManager extends EventEmitter {
    * Called after the user picks a folder in the "ask every time" flow.
    * `chosenName` is the (optional) file name the user typed or pasted.
    */
+  /**
+   * For the "ask every time" flow: learn the real file name, then raise the
+   * topmost location dialog with it and the default folder already filled in.
+   * The dialog still appears if the probe fails or times out, so a slow or
+   * unreachable server never blocks the workflow.
+   */
+  _askLocation(dl) {
+    const emit = () => {
+      if (this.downloads.has(dl.id) && dl.status === 'pending-approval') {
+        this.emit('download-ask-location', {
+          id: dl.id,
+          filename: dl.filename,
+          category: dl.category,
+          suggestedPath: dl.savePath,
+          defaultPath: this.settings.categoryPaths[dl.category] || this.settings.defaultSavePath,
+        });
+      }
+    };
+    this._resolveFilename(dl).then(emit, emit);
+  }
+
   approveDownload(id, chosenPath, chosenName) {
     const dl = this.downloads.get(id);
     if (!dl) return null;
 
     dl.savePath = chosenPath;
+    dl._customPath = true;
 
     // Renaming is only possible while nothing has been written yet.
     const cleaned = chosenName ? this._cleanFilename(chosenName) : null;
@@ -316,8 +340,7 @@ class DownloadManager extends EventEmitter {
   }
 
   /** Cancel a download that's waiting for folder approval */
-  rejectDownload(id) {
-    this.downloads.delete(id);
+  rejectDownload(id) {    this.downloads.delete(id);
     this._persistDownloads();
     this.emit('download-removed', { id });
   }
@@ -358,6 +381,7 @@ class DownloadManager extends EventEmitter {
       meta: opts.meta || null,
       headers: opts.headers || null,
       isHls: isHlsUrl(opts.url),
+      _customPath: !!opts.savePath,
     };
 
     this.downloads.set(id, download);
@@ -370,6 +394,12 @@ class DownloadManager extends EventEmitter {
   async _startDownload(download) {
     try {
       download.status = 'connecting';
+
+      // Resolve the real file name/size from the server before touching disk.
+      // Cached on the download so we don't probe twice.
+      const meta = await this._resolveFilename(download);
+      download.filepath = path.join(download.savePath, download.filename);
+
       // Ensure target directory exists
       const dir = path.dirname(download.filepath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -397,6 +427,7 @@ class DownloadManager extends EventEmitter {
         filepath: download.filepath,
         totalSegments: download.segments,
         headers: reqHeaders,
+        meta: download._probe || meta,
       });
     } catch (err) {
       download.status = 'error';
@@ -497,14 +528,94 @@ class DownloadManager extends EventEmitter {
 
   _extractFilename(url) {
     try {
-      const parsed = new URL(url);
+      const raw = String(url || '');
+      // blob: URLs carry the page origin, not a file name — strip the scheme
+      // and parse what remains so `blob:https://x.com/uuid` doesn't leak a URL.
+      const inner = raw.startsWith('blob:') ? raw.slice(5) : raw;
+      const parsed = new URL(inner);
       let name = path.basename(parsed.pathname);
-      if (!name || name === '/') name = 'download_' + Date.now();
-      name = decodeURIComponent(name).replace(/[<>:"/\\|?*]/g, '_');
-      return name;
+      if (!name || name === '/' || name === parsed.hostname) name = '';
+      if (name) {
+        name = decodeURIComponent(name).replace(/[<>:"/\\|?*]/g, '_').trim();
+      }
+      if (name) return name;
     } catch {
-      return 'download_' + Date.now();
+      /* fall through to the fallback below */
     }
+    return 'download_' + Date.now();
+  }
+
+  /**
+   * Improve a download's file name from the server's own response.
+   *
+   * Order of authority:
+   *   1. a `Content-Disposition` filename (the real name the server gives);
+   *   2. a container extension guessed from `Content-Type` when the URL-derived
+   *      name has none (fixes `videoplayback`, `blob:` ids, query strings, …).
+   *
+   * Returns true when the name (and possibly the category/save path) changed.
+   * HLS streams keep the `.ts` container the engine assembles them into.
+   */
+  _refineFilename(dl, meta) {
+    if (!meta) return false;
+    const cur = String(dl.filename || '');
+    const hasExt = /\.[A-Za-z0-9]{1,8}$/.test(cur);
+
+    let next = cur;
+    if (!hasExt) {
+      const cd = meta.suggestedFilename ? this._cleanFilename(meta.suggestedFilename) : null;
+      if (cd && /\.[A-Za-z0-9]{1,8}$/.test(cd)) {
+        next = cd;
+      } else {
+        const ext = extFromMime(meta.contentType);
+        if (ext) next = cur + '.' + ext;
+      }
+    }
+    if (!next || next === cur) return false;
+
+    // HLS streams are assembled into a single .ts container.
+    if (dl.isHls) {
+      next = next.replace(/\.(mp4|mkv|webm|m4v|mov|avi|m3u8|mpd)$/i, '');
+      if (!/\.ts$/i.test(next)) next += '.ts';
+    }
+
+    dl.filename = next;
+    dl.category = detectCategory(next);
+
+    // If the user (or the caller) hasn't pinned a folder, a category change
+    // should move the download into that category's default folder.
+    if (!dl._customPath) {
+      const catPath = this.settings.categoryPaths[dl.category] || '';
+      dl.savePath = catPath || this.settings.defaultSavePath;
+    }
+    return true;
+  }
+
+  /**
+   * Ask the server for the real file name/size up front. Never throws: on any
+   * failure it returns `null` and the URL-derived name is kept. The result is
+   * cached on the download so `_startDownload` can reuse it without a second
+   * probe. Emits `download-updated` when the name improves.
+   */
+  async _resolveFilename(download) {
+    if (download._nameResolved) return download._probe || null;
+    let meta = null;
+    try {
+      meta = await Promise.race([
+        this.engine.probeMeta(download.url, download.headers || {}),
+        new Promise((r) => setTimeout(() => r(null), 8000)),
+      ]);
+    } catch (e) {
+      meta = null;
+    }
+    download._nameResolved = true;
+    download._probe = meta;
+    if (this._refineFilename(download, meta)) {
+      download.filepath = path.join(download.savePath, download.filename);
+      this._persistDownloads();
+      this.emit('download-updated', download);
+    }
+    return meta;
   }
 
   _ensureDirectories() {
