@@ -33,8 +33,13 @@ function main() {
     process.exit(1);
   }
   const yml = fs.readFileSync(YML, 'utf8');
-  const version = (/^version:\s*(\S+)/m.exec(yml) || [])[1] || readVersion();
-  const file = (/^path:\s*(\S+)/m.exec(yml) || [])[1] || ('AiDM-Setup-' + version + '.exe');
+  // The CURRENT build is authoritative: package.json is the version that was
+  // just packaged. Only fall back to the yml's own version when package.json
+  // cannot be read. Reading the version from the yml first meant the tool
+  // happily re-hashed the PREVIOUS installer every time, so the updater
+  // metadata stayed a release behind after any build.
+  const version = readVersion() || (/^version:\s*(\S+)/m.exec(yml) || [])[1];
+  const file = 'AiDM-Setup-' + version + '.exe';
   const target = path.join(DIST, file);
 
   if (!fs.existsSync(target)) {
@@ -44,7 +49,12 @@ function main() {
 
   const buf = fs.readFileSync(target);
   const sha = crypto.createHash('sha512').update(buf).digest('base64');
-  const releaseDate = (/^releaseDate:\s*'?([^'\n]+)'?/m.exec(yml) || [])[1] || new Date().toISOString();
+  // Only keep the old date when it still belongs to the version we are
+  // describing — otherwise a bumped release inherits the previous build's
+  // releaseDate and the updater may treat it as older than it is.
+  const prevVersion = (/^version:\s*(\S+)/m.exec(yml) || [])[1];
+  const prevDate = (/^releaseDate:\s*'?([^'\n]+)'?/m.exec(yml) || [])[1];
+  const releaseDate = (prevVersion === version && prevDate) ? prevDate : new Date().toISOString();
 
   const out = [
     'version: ' + version,

@@ -1,6 +1,23 @@
-# ⚡ AiDM - AI-Powered Download Manager v4.4.0
+# ⚡ AiDM - AI-Powered Download Manager v4.5.0
 
 > Classic IDM-style download manager with next-generation modular download engine, dynamic in-flight segment splitting, positional random-access disk I/O, multi-mirror failover, atomic `.part.meta` crash recovery, Chrome browser integration, video quality detection, smart per-category file organization, ETA, dual-layer speed limiting, streaming multi-algorithm checksum verification, and a yt-dlp + FFmpeg extraction engine for YouTube.
+
+---
+
+## What's New in v4.5.0
+
+Four user-reported defects, one fix each.
+
+| Change | Impact |
+|--------|--------|
+| **True video dimensions** (`src/media-probe.js`, new) | Resolutions are now *proven*, not guessed. AiDM reads the real width/height/duration/audio-track presence straight out of the container bytes (ISO-BMFF box walk incl. trailing `moov`, EBML/Matroska, MPEG-TS PAT/PMT, `ffmpeg -i` fallback). The old code guessed from quality labels, URL regexes and the playing `<video>` element's *current render size* — which is why a 360p file displayed as 2160p and why every variant on a page showed the same resolution. A new **Dimensions** column in the download list shows `640×360` (solid, with a codec/duration tooltip) for proven geometry, dimmed+italic for a not-yet-verified value, and nothing at all when unknown. No 16:9 is ever fabricated from a height. |
+| **Downloads always have audio** | Hard invariant: no non-audio-only choice can ever reach yt-dlp as a bare video format id — `ensureAudioChoice()` rewrites any audio-less DASH choice to `<id>+bestaudio/best`, and `buildFormatSpec()` repairs stale persisted rows too. A merge with no FFmpeg now fails fast and clearly instead of leaving a silent file, partial tracks are cleaned up on failure, and the produced file is probed so a video-without-audio result is rejected rather than reported as success. Split-AV sources (Facebook et al.) are muxed by a generalised `_ensureAudio()` that works for any provider and restores the original on failure. Every row now carries `media.hasAudio`, and `audioMissing` shows a 🔇 badge so a silent file is visible instead of mysterious. |
+| **Rapidgator support** (`src/filehost-resolver.js`, new) | Hoster links used to download the page HTML. Rapidgator file pages now resolve to a real download URL via the hoster API when you save an account (**Settings › File hosts**; premium or a session cookie removes the wait), or via the free page flow, which honestly reports the mandatory wait instead of bypassing the captcha. Hoster rows are marked `singleConnection: true, resumable: false` because these links reject `Range` — multi-segment requests were producing corrupt files. Host allowlist, 2 MB body cap, same-family redirects only. |
+| **Hardened transfer engine** | `startDownload` no longer forces `onConflict: 'overwrite'`, which silently deleted a finished file of the same name. Truncated/short bodies and 200-responses-to-ranged-requests are now detected instead of being written and reported complete; range-hostile servers collapse to a single connection from the worker path (not just the probe); a restart no longer reuses an already-aborted controller; segment restore clamps past-EOF ends; HLS picks an **audio-carrying** variant instead of blindly taking the top-bitrate one, and reports the real width/height; a short output raises `download-error` instead of a false `download-complete`. |
+
+Also: `tools/refresh-latest-yml.js` now follows `package.json` instead of re-hashing the previous installer, so updater metadata no longer stays a release behind.
+
+**Tests:** 29 suites, **1,178 assertions, 0 failures** (new: `media-probe` 131, `filehost-resolver` 102, `youtube-audio` 64, `row-media` 59, `engine-reliability` 50, `ui-dimensions` 44).
 
 ---
 
