@@ -21,7 +21,7 @@ Four user-reported defects, one fix each — plus the same dimension bug found s
 
 Also: `tools/refresh-latest-yml.js` now follows `package.json` instead of re-hashing the previous installer, so updater metadata no longer stays a release behind.
 
-**Tests:** 31 suites, **1,242 assertions, 0 failures** (new: `media-probe` 131, `filehost-resolver` 102, `youtube-audio` 64, `row-media` 59, `engine-reliability` 50, `ui-dimensions` 44, `yt-dlp-cookies` 51, `extension-dimensions` 13).
+**Tests:** 32 suites, **1,262 assertions, 0 failures** (new: `media-probe` 131, `filehost-resolver` 102, `youtube-audio` 64, `row-media` 59, `engine-reliability` 50, `ui-dimensions` 44, `yt-dlp-cookies` 51, `extension-dimensions` 13, `main-boot` 18).
 
 ---
 
