@@ -1,12 +1,14 @@
-# ⚡ AiDM - AI-Powered Download Manager v4.5.0
+# ⚡ AiDM - AI-Powered Download Manager v4.5.1
 
 > Classic IDM-style download manager with next-generation modular download engine, dynamic in-flight segment splitting, positional random-access disk I/O, multi-mirror failover, atomic `.part.meta` crash recovery, Chrome browser integration, video quality detection, smart per-category file organization, ETA, dual-layer speed limiting, streaming multi-algorithm checksum verification, and a yt-dlp + FFmpeg extraction engine for YouTube.
 
 ---
 
-## What's New in v4.5.0
+## What's New in v4.5.1
 
-Four user-reported defects, one fix each — plus the same dimension bug found still live in the browser extension.
+Four user-reported defects, one fix each — plus the same dimension bug found still live in the browser extension, and the browser session that was never reaching yt-dlp.
+
+> **Why 4.5.1 and not 4.5.0?** The first 4.5.0 installer was built before the extension dimension fix and the yt-dlp cookie fix. A rebuilt binary carrying the same version string is invisible to the in-app updater, so this release is numbered 4.5.1 — anyone who installed that first build gets these two fixes automatically.
 
 | Change | Impact |
 |--------|--------|
