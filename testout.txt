@@ -1,0 +1,12 @@
+  OK   20 re-fetches of ONE rendition collapse to 1 row rows=1
+  OK   video-* and scontent-* edges of same path dedup 
+  OK   different itag = different row 
+  OK   different encode_tag = different row 
+  OK   raw-JSON and base64url efg forms dedup 
+  OK   vabr separates *_n.mp4 HD/SD when efg absent 
+  OK   same vabr re-fetch dedups 
+  OK   garbage efg handled 
+  OK   content/background/popup/download-manager keys byte-identical 
+  OK   96 requests ΓåÆ Γëñ8 rows (was 96 ΓåÆ "99+") rows=8
+
+10 passed, 0 failed

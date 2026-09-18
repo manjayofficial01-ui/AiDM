@@ -1,0 +1,37 @@
+
+> aidm@4.4.0 dist:win
+> electron-builder --win nsis
+
+  • electron-builder  version=26.15.3 os=10.0.26200
+  • loaded configuration  file=package.json ("build" field)
+  • executing @electron/rebuild  electronVersion=28.3.3 arch=x64 buildFromSource=false workspaceRoot=D:\000000 Lab\AiDM\aidm projectDir=./ appDir=./
+  • installing native dependencies  arch=x64
+  • completed installing native dependencies
+  • packaging       platform=win32 arch=x64 electron=28.3.3 appOutDir=dist\win-unpacked
+  • downloaded      label=electron progress=100%
+  • downloaded electron zip extracted successfully  output=D:\000000 Lab\AiDM\aidm\dist\win-unpacked
+  • searching for node modules  pm=npm searchDir=D:\000000 Lab\AiDM\aidm
+  • duplicate dependency references  dependencies=["debug@4.4.3"]
+  • updating asar integrity executable resource  executablePath=dist\win-unpacked\AiDM.exe
+  • signing with signtool.exe  path=dist\win-unpacked\AiDM.exe
+  • signing with signtool.exe  path=dist\win-unpacked\resources\app.asar.unpacked\node_modules\ffmpeg-static\ffmpeg.exe
+  • building        target=nsis file=dist\AiDM-Setup-4.4.0.exe archs=x64 oneClick=false perMachine=false
+  • signing with signtool.exe  path=dist\win-unpacked\resources\elevate.exe
+  • signing with signtool.exe  path=dist\AiDM-Setup-4.4.0.__uninstaller.exe
+  • signing with signtool.exe  path=dist\AiDM-Setup-4.4.0.exe
+  ⨯ [safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED] {"count":68,"threshold":50,"scope":"turn","targets":["D:\\000000 Lab\\AiDM\\aidm\\dist\\AiDM-Setup-4.4.0.__uninstaller.exe"],"targetCount":1}  failedTask=build stackTrace=Error: [safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED] {"count":68,"threshold":50,"scope":"turn","targets":["D:\\000000 Lab\\AiDM\\aidm\\dist\\AiDM-Setup-4.4.0.__uninstaller.exe"],"targetCount":1}
+    at checkBulkDeleteGuard (C:\Program Files\WorkBuddyAI\resources\app.asar.unpacked\cli\vendor\shim\node-safe-delete-shim.cjs:214:19)
+    at tryTrash (C:\Program Files\WorkBuddyAI\resources\app.asar.unpacked\cli\vendor\shim\node-safe-delete-shim.cjs:566:5)
+    at C:\Program Files\WorkBuddyAI\resources\app.asar.unpacked\cli\vendor\shim\node-safe-delete-shim.cjs:681:13
+    at D:\000000 Lab\AiDM\aidm\node_modules\app-builder-lib\node_modules\fs-extra\node_modules\universalify\index.js:9:12
+    at new Promise (<anonymous>)
+    at D:\000000 Lab\AiDM\aidm\node_modules\app-builder-lib\node_modules\fs-extra\node_modules\universalify\index.js:7:14
+    at D:\000000 Lab\AiDM\aidm\node_modules\app-builder-lib\src\targets\nsis\NsisTarget.ts:360:128
+    at async Promise.all (index 0)
+    at AsyncTaskManager.awaitTasks (D:\000000 Lab\AiDM\aidm\node_modules\builder-util\src\asyncTaskManager.ts:65:25)
+    at NsisTarget.finishBuild (D:\000000 Lab\AiDM\aidm\node_modules\app-builder-lib\src\core.ts:93:5)
+    at NsisTarget.finishBuild (D:\000000 Lab\AiDM\aidm\node_modules\app-builder-lib\src\targets\nsis\NsisTarget.ts:163:7)
+    at Packager.doBuild (D:\000000 Lab\AiDM\aidm\node_modules\app-builder-lib\src\packager.ts:562:7)
+    at executeFinally (D:\000000 Lab\AiDM\aidm\node_modules\builder-util\src\promise.ts:12:14)
+    at Packager.build (D:\000000 Lab\AiDM\aidm\node_modules\app-builder-lib\src\packager.ts:450:31)
+    at executeFinally (D:\000000 Lab\AiDM\aidm\node_modules\builder-util\src\promise.ts:12:14)

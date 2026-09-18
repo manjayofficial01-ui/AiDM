@@ -1,0 +1,108 @@
+{
+  "name": "aidm",
+  "version": "4.5.0",
+  "description": "AiDM v4.5.0 - AI-Powered Download Manager with true video dimensions, guaranteed-audio downloads, Rapidgator support and a hardened transfer engine",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder --win",
+    "dist:win": "electron-builder --win nsis",
+    "test:smoke": "node test/smoke.js",
+    "test:integration": "node test/integration.js",
+    "test:engine-v4": "node test/engine-v4.js",
+    "test:fb-dedup": "node test/fb-dedup.js",
+    "test:panel-freshness": "node test/panel-freshness.js",
+    "test:dead-link-guard": "node test/dead-link-guard.js",
+    "test:mydaddy-title": "node test/mydaddy-title.js",
+    "test:range-blocked": "node test/range-blocked.js",
+    "test:embed-resolver": "node test/embed-resolver.js",
+    "test:browser-engine": "node test/browser-engine.js",
+    "test:capsule": "node test/capsule.js",
+    "test:av-tracks": "node test/av-tracks.js",
+    "test:facebook-junk": "node test/facebook-junk.js",
+    "test:row-accuracy": "node test/row-accuracy.js",
+    "test:facebook-panel": "node test/facebook-panel.js",
+    "test:ui-layout": "node test/ui-layout.js",
+    "test:scheduler": "node test/scheduler.js",
+    "test:interception": "node test/interception.js",
+    "test:grabber": "node test/grabber.js",
+    "test:facebook-resolver": "node test/facebook-resolver.js",
+    "test:twitter-resolver": "node test/twitter-resolver.js",
+    "test:youtube": "node test/youtube-resolver.js",
+    "test:youtube-extension": "node test/youtube-extension.js",
+    "test:media-probe": "node test/media-probe.js",
+    "test:filehost-resolver": "node test/filehost-resolver.js",
+    "test:youtube-audio": "node test/youtube-audio.js",
+    "test:engine-reliability": "node test/engine-reliability.js",
+    "test:row-media": "node test/row-media.js",
+    "test:ui-dimensions": "node test/ui-dimensions.js",
+    "test": "node test/smoke.js && node test/integration.js && node test/engine-v4.js && node test/fb-dedup.js && node test/panel-freshness.js && node test/dead-link-guard.js && node test/mydaddy-title.js && node test/range-blocked.js && node test/embed-resolver.js && node test/scheduler.js && node test/interception.js && node test/grabber.js && node test/browser-engine.js && node test/capsule.js && node test/ui-layout.js && node test/facebook-panel.js && node test/row-accuracy.js && node test/facebook-junk.js && node test/av-tracks.js && node test/facebook-resolver.js && node test/twitter-resolver.js && node test/youtube-resolver.js && node test/youtube-extension.js && node test/media-probe.js && node test/filehost-resolver.js && node test/youtube-audio.js && node test/engine-reliability.js && node test/row-media.js && node test/ui-dimensions.js"
+  },
+  "keywords": [
+    "download-manager",
+    "electron",
+    "idm",
+    "multi-thread",
+    "chrome-extension"
+  ],
+  "author": "AiDM",
+  "license": "MIT",
+  "dependencies": {
+    "ffmpeg-static": "^5.3.0",
+    "mime-types": "^2.1.35",
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "electron": "^28.3.3",
+    "electron-builder": "^26.15.3",
+    "png-to-ico": "^3.0.2"
+  },
+  "build": {
+    "appId": "com.aidm.app",
+    "productName": "AiDM",
+    "copyright": "Copyright (c) 2026 AiDM",
+    "files": [
+      "main.js",
+      "preload.js",
+      "preload-location.js",
+      "package.json",
+      "src/**/*",
+      "ui/**/*",
+      "build/icon.ico"
+    ],
+    "asarUnpack": [
+      "node_modules/ffmpeg-static/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "chrome-extension/",
+        "to": "chrome-extension/",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.ico",
+      "artifactName": "AiDM-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "allowElevation": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "AiDM",
+      "uninstallDisplayName": "AiDM Download Manager",
+      "deleteAppDataOnUninstall": false
+    }
+  },
+  "allowScripts": {
+    "ffmpeg-static@5.3.0": true
+  }
+}

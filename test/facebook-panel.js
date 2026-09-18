@@ -1,0 +1,239 @@
+// Regression harness for the Facebook "72 downloadable links" panel explosion
+// (all identical 1080P rows for one playing video).
+//
+// Two compounding causes, fixed without touching the URL-level dedup keys
+// (normalizeStreamUrl / fbFileKey / sent tracking and every fb-dedup.js
+// assertion stay exactly as they were):
+//   1. Same-file re-requests with rotated tokens (vabr/rl/oh/oe churn per
+//      player poll) produced distinct keys → distinct rows. The presentation
+//      layer now collapses on canonical path + rendition tag + quality +
+//      resolution + size (test Collapse section).
+//   2. Feed/watch pages hold EVERY related video's URLs and the panel merged
+//      them into every pill. The panel (and badge) now scope to the playing
+//      video's own path family when attributable, falling back to global
+//      otherwise (test Scope section).
+//
+// SHIPPED definitions are extracted from content.js / background.js /
+// popup.js (not copied); parity across the three copies is asserted.
+// Run: node test/facebook-panel.js
+'use strict';
+const fs = require('fs');
+const path = require('path');
+
+let pass = 0, fail = 0;
+function check(name, cond, extra) {
+  if (cond) { pass++; console.log('  OK  ', name, extra || ''); }
+  else { fail++; console.log('  FAIL', name, extra || ''); }
+}
+
+function grabShipped(src, name) {
+  const i = src.indexOf('function ' + name + '(');
+  if (i < 0) throw new Error('missing ' + name + ' in shipped source');
+  const j = src.indexOf('{', i);
+  let d = 0, inStr = null, esc = false;
+  for (let k = j; k < src.length; k++) {
+    const c = src[k];
+    if (esc) { esc = false; continue; }
+    if (inStr) {
+      if (c === '\\') esc = true;
+      else if (c === inStr) inStr = null;
+      continue;
+    }
+    if (c === '/' && src[k + 1] === '/') { const e = src.indexOf('\n', k); k = e < 0 ? src.length : e; continue; }
+    if (c === '/' && src[k + 1] === '*') { const e = src.indexOf('*/', k); k = e < 0 ? src.length : e + 1; continue; }
+    if (c === '"' || c === "'" || c === '`') { inStr = c; continue; }
+    if (c === '/') {
+      let p = k - 1;
+      while (p >= 0 && (src[p] === ' ' || src[p] === '\t')) p--;
+      const pc = p >= 0 ? src[p] : '(';
+      if (!/[(,=:?!&|{;\[]/.test(pc)) continue;
+      let q = k + 1, qc = false, cls = false;
+      for (; q < src.length; q++) {
+        const cc = src[q];
+        if (qc) { qc = false; continue; }
+        if (cc === '\\') { qc = true; continue; }
+        if (cc === '[') cls = true;
+        else if (cc === ']') cls = false;
+        else if (cc === '/' && !cls) break;
+        else if (cc === '\n') break;
+      }
+      k = q; continue;
+    }
+    if (c === '{') d++;
+    if (c === '}') { d--; if (!d) return src.slice(i, k + 1); }
+  }
+  throw new Error('unbalanced ' + name);
+}
+
+function constSetLiteral(src, constName) {
+  const m = new RegExp('const ' + constName + ' = new Set\\(\\[([\\s\\S]*?)\\]\\);').exec(src);
+  if (!m) throw new Error(constName + ' literal not found');
+  return new Function('return new Set([' + m[1] + ']);')();
+}
+
+function constRegexLiteral(src, constName) {
+  const m = new RegExp('const ' + constName + ' = (\\/.*?\\/i);').exec(src);
+  if (!m) throw new Error(constName + ' literal not found');
+  return eval(m[1]);
+}
+
+const ROOT = path.join(__dirname, '..');
+const ctSrc = fs.readFileSync(path.join(ROOT, 'chrome-extension', 'content.js'), 'utf8');
+const bgSrc = fs.readFileSync(path.join(ROOT, 'chrome-extension', 'background.js'), 'utf8');
+const popSrc = fs.readFileSync(path.join(ROOT, 'chrome-extension', 'popup.js'), 'utf8');
+
+// ── content.js scope ───────────────────────────────────────────────────────
+const ct = new Function(
+  'FB_HOST_RE', 'TOKEN_PARAMS',
+  grabShipped(ctSrc, 'fbCanonicalHost') + '\n' +
+  grabShipped(ctSrc, 'fbEfgTag') + '\n' +
+  grabShipped(ctSrc, 'fbFileKey') + '\n' +
+  grabShipped(ctSrc, 'normalizeStreamUrl') + '\n' +
+  grabShipped(ctSrc, 'fbPathKey') + '\n' +
+  grabShipped(ctSrc, 'fbEfgTagOfUrl') + '\n' +
+  grabShipped(ctSrc, 'collapseRowKey') + '\n' +
+  grabShipped(ctSrc, 'mergeRowInto') + '\n' +
+  grabShipped(ctSrc, 'fbScopeAllows') + '\n' +
+  'return { fbPathKey, fbEfgTagOfUrl, collapseRowKey, mergeRowInto, fbScopeAllows };'
+)(constRegexLiteral(ctSrc, 'FB_HOST_RE'), constSetLiteral(ctSrc, 'TOKEN_PARAMS'));
+
+// ── background.js scope ────────────────────────────────────────────────────
+const bg = new Function(
+  'FB_HOST_RE', 'TOKEN_PARAMS',
+  grabShipped(bgSrc, 'fbCanonicalHost') + '\n' +
+  grabShipped(bgSrc, 'fbEfgTag') + '\n' +
+  grabShipped(bgSrc, 'fbFileKey') + '\n' +
+  grabShipped(bgSrc, 'normalizeSentUrl') + '\n' +
+  grabShipped(bgSrc, 'fbPathKey') + '\n' +
+  grabShipped(bgSrc, 'fbEfgTagOfUrl') + '\n' +
+  grabShipped(bgSrc, 'collapseRowKey') + '\n' +
+  grabShipped(bgSrc, 'collapseVideoRows') + '\n' +
+  'return { fbPathKey, fbEfgTagOfUrl, collapseRowKey, collapseVideoRows };'
+)(constRegexLiteral(bgSrc, 'FB_HOST_RE'), constSetLiteral(bgSrc, 'TOKEN_PARAMS'));
+
+// ── popup.js scope ─────────────────────────────────────────────────────────
+const pop = new Function(
+  'FB_INLINE_RE', 'TOKEN_KEYS',
+  grabShipped(popSrc, 'fbCanonHostInline') + '\n' +
+  grabShipped(popSrc, 'fbEfgTagInline') + '\n' +
+  grabShipped(popSrc, 'fbKeyInline') + '\n' +
+  grabShipped(popSrc, 'normalizeInline') + '\n' +
+  grabShipped(popSrc, 'fbPathKeyInline') + '\n' +
+  grabShipped(popSrc, 'fbEfgTagOfUrlInline') + '\n' +
+  grabShipped(popSrc, 'collapseRowKeyInline') + '\n' +
+  'return { fbPathKeyInline, collapseRowKeyInline };'
+)(
+  (function () {
+    const m = /const FB_INLINE_RE = (\/.*?\/i);/.exec(popSrc);
+    if (!m) throw new Error('FB_INLINE_RE not found');
+    return eval(m[1]);
+  })(),
+  constSetLiteral(popSrc, 'TOKEN_KEYS')
+);
+
+// ── fixtures: one file re-requested with churned tokens ────────────────────
+const efgB64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64')
+  .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const HD = { encode_tag: 'hd_tag', itag: 607 };
+const SD = { encode_tag: 'sd_tag', itag: 110 };
+function fbProgressive(pathPart, tag, rot, vabr) {
+  const q = new URLSearchParams({
+    efg: efgB64(Object.assign({ vrt: 1, bhak: '/AZ' + rot }, tag)),
+    oh: 'hash' + rot, oe: '5E' + (1000 + rot),
+    _nc_ht: 'video.xx.fbcdn.net', _nc_cat: '100', _nc_ohc: 'ohc' + rot,
+  });
+  if (vabr != null) q.set('vabr', String(vabr));
+  return 'https://video-ab1.xx.fbcdn.net' + pathPart + '?' + q.toString();
+}
+const PATH = '/v/t59.1-2/12345_n.mp4';
+const rotA = fbProgressive(PATH, HD, 1, 2800);   // same rendition, poll 1
+const rotB = fbProgressive(PATH, HD, 2, 9417);   // same rendition, poll 2 (vabr churned!)
+const rendSD = fbProgressive(PATH, SD, 1, 900);  // genuinely different rendition
+const otherVideo = fbProgressive('/v/t59.1-2/99999_n.mp4', HD, 1, 2800);
+const nonFb = 'https://cdn.example.com/files/clip.mp4?tok=1';
+
+// ── 1. path identity is query-immune ───────────────────────────────────────
+check('same file, churned query → same path key',
+  ct.fbPathKey(rotA) === ct.fbPathKey(rotB) && ct.fbPathKey(rotA) !== null);
+check('different videos → different path keys',
+  ct.fbPathKey(rotA) !== ct.fbPathKey(otherVideo));
+check('edge pools canonicalize', ct.fbPathKey(rotA) ===
+  ct.fbPathKey(rotA.replace('video-ab1.xx.fbcdn.net', 'scontent-ab1.xx.fbcdn.net')));
+check('non-Facebook → null path key', ct.fbPathKey(nonFb) === null);
+
+// ── 2. collapse: rotation merges, renditions survive ───────────────────────
+function row(url, quality, resolution, size) {
+  return { url, quality, resolution, size };
+}
+check('rotated re-fetch collapses',
+  ct.collapseRowKey(row(rotA, '1080p', '1920x1080', 800000)) ===
+  ct.collapseRowKey(row(rotB, '1080p', '1920x1080', 800000)));
+check('different rendition stays split',
+  ct.collapseRowKey(row(rotA, '1080p', '1920x1080', 800000)) !==
+  ct.collapseRowKey(row(rendSD, '720p', '1280x720', 400000)));
+check('different videos stay split',
+  ct.collapseRowKey(row(rotA, '1080p', '1920x1080', 800000)) !==
+  ct.collapseRowKey(row(otherVideo, '1080p', '1920x1080', 800000)));
+check('unknown-size twins merge (accepted edge: same path+label+res)',
+  ct.collapseRowKey(row(rotA, 'unknown', null, null)) ===
+  ct.collapseRowKey(row(rotB, 'unknown', null, null)));
+check('non-Facebook keeps exact-key semantics',
+  ct.collapseRowKey(row(nonFb, 'unknown', null, null)) ===
+  ct.collapseRowKey(row(nonFb, 'unknown', null, null)) &&
+  ct.collapseRowKey(row(nonFb, 'unknown', null, null)) !==
+  ct.collapseRowKey(row('https://cdn.example.com/files/other.mp4', 'unknown', null, null)));
+
+// ── 3. merge fills the kept row ────────────────────────────────────────────
+{
+  const prev = row(rotA, 'unknown', null, null);
+  ct.mergeRowInto(prev, row(rotB, '1080p', '1920x1080', 800000));
+  check('merge upgrades label/resolution/size',
+    prev.quality === '1080p' && prev.resolution === '1920x1080' && prev.size === 800000);
+}
+
+// ── 4. scope gate ──────────────────────────────────────────────────────────
+{
+  const scope = new Set([ct.fbPathKey(rotA)]);
+  check('scope admits same path, rotated query',
+    ct.fbScopeAllows(rotB, scope) === true);
+  check('scope drops other videos', ct.fbScopeAllows(otherVideo, scope) === false);
+  check('scope lets non-Facebook URLs through', ct.fbScopeAllows(nonFb, scope) === true);
+  check('empty scope allows everything (fallback)',
+    ct.fbScopeAllows(otherVideo, new Set()) === true &&
+    ct.fbScopeAllows(otherVideo, null) === true);
+}
+
+// ── 5. three-copy parity on a mixed corpus ─────────────────────────────────
+{
+  const corpus = [
+    row(rotA, '1080p', '1920x1080', 800000),
+    row(rotB, '1080p', '1920x1080', 800000),
+    row(rendSD, '720p', '1280x720', 400000),
+    row(otherVideo, '1080p', '1920x1080', 800000),
+    row(nonFb, 'unknown', null, null),
+    row(rotA, 'unknown', null, null),
+  ];
+  const agree = corpus.every(v =>
+    ct.collapseRowKey(v) === bg.collapseRowKey(v) &&
+    bg.collapseRowKey(v) === pop.collapseRowKeyInline(v));
+  check('content/background/popup collapse keys identical', agree);
+  check('background collapseVideoRows merges rotations to one',
+    bg.collapseVideoRows([corpus[0], corpus[1]]).length === 1);
+  check('background collapse keeps renditions + videos distinct',
+    bg.collapseVideoRows(corpus).length === 5);
+}
+
+// ── 6. wiring ──────────────────────────────────────────────────────────────
+check('panel gates candidates by scope',
+  /fbScopeAllows\(v\.url, fbScope\)/.test(ctSrc));
+check('panel collapses rows unconditionally',
+  /collapseRowKey\(v\)/.test(ctSrc) && /mergeRowInto\(prev, v\)/.test(ctSrc));
+check('badge counts Facebook by path + scopes per video',
+  /fbPathKey\(u\) \|\| normalizeStreamUrl/.test(ctSrc) && /elementFilePaths\(video\)/.test(ctSrc));
+check('desktop payload collapses before the picker',
+  /collapseVideoRows\(enriched\)/.test(bgSrc));
+check('popup collapses in dedupeMedia',
+  /collapseRowKeyInline\(m\)/.test(popSrc));
+
+console.log(`\nfacebook-panel: ${pass} passed, ${fail} failed`);
+process.exitCode = fail ? 1 : 0;

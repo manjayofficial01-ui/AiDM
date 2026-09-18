@@ -1,0 +1,208 @@
+// Regression harness for "AiDM can't detect/download Facebook videos".
+//
+// Root cause chain:
+//   1. No resolver claimed facebook.com/watch (reel, fb.watch, instagram)
+//      page URLs, so pasting one fell through to a direct download of the
+//      page HTML itself — the classic "AiDM can't download Facebook videos".
+//   2. The browser extension only auto-resolved tweets on full page loads
+//      (tabs.onUpdated), missing every SPA navigation on facebook.com too.
+//
+// Shipped behavior under test (pure parsers + stubbed resolve):
+//   - parseFacebookUrl strictness (watch/reel/share/video.php/fb.watch/
+//     instagram reel|p|tv; rejects media URLs and non-video paths)
+//   - extractFacebookTitle (og:title wins, site suffix stripped, hostname
+//     never returned)
+//   - extractFacebookVariants on a real FB page shape (hd_src/sd_src/
+//     playable_url/browser_native first, audio-only efg skipped, HLS last,
+//     DASH counted but never offered, best-first, de-duplicated)
+//   - isLoginWall detection
+//   - resolveFacebookVideos end-to-end with stubbed page fetches
+//   - resolver registry wiring (supports + provider dispatch)
+//   - fetchPageHtml SSRF guard (off-allowlist refused without network)
+//
+// Run: node test/facebook-resolver.js
+'use strict';
+
+const fb = require('../src/facebook-resolver');
+const resolvers = require('../src/resolvers');
+
+let pass = 0, fail = 0;
+function check(name, cond, extra) {
+  if (cond) { pass++; console.log('  OK  ', name, extra || ''); }
+  else { fail++; console.log('  FAIL', name, extra || ''); }
+}
+
+function b64url(obj) {
+  return Buffer.from(JSON.stringify(obj)).toString('base64')
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+// ── 1. parseFacebookUrl ──────────────────────────────────────────────────
+check('watch?v=',
+  fb.parseFacebookUrl('https://www.facebook.com/watch/?v=123456789012345')?.id === '123456789012345');
+check('video.php?v=',
+  fb.parseFacebookUrl('https://www.facebook.com/video.php?v=123456789012345')?.id === '123456789012345');
+check('page videos path',
+  fb.parseFacebookUrl('https://www.facebook.com/SomePage/videos/123456789012345/')?.id === '123456789012345');
+check('reel',
+  fb.parseFacebookUrl('https://www.facebook.com/reel/AbC123xYz/')?.provider === 'facebook');
+check('share link',
+  fb.parseFacebookUrl('https://www.facebook.com/share/v/AbC123xYz/')?.provider === 'facebook');
+check('fb.watch short link',
+  fb.parseFacebookUrl('https://fb.watch/AbC123xYz/')?.provider === 'facebook');
+check('instagram reel',
+  fb.parseFacebookUrl('https://www.instagram.com/reel/C8abcDEF123/')?.provider === 'instagram');
+check('instagram post',
+  fb.parseFacebookUrl('https://www.instagram.com/p/C8abcDEF123/')?.provider === 'instagram');
+check('rejects fbcdn media URL',
+  fb.parseFacebookUrl('https://video.few1-1.fna.fbcdn.net/v/t42.9040-2/123_n.mp4?oh=a&oe=b') === null);
+check('rejects facebook home',
+  fb.parseFacebookUrl('https://www.facebook.com/') === null);
+check('rejects facebook profile',
+  fb.parseFacebookUrl('https://www.facebook.com/SomePage/') === null);
+check('rejects watch without id',
+  fb.parseFacebookUrl('https://www.facebook.com/watch/') === null);
+check('rejects non-video host',
+  fb.parseFacebookUrl('https://example.com/watch/?v=123456789012345') === null);
+check('rejects garbage',
+  fb.parseFacebookUrl('not a url') === null && fb.parseFacebookUrl(null) === null);
+check('isFacebookUrl mirrors parse',
+  fb.isFacebookUrl('https://www.facebook.com/watch/?v=123456789012345') === true &&
+  fb.isFacebookUrl('https://video.twimg.com/x.mp4') === false);
+
+// ── 2. extractFacebookTitle ──────────────────────────────────────────────
+check('og:title wins, site suffix stripped',
+  fb.extractFacebookTitle('<meta property="og:title" content="Funny cat video - Facebook" />', 'facebook.com') === 'Funny cat video');
+check('title fallback',
+  fb.extractFacebookTitle('<title>My Reel | Facebook</title>', 'facebook.com') === 'My Reel');
+check('hostname never a title',
+  fb.extractFacebookTitle('<title>facebook.com</title>', 'facebook.com') === null);
+check('login placeholder rejected',
+  fb.extractFacebookTitle('<title>Log in | Facebook</title>', 'facebook.com') === null);
+
+// ── 3. extractFacebookVariants ───────────────────────────────────────────
+const AUDIO_EFG = b64url({ encode_tag: 'dash_audio_only', video_id: 111 });
+const VIDEO_EFG = b64url({ encode_tag: 'dash_hd', video_id: 111 });
+const FIXTURE = `
+<html><head><title>Fixture</title></head><body>
+<script>{"playable_url":"https:\\/\\/video.few1-1.fna.fbcdn.net\\/v\\/t42.9040-2\\/111_sd.mp4?oh=aaa\\u0026oe=bbb",
+"playable_url_quality_hd":"https:\\/\\/video.few1-1.fna.fbcdn.net\\/v\\/t42.9040-2\\/111_hd.mp4?oh=aaa\\u0026oe=bbb",
+"browser_native_hd_url":"https:\\/\\/video.few1-1.fna.fbcdn.net\\/v\\/t42.9040-2\\/111_hd2.mp4?oh=aaa\\u0026oe=bbb",
+"hd_src":"https:\\/\\/video.few1-1.fna.fbcdn.net\\/v\\/t42.9040-2\\/111_hdsrc.mp4?oh=aaa\\u0026oe=bbb",
+"sd_src":"https:\\/\\/video.few1-1.fna.fbcdn.net\\/v\\/t42.9040-2\\/111_sdsrc.mp4?oh=aaa\\u0026oe=bbb"}</script>
+<script>junk "dash_manifest_url":"https:\\/\\/video.few1-1.fna.fbcdn.net\\/v\\/t1.0-0\\/manifest.mpd?x=1"</script>
+</body></html>`;
+
+{
+  const variants = fb.extractFacebookVariants(FIXTURE, 'https://www.facebook.com/watch/?v=111');
+  check('finds progressive variants', variants.length >= 4, `got ${variants.length}`);
+  check('mp4 before hls, best first',
+    variants.every(v => v.isMp4) && variants[0].height >= variants[variants.length - 1].height);
+  check('no duplicates', new Set(variants.map(v => v.url)).size === variants.length);
+  check('mpd counted not offered',
+    variants.every(v => !/\.mpd/i.test(v.url)) && variants._mpdCount >= 1);
+}
+
+{
+  const audioUrl = `https://scontent.xx.fbcdn.net/v/t66.0-0/111_n.mp4?efg=${encodeURIComponent(AUDIO_EFG)}&oh=a&oe=b`;
+  const videoUrl = `https://video.few1-1.fna.fbcdn.net/v/t42.9040-2/111_n.mp4?efg=${encodeURIComponent(VIDEO_EFG)}&oh=a&oe=b`;
+  const html = `<script>{"hd_src":"${videoUrl}","sd_src":"${audioUrl}"}</script>`;
+  const variants = fb.extractFacebookVariants(html, 'https://www.facebook.com/watch/?v=111');
+  const urls = variants.map(v => v.url);
+  // NOTE: compare the FULL efg blob — audio/video payloads share a base64
+  // prefix ({"encode_tag":"dash_), so a prefix match would false-positive.
+  check('audio-only efg rendition skipped',
+    !urls.some(u => u.includes(AUDIO_EFG)));
+  check('video efg rendition kept',
+    urls.some(u => u.includes(VIDEO_EFG)));
+}
+
+{
+  const hlsHtml = `<script>{"hls_playlist_url":"https://video.few1-1.fna.fbcdn.net/v/hls/111.m3u8?oh=a"}</script>`;
+  const variants = fb.extractFacebookVariants(hlsHtml, 'https://www.facebook.com/watch/?v=111');
+  check('hls kept as last resort',
+    variants.length === 1 && variants[0].isMp4 === false);
+}
+
+// ── 4. isLoginWall ───────────────────────────────────────────────────────
+check('login wall detected',
+  fb.isLoginWall('<div>You must log in to continue</div><form id="login_form">') === true);
+check('real page not a wall', fb.isLoginWall(FIXTURE) === false);
+
+// ── 5. resolveFacebookVideos (stubbed fetch) ─────────────────────────────
+(async () => {
+  const stub = async () => ({
+    html: `<meta property="og:title" content="Stub video - Facebook" />` + FIXTURE,
+    finalUrl: 'https://www.facebook.com/watch/?v=111',
+  });
+  try {
+    const r = await fb.resolveFacebookVideos('https://www.facebook.com/watch/?v=123456789012345', { fetchHtml: stub });
+    check('resolve provider/id', r.provider === 'facebook' && r.id === '123456789012345');
+    check('resolve title', r.title === 'Stub video');
+    check('resolve videos have filenames',
+      r.videos.length >= 4 && r.videos.every(v => /\.mp4$/i.test(v.filename)));
+    check('resolve picker shape',
+      fb.toPickerVideos(r.videos).every(v => v.url && v.filename && v.quality));
+    check('resolve referer is page', /facebook\.com/.test(r.referer));
+  } catch (e) {
+    check('resolve stubbed page', false, e.message);
+  }
+
+  try {
+    // Padded past the short-content guard so the login-wall branch itself is
+    // exercised, not the empty-page branch.
+    const wallHtml = ('<div>timeline filler text lorem ipsum dolor sit amet </div>'.repeat(30)) +
+      '<div>You must log in to continue</div><form id="login_form">';
+    await fb.resolveFacebookVideos('https://www.facebook.com/watch/?v=123456789012345',
+      { fetchHtml: async () => ({ html: wallHtml, finalUrl: 'https://www.facebook.com/watch/?v=1' }) });
+    check('login wall throws', false);
+  } catch (e) {
+    check('login wall throws', /needs a Facebook\/Instagram login/i.test(e.message), e.message);
+  }
+
+  try {
+    await fb.resolveFacebookVideos('https://www.facebook.com/watch/?v=123456789012345',
+      { fetchHtml: async () => ({ html: '<html><body>no video here at all, just text '.repeat(50), finalUrl: 'https://www.facebook.com/watch/?v=1' }) });
+    check('empty page throws', false);
+  } catch (e) {
+    check('empty page throws', /No downloadable video/i.test(e.message), e.message);
+  }
+
+  try {
+    await fb.resolveFacebookVideos('https://example.com/watch/?v=123', { fetchHtml: stub });
+    check('non-fb url rejected', false);
+  } catch (e) {
+    check('non-fb url rejected', /Not a Facebook/i.test(e.message));
+  }
+
+  // ── 6. registry wiring ───────────────────────────────────────────────
+  check('facebook resolver registered',
+    resolvers.hasResolverFor('https://www.facebook.com/watch/?v=123456789012345') === true);
+  check('registry dispatches to facebook',
+    resolvers.findResolver('https://www.facebook.com/reel/AbC123xYz/')?.name === 'facebook');
+  check('registry ignores fbcdn media urls',
+    resolvers.hasResolverFor('https://video.few1-1.fna.fbcdn.net/v/t42.9040-2/1_n.mp4?oh=a') === false);
+  check('twitter still dispatches to twitter',
+    resolvers.findResolver('https://x.com/u/status/1234567890123456789')?.name === 'twitter');
+  try {
+    const r = await resolvers.resolveMedia('https://www.facebook.com/watch/?v=123456789012345', { fetchHtml: stub });
+    check('resolveMedia end-to-end (facebook)',
+      r.provider === 'facebook' && Array.isArray(r.media) && r.media.length >= 4 &&
+      r.pickerVideos.length === r.media.length);
+    check('best progressive flagged preferred',
+      r.media.some(m => m.preferred === true && m.format === 'mp4'));
+  } catch (e) {
+    check('resolveMedia end-to-end (facebook)', false, e.message);
+  }
+
+  // ── 7. SSRF guard (no network) ───────────────────────────────────────
+  try {
+    await fb.fetchPageHtml('https://evil.example.com/video');
+    check('off-allowlist refused', false);
+  } catch (e) {
+    check('off-allowlist refused', /allowlist/i.test(e.message), e.message);
+  }
+
+  console.log(`\nfacebook-resolver: ${pass} passed, ${fail} failed`);
+  process.exitCode = fail ? 1 : 0;
+})();
