@@ -1197,6 +1197,10 @@ async function showSettingsModal() {
     ? 'Saved — Rapidgator links will use this account.'
     : 'Leave both empty to use the free flow (wait required).';
 
+  // YouTube signed-in access (v4.5.0) — opt-in browser cookie store.
+  const ytBrowserSelect = document.getElementById('setting-yt-cookies-browser');
+  if (ytBrowserSelect) ytBrowserSelect.value = String(settings.youtubeCookiesFromBrowser || '');
+
   // Category paths
   const cats = ['video', 'audio', 'document', 'archive', 'software', 'image'];
   cats.forEach(cat => {
@@ -1247,6 +1251,7 @@ async function saveSettings() {
         ...(document.getElementById('setting-rg-cookie').value.trim() ? { cookie: document.getElementById('setting-rg-cookie').value.trim() } : {}),
       },
     },
+    youtubeCookiesFromBrowser: (document.getElementById('setting-yt-cookies-browser')?.value || '').trim(),
     aiEnabled: document.getElementById('setting-ai-enabled').checked,
     aiBaseURL: document.getElementById('setting-ai-baseurl').value.trim() || 'https://tokenharbor.ai/v1',
     aiPrimaryModel: document.getElementById('setting-ai-primary').value,

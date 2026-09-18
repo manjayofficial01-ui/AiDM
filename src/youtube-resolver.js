@@ -483,7 +483,15 @@ async function resolveYouTubeVideos(url, opts = {}) {
 
   let info;
   try {
-    info = await ytdlp.probe(canonical, { timeoutMs: opts.timeoutMs || 60000 });
+    // A private / members-only / age-confirmed video cannot even be LISTED
+    // without the session, so the probe carries the same cookies the download
+    // will use — otherwise the picker comes back empty for a logged-in user.
+    info = await ytdlp.probe(canonical, {
+      timeoutMs: opts.timeoutMs || 60000,
+      cookies: opts.cookies || null,
+      referer: opts.referer || null,
+      cookiesFromBrowser: opts.cookiesFromBrowser || null,
+    });
   } catch (e) {
     if (RETRYABLE_PROBE_CODES.has(e && e.code)) return fallbackPayload(canonical, id, e && e.message);
     throw e;

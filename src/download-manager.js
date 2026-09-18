@@ -439,6 +439,12 @@ const DEFAULT_SETTINGS = {
   fileHosts: {
     rapidgator: { user: '', password: '', cookie: '' },
   },
+  // yt-dlp runs as a child process and does NOT inherit the browser session,
+  // so a logged-in user's private / members-only / age-confirmed video used to
+  // fail. Empty = off. Set to a browser name (chrome, edge, firefox, brave…)
+  // to let yt-dlp read that browser's own cookie store; it is opt-in and only
+  // ever used for the site being downloaded.
+  youtubeCookiesFromBrowser: '',
 };
 
 class DownloadManager extends EventEmitter {
@@ -1185,6 +1191,14 @@ class DownloadManager extends EventEmitter {
         outputTemplate: template,
         limitRate: Number(this.engine && this.engine.globalSpeedLimit) || 0,
         logPath,
+        // yt-dlp is a CHILD PROCESS and does not inherit the browser session.
+        // Forward the cookies this row already carries (captured by the
+        // extension) plus the page URL as Referer, so a logged-in user's own
+        // private / members-only / age-confirmed video actually downloads
+        // instead of failing with "Sign in to confirm you're not a bot".
+        cookies: download.cookies || (download.meta && download.meta.cookies) || null,
+        referer: (download.meta && download.meta.pageUrl) || null,
+        cookiesFromBrowser: String(this.settings.youtubeCookiesFromBrowser || '').trim() || null,
         // With video+audio the per-track total is only half the job; the
         // resolver's combined size makes the percentage honest.
         expectedBytes: (choice && choice.size) || download.totalSize || 0,

@@ -366,6 +366,24 @@
         </div>
 
         <div class="settings-section">
+          <h4>YouTube — signed-in access</h4>
+          <p class="settings-hint">yt-dlp runs as a separate process and cannot see your browser's login, so videos you <em>can</em> watch while signed in (private, members-only, age-confirmed) used to fail as “Sign in to confirm you’re not a bot”. Let yt-dlp read that browser's cookie store to fix it. Off by default — nothing is read until you choose a browser.</p>
+          <div class="form-group">
+            <label>Read cookies from browser</label>
+            <select id="setting-yt-cookies-browser">
+              <option value="">Off (don't use browser cookies)</option>
+              <option value="chrome">Chrome</option>
+              <option value="edge">Edge</option>
+              <option value="firefox">Firefox</option>
+              <option value="brave">Brave</option>
+              <option value="opera">Opera</option>
+              <option value="vivaldi">Vivaldi</option>
+            </select>
+          </div>
+          <div class="settings-hint">Cookies the browser extension captures are always forwarded, whatever you pick here.</div>
+        </div>
+
+        <div class="settings-section">
           <h4>AI Assistant — TokenHarbor</h4>
           <p class="settings-hint">OpenAI-compatible gateway at <code>https://tokenharbor.ai/v1</code>. Primary: <code>mimo-v2.5:free</code>, fallback: <code>deepseek-v4-flash:free</code>. Prefer the <code>TOKENHARBOR_API_KEY</code> env var — the field below is only a local fallback.</p>
           <div class="form-group toggle">

@@ -420,6 +420,14 @@ function applyTimetableSpeed() {
  * Kept here so no credential ever travels through the renderer: the resolver
  * reads it server-side, and the row only ever stores the resulting direct URL.
  */
+/** Opt-in: let yt-dlp read a browser's own cookie store (empty = off). */
+function youtubeCookiesFromBrowser() {
+  try {
+    const v = String((downloadManager && downloadManager.getSettings().youtubeCookiesFromBrowser) || '').trim();
+    return v || null;
+  } catch (e) { return null; }
+}
+
 function fileHostCredentials() {
   try {
     const hosts = (downloadManager && downloadManager.getSettings().fileHosts) || {};
@@ -439,8 +447,14 @@ ipcMain.handle('add-download', async (event, opts) => {
     if (opts && opts.url && resolvers.hasResolverFor(opts.url)) {
       // File hosters (Rapidgator …) need the account the user saved in
       // Settings › File hosts; every other provider ignores the option.
+      // yt-dlp (YouTube) additionally gets the session the extension captured,
+      // plus the opt-in "read cookies from this browser" setting, so a
+      // logged-in user's own private/members-only video can be listed at all.
       const resolved = await resolvers.resolveMedia(opts.url, {
         credentials: fileHostCredentials(),
+        cookies: (opts && opts.cookies) || null,
+        referer: (opts && opts.pageUrl) || null,
+        cookiesFromBrowser: youtubeCookiesFromBrowser(),
       });
       // The quality picker replays pageUrl as Referer when downloading. For
       // embed providers (mydaddy/hqporner) the CDN only honours the PLAYER

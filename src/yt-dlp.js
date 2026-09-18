@@ -28,6 +28,8 @@
 
 const { spawn } = require('child_process');
 const fs = require('fs');
+const os = require('os');
+const crypto = require('crypto');
 const path = require('path');
 const { isAvailable: ffmpegAvailable, resolveFfmpeg } = require('./media-mux');
 
@@ -230,7 +232,10 @@ const SECRET_PARAMS = /(sig|s|sp|signature|lsig|pot|potc|token|expire|ip|ipbits|
 
 /** Strip signed-URL parameters so logs never leak tokens into the UI. */
 function redact(text) {
-  return String(text == null ? '' : text).replace(SECRET_PARAMS, '$1=REDACTED');
+  return String(text == null ? '' : text)
+    .replace(SECRET_PARAMS, '$1=REDACTED')
+    // A header echoed back by yt-dlp must never reach a log the user can open.
+    .replace(/(Cookie|Authorization):\s*[^\r\n"']+/gi, '$1: REDACTED');
 }
 
 // ── Error classification ─────────────────────────────────────────────────────
@@ -304,16 +309,131 @@ function killTree(pid) {
   } catch (e) { /* best effort */ }
 }
 
+// ── Cookies / Referer ────────────────────────────────────────────────────────
+// yt-dlp runs as a CHILD PROCESS and therefore does not inherit the browser
+// session the extension captured. Without this block, cookies AiDM already
+// held for a row were silently dropped on the YouTube path: private,
+// members-only and age-confirmed videos failed even for a logged-in user,
+// while the same cookies worked fine for direct HTTP downloads.
+//
+// Secrets go to a Netscape cookie FILE, never onto the command line — an argv
+// entry is visible to every process listing on the machine (`tasklist`,
+// WMI, /proc), a 0600 file is not.
+
+const COOKIE_FILE_MAGIC = '# Netscape HTTP Cookie File\n';
+
+// Browsers yt-dlp can read a cookie store from, so users can opt in to
+// "--cookies-from-browser" instead of pasting anything.
+const BROWSERS = ['chrome', 'chromium', 'edge', 'firefox', 'safari', 'opera', 'brave', 'vivaldi', 'whale'];
+
+/** Hostname of a URL, or null. Never throws — a bad URL must not break a job. */
+function cookieDomainFor(url) {
+  try {
+    const h = new URL(String(url)).hostname;
+    return h || null;
+  } catch (e) { return null; }
+}
+
+/** Split a `Cookie:` header value into [name, value] pairs. */
+function parseCookiePairs(header) {
+  const out = [];
+  String(header || '').split(';').forEach((part) => {
+    const t = part.trim();
+    if (!t) return;
+    const i = t.indexOf('=');
+    if (i <= 0) return; // flag-only or malformed
+    const name = t.slice(0, i).trim();
+    const value = t.slice(i + 1).trim();
+    if (!name) return;
+    out.push([name, value]);
+  });
+  return out;
+}
+
+/**
+ * Render a Netscape cookie file (pure — testable without touching disk).
+ * @returns {string} '' when there is nothing usable to write
+ */
+function netscapeCookieFile(domain, cookieHeader) {
+  const pairs = parseCookiePairs(cookieHeader);
+  if (!domain || !pairs.length) return '';
+  // A leading dot makes the cookie apply to subdomains; YouTube sets its
+  // session cookies on .youtube.com, not www.youtube.com.
+  const d = (!domain.startsWith('.') && domain.split('.').length >= 2) ? '.' + domain : domain;
+  const expires = Math.floor(Date.now() / 1000) + 3600;
+  const rows = pairs.map(([n, v]) => `${d}\tTRUE\t/\tFALSE\t${expires}\t${n}\t${v}`);
+  return COOKIE_FILE_MAGIC + rows.join('\n') + '\n';
+}
+
+function cookieDir() {
+  const base = process.platform === 'win32'
+    ? (process.env.LOCALAPPDATA || path.join(process.env.USERPROFILE || '.', 'AppData', 'Local'))
+    : (process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share'));
+  return path.join(base, process.platform === 'win32' ? 'AiDM' : 'aidm', 'cookies');
+}
+
+/**
+ * Write the row's cookies to a throwaway Netscape file for one job.
+ * @returns {string|null} path (caller deletes it), or null when there is
+ *          nothing to write / the file cannot be created.
+ */
+function writeCookieFile(url, cookieHeader) {
+  const body = netscapeCookieFile(cookieDomainFor(url), cookieHeader);
+  if (!body) return null;
+  try {
+    const dir = cookieDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const p = path.join(dir, 'cookies-' + crypto.randomBytes(8).toString('hex') + '.txt');
+    fs.writeFileSync(p, body, { mode: 0o600 });
+    return p;
+  } catch (e) { return null; }
+}
+
+/** Best-effort delete of a cookie file written by writeCookieFile(). */
+function deleteCookieFile(p) {
+  if (!p) return;
+  try { fs.unlinkSync(p); } catch (e) { /* already gone */ }
+}
+
+/**
+ * Build the yt-dlp cookie/referer arguments. Pure — the test suite asserts it
+ * without ever running yt-dlp.
+ *
+ * @param {object} o
+ * @param {string} [o.cookieFile] Netscape file from writeCookieFile()
+ * @param {string} [o.cookiesFromBrowser] e.g. 'chrome' (opt-in; empty = off)
+ * @param {string} [o.referer] page URL some CDNs require
+ * @returns {string[]} ready to spread into argv
+ */
+function cookieArgs(o) {
+  const out = [];
+  if (!o) return out;
+  const browser = String(o.cookiesFromBrowser || '').trim().toLowerCase();
+  if (browser && BROWSERS.includes(browser)) out.push('--cookies-from-browser', browser);
+  if (o.cookieFile) out.push('--cookies', String(o.cookieFile));
+  const ref = String(o.referer || '').trim();
+  if (ref && /^https?:\/\//i.test(ref)) out.push('--referer', ref);
+  return out;
+}
+
 // ── probe(): metadata + fresh formats, no download ───────────────────────────
 
 /**
  * Run `yt-dlp -J` and return the parsed info dict.
  * @param {string} url canonical (already normalised) page URL
+ * @param {object} [opts]
+ * @param {number} [opts.timeoutMs]
+ * @param {string} [opts.cookies]    `Cookie:` header value for this job
+ * @param {string} [opts.referer]    page URL to send as Referer
+ * @param {string} [opts.cookiesFromBrowser] opt-in browser cookie store
  * @returns {Promise<object>} parsed info dict
  */
-async function probe(url, { timeoutMs = 60000 } = {}) {
+async function probe(url, { timeoutMs = 60000, cookies = null, referer = null, cookiesFromBrowser = null } = {}) {
   const runner = await detectRunner();
   if (!runner) throw Object.assign(new Error(ytdlpMissingMessage()), { code: 'missing' });
+  // A private/members-only video cannot even be LISTED without the session,
+  // so the picker must carry cookies too — not just the download.
+  const cookieFile = cookies ? writeCookieFile(url, cookies) : null;
   const args = [
     '--dump-json',
     '--no-warnings',
@@ -325,23 +445,28 @@ async function probe(url, { timeoutMs = 60000 } = {}) {
     '--socket-timeout', '20',
     '--retries', '2',
     '--extractor-retries', '2',
+    ...cookieArgs({ cookieFile, referer, cookiesFromBrowser }),
     '--',
     String(url),
   ];
-  const res = await runOnce(runner.argv, args, { timeoutMs, maxOutput: 8 * 1024 * 1024 });
-  if (!res.ok) {
-    const why = classifyError(res.stderr || res.reason);
-    throw Object.assign(new Error(why.message), { code: why.code, raw: redact(res.stderr || res.reason).slice(0, 500) });
-  }
-  // `--no-warnings` keeps stdout clean, but be defensive: take the last JSON
-  // object in case an extractor printed a banner anyway.
-  const lines = String(res.stdout || '').split('\n').map(l => l.trim()).filter(Boolean);
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (lines[i].startsWith('{')) {
-      try { return JSON.parse(lines[i]); } catch (e) { /* try older line */ }
+  try {
+    const res = await runOnce(runner.argv, args, { timeoutMs, maxOutput: 8 * 1024 * 1024 });
+    if (!res.ok) {
+      const why = classifyError(res.stderr || res.reason);
+      throw Object.assign(new Error(why.message), { code: why.code, raw: redact(res.stderr || res.reason).slice(0, 500) });
     }
+    // `--no-warnings` keeps stdout clean, but be defensive: take the last JSON
+    // object in case an extractor printed a banner anyway.
+    const lines = String(res.stdout || '').split('\n').map(l => l.trim()).filter(Boolean);
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (lines[i].startsWith('{')) {
+        try { return JSON.parse(lines[i]); } catch (e) { /* try older line */ }
+      }
+    }
+    throw Object.assign(new Error('Could not read the video information.'), { code: 'parse' });
+  } finally {
+    deleteCookieFile(cookieFile);
   }
-  throw Object.assign(new Error('Could not read the video information.'), { code: 'parse' });
 }
 
 // ── Progress parsing ─────────────────────────────────────────────────────────
@@ -408,6 +533,11 @@ function parseProgressLine(line) {
  *        here on failure (short retention — see youtubeLogDir() in the manager)
  * @param {(p:{downloaded:number,total:number,speed:number,percent:number,eta:number|null})=>void} [o.onProgress]
  * @param {()=>boolean} [o.shouldAbort] polled every 400 ms (pause/cancel/remove)
+ * @param {string} [o.cookies]    `Cookie:` header value for this job (the
+ *        session the browser extension captured). Written to a throwaway
+ *        Netscape file, never onto the command line.
+ * @param {string} [o.referer]    page URL some CDNs require
+ * @param {string} [o.cookiesFromBrowser] opt-in browser cookie store name
  * @returns {Promise<{filePath:string,size:number}>}
  */
 function download(o) {
@@ -428,6 +558,9 @@ function download(o) {
       logPath = null,
       onProgress = null,
       shouldAbort = null,
+      cookies = null,
+      referer = null,
+      cookiesFromBrowser = null,
     } = o;
 
     if (!url || !formatSpec || !outputTemplate) {
@@ -484,6 +617,11 @@ function download(o) {
     // FFmpeg install is required for the audio/video merge.
     if (ff) args.push('--ffmpeg-location', ff);
 
+    // Session cookies / Referer for this job (see the cookie block above).
+    // Written to a file so the secret never appears in argv.
+    const cookieFile = cookies ? writeCookieFile(url, cookies) : null;
+    args.push(...cookieArgs({ cookieFile, referer, cookiesFromBrowser }));
+
     args.push('--', String(url));
 
     let child;
@@ -512,6 +650,7 @@ function download(o) {
       clearTimeout(hardTimer);
       clearInterval(abortTimer);
       cleanup();
+      deleteCookieFile(cookieFile); // never leave the session on disk
       if (err) reject(err); else resolve(result);
     };
 
@@ -641,4 +780,12 @@ module.exports = {
   cleanupPartialOutputs,
   producedFileFor,
   verifyMergedAudio,
+  // Cookie / Referer plumbing (pure helpers are regression-tested).
+  BROWSERS,
+  cookieArgs,
+  cookieDomainFor,
+  parseCookiePairs,
+  netscapeCookieFile,
+  writeCookieFile,
+  deleteCookieFile,
 };
