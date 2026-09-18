@@ -58,6 +58,18 @@ class IPCServer {
     this.port = 18765;
   }
 
+  /**
+   * Opt-in: the browser whose own cookie store yt-dlp may read (empty = off).
+   * Read from settings at call time so changing it in Settings takes effect
+   * without restarting the app.
+   */
+  _youtubeCookiesFromBrowser() {
+    try {
+      const v = String((this.dm && this.dm.getSettings().youtubeCookiesFromBrowser) || '').trim();
+      return v || null;
+    } catch (e) { return null; }
+  }
+
   _readBody(req) {
     return new Promise((resolve, reject) => {
       let body = '';
@@ -213,15 +225,21 @@ class IPCServer {
             if (!RESOLVE_LIMITER.allow()) {
               return respond(429, { success: false, error: 'Too many resolve requests — try again in a minute' });
             }
-            const { url, credentials } = JSON.parse(body || '{}');
+            const { url, credentials, cookies, referer } = JSON.parse(body || '{}');
             if (!url || typeof url !== 'string') throw new Error('Missing url');
             // File hosters (Rapidgator …) need the account the user saved in
             // Settings › File hosts. The extension may forward it; when it
             // does not, fall back to the desktop's own saved settings so
             // pasting a hoster link in the browser works like pasting it in
             // the app.
+            // yt-dlp additionally gets the session the caller captured plus the
+            // opt-in browser cookie store, so a signed-in user's own video can
+            // be listed at all (see src/yt-dlp.js cookie block).
             const resolved = await resolvers.resolveMedia(url, {
               credentials: credentials || ((this.dm.getSettings().fileHosts || {}).rapidgator || {}),
+              cookies: cookies || null,
+              referer: referer || null,
+              cookiesFromBrowser: this._youtubeCookiesFromBrowser(),
             });
             respond(200, { success: true, ...resolved });
           } catch (err) {
@@ -337,8 +355,15 @@ class IPCServer {
               res.end(JSON.stringify({ success: false, error: 'Too many resolve requests — try again in a minute' }));
               return;
             }
-            const { url, pageTitle } = JSON.parse(body || '{}');
-            const r = await resolvers.resolveMedia(url);
+            const { url, pageTitle, cookies, referer } = JSON.parse(body || '{}');
+            // The extension sends only the page URL, so the session has to come
+            // from the opt-in browser cookie store here — without it a private /
+            // members-only video is reported as unavailable to a signed-in user.
+            const r = await resolvers.resolveMedia(url, {
+              cookies: cookies || null,
+              referer: referer || null,
+              cookiesFromBrowser: this._youtubeCookiesFromBrowser(),
+            });
 
             const payload = {
               url: r.canonicalUrl || url,

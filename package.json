@@ -1,6 +1,6 @@
 {
   "name": "aidm",
-  "version": "4.5.1",
+  "version": "4.5.2",
   "description": "AiDM v4.5.0 - AI-Powered Download Manager with true video dimensions, guaranteed-audio downloads, Rapidgator support and a hardened transfer engine",
   "main": "main.js",
   "scripts": {

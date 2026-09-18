@@ -122,7 +122,15 @@ if (!m) {
     check('shows the real video title', /pageTitle: pageTitle \|\| r\.title/.test(ep[0]));
     check('passes the picker video list', /videos: r\.pickerVideos \|\| \[\]/.test(ep[0]));
     check('reports failure instead of hanging', /success: false/.test(ep[0]));
-    check('never attaches cookies to the row', !/cookies:/.test(ep[0]));
+    // Cookies may be FORWARDED to the resolver — yt-dlp needs the session to
+    // list a signed-in user's own private/members-only video — but they must
+    // never land on the row that gets persisted, nor be echoed to the caller.
+    const payloadBlock = (/const payload = \{([\s\S]*?)\n\s*\};/.exec(ep[0]) || [])[1] || '';
+    check('never attaches cookies to the row', !!payloadBlock && !/cookies:/.test(payloadBlock));
+    const okResponse = /res\.end\(JSON\.stringify\(\{ success: true, provider: 'youtube'[\s\S]*?\)\);/.exec(ep[0]);
+    check('never returns cookies to the caller', !!okResponse && !/cookies:/.test(okResponse[0]));
+    check('forwards the session to the resolver (not onto the row)',
+      /resolveMedia\(url,[\s\S]{0,240}cookies:/.test(ep[0]));
   }
 
   // ── 4. Hiding the player's own CDN urls on a YouTube page ─────────────────
