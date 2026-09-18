@@ -1147,8 +1147,17 @@ function normalizeStreamUrl(u) {
         }
         if (targetUrl && targetUrl.startsWith('http')) {
           const info = detectQuality(targetUrl, video);
-          // Try to get resolution from video element itself
-          if (video.videoWidth && video.videoHeight) {
+          // Do NOT stamp the playing element's intrinsic size onto every
+          // candidate. One <video> exposes several <source> variants (360p /
+          // 720p / 1080p); giving them all video.videoWidth produced N rows
+          // with one identical resolution — the bug where "every downloadable
+          // video shows the same dimension". Worse, on a DASH/MSE player
+          // videoWidth is the CURRENT rendition, which changes as it adapts.
+          // Only fill in when the URL yielded nothing AND this candidate is
+          // what the element is actually playing. Otherwise leave it unknown:
+          // the desktop app proves real geometry from the file (media-probe).
+          if (!info.resolution && video.videoWidth && video.videoHeight &&
+              srcUrl === video.currentSrc) {
             info.resolution = `${video.videoWidth}x${video.videoHeight}`;
             info.quality = qualityFromHeight(video.videoHeight);
           }
@@ -2229,7 +2238,17 @@ function normalizeStreamUrl(u) {
       seen.add(n);
       seen.add(url);
       const info = detectQuality(url, el);
-      if (!info.resolution && video.videoWidth && video.videoHeight) {
+      // Same rule as scanVideoElements(): the element's intrinsic size belongs
+      // only to the variant it is currently playing. Stamping it on sibling
+      // variants (or on an adaptive element mid-rendition-switch) is what made
+      // every row in the picker report one identical resolution. Unknown is
+      // better than wrong — the app resolves real geometry after download.
+      let isCurrentSrc = false;
+      try {
+        isCurrentSrc = !!(video.currentSrc &&
+          (normalizeStreamUrl(video.currentSrc) === n || video.currentSrc === url));
+      } catch (e) { isCurrentSrc = false; }
+      if (!info.resolution && isCurrentSrc && video.videoWidth && video.videoHeight) {
         info.resolution = video.videoWidth + 'x' + video.videoHeight;
         info.quality = qualityFromHeight(video.videoHeight);
       }

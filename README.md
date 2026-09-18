@@ -6,7 +6,7 @@
 
 ## What's New in v4.5.0
 
-Four user-reported defects, one fix each.
+Four user-reported defects, one fix each — plus the same dimension bug found still live in the browser extension.
 
 | Change | Impact |
 |--------|--------|
@@ -14,10 +14,11 @@ Four user-reported defects, one fix each.
 | **Downloads always have audio** | Hard invariant: no non-audio-only choice can ever reach yt-dlp as a bare video format id — `ensureAudioChoice()` rewrites any audio-less DASH choice to `<id>+bestaudio/best`, and `buildFormatSpec()` repairs stale persisted rows too. A merge with no FFmpeg now fails fast and clearly instead of leaving a silent file, partial tracks are cleaned up on failure, and the produced file is probed so a video-without-audio result is rejected rather than reported as success. Split-AV sources (Facebook et al.) are muxed by a generalised `_ensureAudio()` that works for any provider and restores the original on failure. Every row now carries `media.hasAudio`, and `audioMissing` shows a 🔇 badge so a silent file is visible instead of mysterious. |
 | **Rapidgator support** (`src/filehost-resolver.js`, new) | Hoster links used to download the page HTML. Rapidgator file pages now resolve to a real download URL via the hoster API when you save an account (**Settings › File hosts**; premium or a session cookie removes the wait), or via the free page flow, which honestly reports the mandatory wait instead of bypassing the captcha. Hoster rows are marked `singleConnection: true, resumable: false` because these links reject `Range` — multi-segment requests were producing corrupt files. Host allowlist, 2 MB body cap, same-family redirects only. |
 | **Hardened transfer engine** | `startDownload` no longer forces `onConflict: 'overwrite'`, which silently deleted a finished file of the same name. Truncated/short bodies and 200-responses-to-ranged-requests are now detected instead of being written and reported complete; range-hostile servers collapse to a single connection from the worker path (not just the probe); a restart no longer reuses an already-aborted controller; segment restore clamps past-EOF ends; HLS picks an **audio-carrying** variant instead of blindly taking the top-bitrate one, and reports the real width/height; a short output raises `download-error` instead of a false `download-complete`. |
+| **Extension: no more identical dimensions** | The desktop side stopped guessing, but `chrome-extension/content.js` was still stamping `video.videoWidth/videoHeight` onto **every** candidate from a player — so a page offering 360p/720p/1080p `<source>` variants reported one identical resolution for all of them, and on a DASH player the value was just the current adaptive rendition. The element's intrinsic size is now applied only to the variant that element is actually playing; everything else stays unknown and is proven from the file after download. Locked by `test/extension-dimensions.js`. |
 
 Also: `tools/refresh-latest-yml.js` now follows `package.json` instead of re-hashing the previous installer, so updater metadata no longer stays a release behind.
 
-**Tests:** 29 suites, **1,178 assertions, 0 failures** (new: `media-probe` 131, `filehost-resolver` 102, `youtube-audio` 64, `row-media` 59, `engine-reliability` 50, `ui-dimensions` 44).
+**Tests:** 30 suites, **1,191 assertions, 0 failures** (new: `media-probe` 131, `filehost-resolver` 102, `youtube-audio` 64, `row-media` 59, `engine-reliability` 50, `ui-dimensions` 44, `extension-dimensions` 13).
 
 ---
 
