@@ -23,3 +23,10 @@ desktop.ini
 .vscode/
 .idea/
 *.swp
+
+# Agent / verification scratch (never commit these)
+.openclaw/
+.verify-stage/
+.playwright-mcp/
+distout.txt
+testout.txt
