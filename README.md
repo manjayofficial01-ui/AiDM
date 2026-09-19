@@ -1,6 +1,21 @@
-# ⚡ AiDM - AI-Powered Download Manager v4.6.0
+# ⚡ AiDM - AI-Powered Download Manager v4.7.0
 
 > Classic IDM-style download manager with next-generation modular download engine, dynamic in-flight segment splitting, positional random-access disk I/O, multi-mirror failover, atomic `.part.meta` crash recovery, Chrome browser integration, video quality detection, smart per-category file organization, ETA, dual-layer speed limiting, streaming multi-algorithm checksum verification, and a yt-dlp + FFmpeg extraction engine for YouTube.
+
+---
+
+## What's New in v4.7.0
+
+Popup release: the playing video sorts first and gets its own section — and the popup keeps showing every downloadable file type (zip/rar/7z, pdf, exe/msi, doc/docx, ppt/pptx, xlsx, csv, html/css/js, torrent, dmg, iso, images, audio, video).
+
+### New
+- **Playing-first sort**: the playing video's rows always sort first, then video type, then quality tier (2160p→360p).
+- **"▶ NOW PLAYING" divider**: a green section divider heads the playing video's rows in the popup (capsule keeps its green chip).
+
+### Fixed
+- **Duplicate `el` declaration** in the popup render path removed.
+
+**Tests:** 32 suites green (incl. `playing-now` 31 checks for the playing-flag propagation).
 
 ---
 

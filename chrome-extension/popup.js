@@ -80,7 +80,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       const allMedia = [];
 
-      // Videos with quality info
+      // Videos with quality info — show everything the page offers
+      // (video/audio + generic download links: zip/rar/pdf/exe/doc/images/etc.).
       if (response.videos && response.videos.length > 0) {
         response.videos.forEach(v => allMedia.push({ ...v, type: 'video' }));
       }
@@ -433,9 +434,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     mediaList.innerHTML = '';
     mediaItems = dedupeMedia(mediaItems);
 
-    // Sort: videos with quality first, then by quality tier
+        // Sort: playing video first, then videos with quality, then by quality tier
     const tierOrder = { '2160p': 5, '1440p': 4, '1080p': 3, '720p': 2, '480p': 1, '360p': 0 };
     mediaItems.sort((a, b) => {
+      // Playing video's downloads always come first
+      if (a.playing && !b.playing) return -1;
+      if (!a.playing && b.playing) return 1;
       if (a.type === 'video' && b.type !== 'video') return -1;
       if (a.type !== 'video' && b.type === 'video') return 1;
       return (tierOrder[b.quality] || -1) - (tierOrder[a.quality] || -1);
@@ -458,14 +462,25 @@ document.addEventListener('DOMContentLoaded', async () => {
     // True-dimensions probes queued while rows build (Twitter files whose
     // URLs carry no rendition marker show the scanned element's size for
     // every variant otherwise — see content.js probeVideoMeta).
-    const popupMetaRuns = [];
+        const popupMetaRuns = [];
+    let playingDividerShown = false;
     mediaItems.forEach((item, i) => {
-      const el = document.createElement('div');
+      // Add "Playing Now" section divider before the first playing item
+      if (item.playing && !playingDividerShown) {
+        const divider = document.createElement('div');
+        divider.className = 'playing-section-divider';
+        divider.textContent = '▶ NOW PLAYING — ' + (item.title || 'Active Video');
+        mediaList.appendChild(divider);
+        playingDividerShown = true;
+      }
+
+            const el = document.createElement('div');
       el.className = 'media-item';
 
       let name = resolveDisplayName(item, metaMap);
       const shortName = name.length > 60 ? name.substring(0, 57) + '...' : name;
 
+      // Icons per file type
       const icon = item.type === 'video' ? '🎬' :
                    /\.(mp3|wav|flac|aac)/i.test(item.url) ? '🎵' :
                    /\.(jpg|png|gif|webp)/i.test(item.url) ? '🖼️' :

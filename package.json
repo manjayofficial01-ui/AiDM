@@ -1,7 +1,7 @@
 {
   "name": "aidm",
-  "version": "4.6.0",
-  "description": "AiDM v4.6.0 - AI-Powered Download Manager with true video dimensions, playing-now detection, guaranteed-audio downloads, Rapidgator support and a hardened transfer engine",
+  "version": "4.7.0",
+  "description": "AiDM v4.7.0 - AI-Powered Download Manager with playing-first popup sort, NOW PLAYING divider, plus true video dimensions, playing-now detection, guaranteed-audio downloads, Rapidgator support and a hardened transfer engine",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
