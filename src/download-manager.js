@@ -445,6 +445,14 @@ const DEFAULT_SETTINGS = {
   // to let yt-dlp read that browser's own cookie store; it is opt-in and only
   // ever used for the site being downloaded.
   youtubeCookiesFromBrowser: '',
+  // Post-download actions (v4.8.0, IDM/AntDM style): run a command on every
+  // finished download. `postDownloadCmd` may contain {file} — replaced with
+  // the finished file's path. Typical antivirus usage:
+  //   "C:\Program Files\Windows Defender\MpCmdRun.exe" -Scan -ScanType 3 -File "{file}"
+  // Empty = disabled. Also: autoDeleteAfterHash optionally removes the row's
+  // list entry requirements — kept minimal on purpose.
+  postDownloadCmd: '',
+  postDownloadCmdTimeoutSec: 120,
 };
 
 class DownloadManager extends EventEmitter {
@@ -496,6 +504,10 @@ class DownloadManager extends EventEmitter {
         if (ACTIVE_OVERRIDABLE.has(dl.status)) {
           dl.status = 'downloading';
         }
+        // Persist the HLS write cursor so a restart resumes the stream
+        // instead of re-downloading every segment from zero.
+        if (data.hlsResumeIndex) dl._hlsResumeIndex = data.hlsResumeIndex;
+        if (data.hlsResumeBytes) dl._hlsResumeBytes = data.hlsResumeBytes;
         // ETA in seconds (null when speed or remaining size is unknown)
         const remaining = (data.totalSize || 0) - (data.downloaded || 0);
         dl.eta = (data.speed > 0 && remaining > 0) ? Math.ceil(remaining / data.speed) : null;
@@ -503,7 +515,7 @@ class DownloadManager extends EventEmitter {
       const now = Date.now();
       if (now - this._lastProgressPersist > 5000) {
         this._lastProgressPersist = now;
-        this._persistDownloads();
+        this._persistDownloads(true);
       }
       this.emit('download-progress', { ...data, eta: dl ? dl.eta : null });
     });
@@ -521,7 +533,7 @@ class DownloadManager extends EventEmitter {
           dl.sizeEstimated = false;
         }
       }
-      this._persistDownloads();
+      this._persistDownloads(true);
       this._processQueue();
       this.emit('download-complete', data);
       // Prove the real geometry (and the audio track) from the finished file,
@@ -536,7 +548,7 @@ class DownloadManager extends EventEmitter {
         dl.status = 'error';
         dl.error = data.error;
       }
-      this._persistDownloads();
+      this._persistDownloads(true);
       this._processQueue();
       this.emit('download-error', data);
     });
@@ -545,7 +557,7 @@ class DownloadManager extends EventEmitter {
       const dl = this.downloads.get(data.id);
       if (dl) dl.status = 'paused';
       // Persist now: pause must be the resume point after a restart.
-      this._persistDownloads();
+      this._persistDownloads(true);
       this.emit('download-paused', data);
     });
 
@@ -559,7 +571,7 @@ class DownloadManager extends EventEmitter {
       const dl = this.downloads.get(data.id);
       if (dl) {
         dl.sha256 = data.sha256;
-        this._persistDownloads();
+        this._persistDownloads(true);
       }
       this.emit('download-hash', data);
     });
@@ -680,7 +692,7 @@ class DownloadManager extends EventEmitter {
     };
 
     this.downloads.set(id, download);
-    this._persistDownloads();
+    this._persistDownloads(true);
     this.emit('download-added', download);
 
     // Ask-every-time: resolve the real file name first, then raise the
@@ -806,7 +818,7 @@ class DownloadManager extends EventEmitter {
     } else {
       this.queue.push(id);
     }
-    this._persistDownloads();
+    this._persistDownloads(true);
     return dl;
   }
 
@@ -815,7 +827,7 @@ class DownloadManager extends EventEmitter {
     const dl = this.downloads.get(id);
     if (dl) dl._cancelRequested = true;
     this.downloads.delete(id);
-    this._persistDownloads();
+    this._persistDownloads(true);
     this.emit('download-removed', { id });
   }
 
@@ -869,7 +881,7 @@ class DownloadManager extends EventEmitter {
 
     this.downloads.set(id, download);
     this.queue.push(id);
-    this._persistDownloads();
+    this._persistDownloads(true);
     this.emit('download-added', download);
     return download;
   }
@@ -953,8 +965,54 @@ class DownloadManager extends EventEmitter {
       Promise.resolve()
         .then(() => this.probeMedia(dl))
         .then(() => this._ensureAudio(dl))
-        .catch(() => {});
+        .catch(() => {})
+        .finally(() => this._runPostDownloadAction(dl));
     } catch (e) { /* never throw into the Electron main process */ }
+  }
+
+  /**
+   * Post-download action (v4.8.0): run a user-configured command on the
+   * finished file — the IDM/AntDM antivirus-hook pattern. Typical AV line:
+   *   "C:\Program Files\Windows Defender\MpCmdRun.exe" -Scan -ScanType 3 -File "{file}"
+   * Runs once per row (after the audio-mux step so the FINAL file is what
+   * gets scanned). The command runs detached from the completion path: its
+   * result is logged on the row (postDownloadResult), never thrown.
+   */
+  _runPostDownloadAction(dl) {
+    try {
+      if (!dl || dl.status !== 'completed' || dl._postActionDone) return;
+      const cmd = String(this.settings.postDownloadCmd || '').trim();
+      if (!cmd) return;
+      if (!dl.filepath || !fs.existsSync(dl.filepath)) return;
+      dl._postActionDone = true;
+      const { spawn } = require('child_process');
+      // {file} placeholder — quoted form too, so users can write just
+      // -File "{file}" without hand-building quoting for spaces.
+      const withFile = cmd.includes('{file}')
+        ? cmd.split('{file}').join(dl.filepath)
+        : cmd + ' "' + dl.filepath + '"';
+      const timeoutSec = Math.max(10, Number(this.settings.postDownloadCmdTimeoutSec) || 120);
+      let child;
+      try {
+        child = spawn(withFile, [], { shell: true, windowsHide: true, stdio: 'ignore' });
+      } catch (e) {
+        dl.postDownloadResult = 'Command failed to start: ' + e.message;
+        return;
+      }
+      const timer = setTimeout(() => {
+        try { child.kill(); } catch (e) {}
+      }, timeoutSec * 1000);
+      child.on('error', (e) => {
+        clearTimeout(timer);
+        dl.postDownloadResult = 'Command error: ' + e.message;
+        this._persistDownloads(true);
+      });
+      child.on('close', (code) => {
+        clearTimeout(timer);
+        dl.postDownloadResult = code === 0 ? 'ok' : 'exit code ' + code;
+        this._persistDownloads(true);
+      });
+    } catch (e) { /* never throw into the completion path */ }
   }
 
   /** Manual refresh (row menu / re-check): re-prove geometry and audio. */
@@ -1058,7 +1116,7 @@ class DownloadManager extends EventEmitter {
       // Re-probe: the merged file now carries an audio track, so
       // `audioMissing` must clear and the geometry is re-proven.
       await this.probeMedia(download);
-      this._persistDownloads();
+      this._persistDownloads(true);
       this.emit('download-updated', { ...download });
       return true;
     } catch (e) {
@@ -1081,7 +1139,7 @@ class DownloadManager extends EventEmitter {
         download.status = 'completed';
         download.audioMissing = true;
         download.muxNote = 'The separate audio track could not be merged in, so the video-only file was kept as downloaded.';
-        this._persistDownloads();
+        this._persistDownloads(true);
         this.emit('download-updated', { ...download });
       }
       return false;
@@ -1109,7 +1167,7 @@ class DownloadManager extends EventEmitter {
         setTimeout(() => {
           Promise.resolve(this.probeMedia(d)).catch(() => {}).then(() => {
             left -= 1;
-            if (left <= 0) this._persistDownloads();
+            if (left <= 0) this._persistDownloads(true);
           });
         }, i * 150);
       });
@@ -1160,7 +1218,7 @@ class DownloadManager extends EventEmitter {
       // one, so a row never points at another job's log.
       if (logFile) download.ytLogPath = logFile;
       else delete download.ytLogPath;
-      this._persistDownloads();
+      this._persistDownloads(true);
       this._processQueue();
       this.emit('download-error', { id: download.id, error: message });
     };
@@ -1222,7 +1280,7 @@ class DownloadManager extends EventEmitter {
           const now = Date.now();
           if (now - (this._lastYtProgressPersist || 0) > 5000) {
             this._lastYtProgressPersist = now;
-            this._persistDownloads();
+            this._persistDownloads(true);
           }
           this.emit('download-progress', {
             id: download.id,
@@ -1283,7 +1341,7 @@ class DownloadManager extends EventEmitter {
       download.sizeEstimated = false;
       download.status = 'completed';
       download.completedAt = Date.now();
-      this._persistDownloads();
+      this._persistDownloads(true);
       this._processQueue();
       this.emit('download-complete', { id: download.id, totalSize: size, duration: null });
       // Same post-completion truth as the native/HLS path: prove the real
@@ -1299,7 +1357,7 @@ class DownloadManager extends EventEmitter {
         // resume continues instead of starting over.
         if (this.downloads.has(download.id) && !download._cancelRequested) {
           download.status = 'paused';
-          this._persistDownloads();
+          this._persistDownloads(true);
           this.emit('download-paused', { id: download.id });
         }
         return true;
@@ -1369,7 +1427,7 @@ class DownloadManager extends EventEmitter {
         if (isDeadProbeStatus(meta.status)) {
           download.status = 'error';
           download.error = deadLinkMessage(meta.status);
-          this._persistDownloads();
+          this._persistDownloads(true);
           this.emit('download-error', { id: download.id, error: download.error });
           this._processQueue();
           return;
@@ -1377,7 +1435,7 @@ class DownloadManager extends EventEmitter {
         if (meta.status === 401 || meta.status === 403) {
           download.status = 'error';
           download.error = accessDeniedMessage(meta.status);
-          this._persistDownloads();
+          this._persistDownloads(true);
           this.emit('download-error', { id: download.id, error: download.error });
           this._processQueue();
           return;
@@ -1388,7 +1446,7 @@ class DownloadManager extends EventEmitter {
         if (meta.status === 501) {
           download.status = 'error';
           download.error = methodBlockedMessage(meta.status);
-          this._persistDownloads();
+          this._persistDownloads(true);
           this.emit('download-error', { id: download.id, error: download.error });
           this._processQueue();
           return;
@@ -1429,7 +1487,8 @@ class DownloadManager extends EventEmitter {
           expectedSize: download.totalSize || 0,
           variantUrl: download.hlsVariantUrl || null,
           maxSeconds: download.maxSeconds || 0,
-          resumeBytes: download.downloaded > 0 ? hlsProgress : 0,
+          resumeIndex: download._hlsResumeIndex || 0,
+          resumeBytes: download._hlsResumeBytes || (download.downloaded > 0 ? hlsProgress : 0),
         });
         return;
       }
@@ -1500,7 +1559,7 @@ class DownloadManager extends EventEmitter {
     if (noEngineState && (dl.status === 'connecting' || dl.status === 'queued' ||
         (dl.status === 'downloading' && dl.provider === 'youtube'))) {
       dl.status = 'paused';
-      this._persistDownloads();
+      this._persistDownloads(true);
       this.emit('download-paused', { id });
     }
     return dl;
@@ -1546,7 +1605,7 @@ class DownloadManager extends EventEmitter {
     this.engine.cancelDownload(id);
     this.queue = this.queue.filter(qid => qid !== id);
     this.downloads.delete(id);
-    this._persistDownloads();
+    this._persistDownloads(true);
     this.emit('download-removed', { id });
     return true;
   }
@@ -1561,7 +1620,7 @@ class DownloadManager extends EventEmitter {
     this.engine.cancelDownload(id);
     this.queue = this.queue.filter(qid => qid !== id);
     this.downloads.delete(id);
-    this._persistDownloads();
+    this._persistDownloads(true);
     this.emit('download-removed', { id });
     return true;
   }
@@ -1852,7 +1911,7 @@ class DownloadManager extends EventEmitter {
     if (!download.isHls && !download.isDash && this._refineFilename(download, meta)) {
       download.filepath = path.join(download.savePath, download.filename);
     }
-    this._persistDownloads();
+    this._persistDownloads(true);
     this.emit('download-updated', download);
     return meta || (hlsSize ? hlsSize : null);
   }
@@ -1897,7 +1956,14 @@ class DownloadManager extends EventEmitter {
     return [...new Set(out)];
   }
 
-  _persistDownloads() {
+  /**
+   * Persist the download list. Callers in user-action paths (add/pause/
+   * resume/cancel/complete) pass force=true so the .bak backup is always
+   * refreshed at a meaningful state boundary; the 5s progress tick omits it
+   * so the backup only refreshes every 60s (a full copyFileSync on every
+   * tick stalled the main thread on large lists).
+   */
+  _persistDownloads(force = false) {
     try {
       const dataPath = this._getStatePath();
       // Strip session cookies and probe caches — they are live credentials and
@@ -1920,11 +1986,19 @@ class DownloadManager extends EventEmitter {
       // Atomic write (tmp + rename): a crash or power loss mid-write used to
       // leave a torn JSON file behind, and the next start silently wiped the
       // whole download list. The previous file stays intact until the rename.
+      // On the 5s progress tick the .bak copy is refreshed at most every 60s:
+      // a full copyFileSync of the whole list on every tick stalled the main
+      // thread on large lists, and a 60s-old backup is still a good fallback.
       const tmpPath = dataPath + '.tmp';
       fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2));
-      try {
-        fs.copyFileSync(dataPath, dataPath + '.bak');
-      } catch (e) { /* first run — no previous file to back up */ }
+      const now = Date.now();
+      if (force) this._lastBakTime = 0;
+      if (now - (this._lastBakTime || 0) > 60000) {
+        try {
+          fs.copyFileSync(dataPath, dataPath + '.bak');
+          this._lastBakTime = now;
+        } catch (e) { /* first run — no previous file to back up */ }
+      }
       fs.renameSync(tmpPath, dataPath);
       // One-time cleanup: remove dotfiles left in download folders / Desktop
       // by older versions so they never reappear.

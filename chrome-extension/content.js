@@ -32,7 +32,6 @@
 
   // Facebook video: often extensionless (…/v/t59.4756-21/…?oh=…&oe=…).
   const FB_HOST_RE = /fbcdn\.net|scontent\.|facebook\.com|fb\.com|instagram\.com|cdninstagram\.com/i;
-  const FB_VIDEO_PATH_RE = /\/v\/t|video\.php|playable|bytestart|\/dash\/|\/hls\/|\/reel|\/watch\//i;
   // Raw DASH/HLS segments must never become "download links" — they are why
   // one playing video exploded into dozens of duplicate rows.
   const SEGMENT_RE = /\.m4s($|\?|#|;)|init\.mp4($|\?|#)|seg-?\d+|chunklist|fragment|frag-?\d+|\/range\//i;
@@ -436,6 +435,55 @@ function normalizeStreamUrl(u) {
   }
 
   /**
+   * Query-immune canonical path family of ANY media URL (generalises
+   * fbPathKey beyond Facebook). Rotating CDN tokens churn the query while
+   * the path identifies the object, so the path tail is this video's family
+   * identity. Media file paths only — HTML page paths never key a family
+   * (a single segment would otherwise match every asset on the site).
+   */
+  const MEDIA_PATH_RE = /\.(mp4|m4v|webm|mkv|mov|avi|flv|ts|m4s|m3u8|mpd|mp3|wav|flac|aac|ogg|m4a|opus|wma)$/i;
+  function mediaPathKey(u) {
+    try {
+      const x = new URL(String(u || ''));
+      if (!/^https?:$/i.test(x.protocol)) return null;
+      if (!MEDIA_PATH_RE.test(x.pathname)) return null;
+      // Paths shorter than two segments are too generic to key a family.
+      const segs = x.pathname.split('/').filter(Boolean);
+      if (segs.length < 2) return null;
+      return 'mpath:' + fbCanonicalHost(x.hostname) + x.pathname;
+    } catch (e) { return null; }
+  }
+
+  /**
+   * Canonical paths of THIS video element's own files (own src/sources, with
+   * blob: URLs resolved through the interceptor's blob→real map), generalized
+   * to every site. Empty when unattributable — callers must then fall back to
+   * the global list so the panel never strands the user.
+   */
+  function elementMediaKeys(video) {
+    const out = new Set();
+    try {
+      const urls = [];
+      if (video) {
+        if (video.currentSrc) urls.push(video.currentSrc);
+        if (video.src) urls.push(video.src);
+        video.querySelectorAll('source').forEach(s => {
+          urls.push(s.src || (s.getAttribute && s.getAttribute('src')));
+        });
+      }
+      for (let u of urls) {
+        if (!u || typeof u !== 'string') continue;
+        if (u.startsWith('blob:')) u = blobToRealUrlMap.get(u) || null;
+        if (u && /^https?:/i.test(u)) {
+          const k = mediaPathKey(u);
+          if (k) out.add(k);
+        }
+      }
+    } catch (e) {}
+    return out;
+  }
+
+  /**
    * Presentation collapse key: same canonical path + rendition tag +
    * quality + resolution + size. Rotated tokens (vabr/rl/oh/oe/…) never
    * split rows; genuinely different renditions still differ in at least one
@@ -801,6 +849,9 @@ function normalizeStreamUrl(u) {
         clearTimeout(timer);
         if (res && res.ok) html = await res.text();
       } catch (e) { /* CSP / offline — DOM fallback below */ }
+      // SPA navigation while the fetch was in flight: these URLs belong to
+      // the PREVIOUS page — never merge them into the new page's registry.
+      if (location.href !== pageKey) return [];
       if (!html) {
         try { html = document.documentElement.outerHTML || ''; } catch (e) { html = ''; }
       }
@@ -2947,6 +2998,11 @@ function normalizeStreamUrl(u) {
     // under a divider — nobody is ever hidden, so a wrong guess can never
     // cause a wrong-video download the way hard filtering could.
     const fbScope = isFacebookPage() ? elementFilePaths(video) : null;
+    // Generalised per-video attribution (any site): this element's own media
+    // file paths (blob-resolved). Non-empty when the player exposes its file
+    // directly — rows from a DIFFERENT path family then rank under the
+    // divider instead of polluting this pill.
+    const genScope = isFacebookPage() ? null : elementMediaKeys(video);
 
     const seen = new Set();
     const cands = [];
@@ -2989,11 +3045,20 @@ function normalizeStreamUrl(u) {
         const nm = urlMeta(pd, v.url);
         if (dropVideoCandidate({ contentType: nm && nm.contentType })) return;
       } catch (e) {}
-      // Facebook ranking tag (see above): 'mine' sorts first, 'other'
-      // renders under a divider, 'all' means unattributable.
+      // Per-video ranking tag (see below): 'mine' = attributable to THIS
+      // video element, 'other' = belongs to a different video on the page,
+      // 'all' = unattributable. Facebook uses its own exact fbPathKey
+      // family; every other site generalises via mediaPathKey.
       try {
-        v._fbScope = (!fbScope || !fbScope.size) ? 'all'
-          : (fbScopeAllows(v.url, fbScope) ? 'mine' : 'other');
+        if (isFacebookPage()) {
+          v._fbScope = (!fbScope || !fbScope.size) ? 'all'
+            : (fbScopeAllows(v.url, fbScope) ? 'mine' : 'other');
+        } else if (genScope && genScope.size) {
+          const k = mediaPathKey(v.url);
+          v._fbScope = (!k || genScope.has(k)) ? 'all' : 'other';
+        } else {
+          v._fbScope = 'all';
+        }
       } catch (e) { v._fbScope = 'all'; }
       if (!isVideoOrAudio(v.url)) return;
       const n = normalizeStreamUrl(v.url) || v.url;
@@ -3030,7 +3095,7 @@ function normalizeStreamUrl(u) {
       (pd.streams || []).forEach(u => {
         if (isSegmentUrl(u)) return;
         if (isTwitterPlaylistUrl(u)) return;
-        if (isVideoOrAudio(stripFbRange(u))) {
+        if (isVideoOrAudio(u) && !/\.m3u8|\.mpd/i.test(u)) {
           pushCand(detectQuality(stripFbRange(u), null));
         }
       });
@@ -3521,8 +3586,8 @@ function normalizeStreamUrl(u) {
         if (isTwitterPlaylistUrl(u)) return;
         if (TWIMG_RE.test(u) && !isTwitterMp4Url(u)) return;
         if (IMAGE_EXT_COUNT.test(u)) return; // never count images
-        if (!(VIDEO_AUDIO_RE_COUNT.test(u) || XTREAM_RE.test(u) || /videoplayback|get_file|akamaihd/i.test(u) || isFacebookVideoUrl(u))) return;
-        countKeys.add(fbPathKey(u) || normalizeStreamUrl(u) || u);
+        if (!(VIDEO_AUDIO_RE_COUNT.test(u) || XTREAM_RE.test(u) || /videoplayback|get_file|akamaihd/i.test(u) || isFacebookVideoUrl(u) || mediaPathKey(u))) return;
+        countKeys.add(fbPathKey(u) || mediaPathKey(u) || normalizeStreamUrl(u) || u);
       };
       if (isTwitterPage()) {
         // Scoped badge: this video's variants only (see getVideoVariants).
@@ -3541,8 +3606,17 @@ function normalizeStreamUrl(u) {
         detectedVideos.forEach(v => { if (v && v.url && inScope(v.url)) countUrl(v.url); });
       } else {
         getVideoVariants(video).forEach(v => { if (v && v.url) countUrl(v.url); });
-        interceptedMediaUrls.forEach(countUrl);
-        detectedVideos.forEach(v => { if (v && v.url) countUrl(v.url); });
+        // Generalised scoping: when this element's own file family is known,
+        // only count URLs from that family (or unkeyable URLs). Otherwise
+        // count the page-global set as before.
+        const scope = elementMediaKeys(video);
+        const inScope = (u) => {
+          if (!scope.size) return true;
+          const k = mediaPathKey(u);
+          return !k || scope.has(k);
+        };
+        interceptedMediaUrls.forEach(u => { if (inScope(u)) countUrl(u); });
+        detectedVideos.forEach(v => { if (v && v.url && inScope(v.url)) countUrl(v.url); });
       }
       const n = countKeys.size;
       if (n > 0) {
@@ -3689,6 +3763,14 @@ function normalizeStreamUrl(u) {
     blobToRealUrlMap.clear();
     pageHtmlFetches.clear();
     sizeProbeCache.clear();
+    // Same staleness class as the registries above — the previous page's
+    // links/variants/caches must never resurface after an SPA navigation.
+    detectedLinks = new Set();
+    twitterVariants.clear();
+    metaProbeCache.clear();
+    hlsExpandCache.clear();
+    audioPlaylistPaths.clear();
+    pageScanComplete = false;
     scheduleSyncCapsules();
   }
   try {

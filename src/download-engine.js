@@ -1213,6 +1213,10 @@ class DownloadEngine extends EventEmitter {
         speed: download.speed,
         percent,
         segments: download.segments.map(s => ({ index: s.index, downloaded: s.downloaded, status: s.status })),
+        // Restart resume: the manager persists these with the row and feeds
+        // them back after an app restart (the engine record is gone then).
+        hlsResumeIndex: download.hlsResumeIndex || 0,
+        hlsResumeBytes: download.hlsResumeBytes || 0,
       });
     };
 

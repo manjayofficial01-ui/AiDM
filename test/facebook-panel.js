@@ -229,7 +229,7 @@ check('panel gates candidates by scope',
 check('panel collapses rows unconditionally',
   /collapseRowKey\(v\)/.test(ctSrc) && /mergeRowInto\(prev, v\)/.test(ctSrc));
 check('badge counts Facebook by path + scopes per video',
-  /fbPathKey\(u\) \|\| normalizeStreamUrl/.test(ctSrc) && /elementFilePaths\(video\)/.test(ctSrc));
+  /fbPathKey\(u\) \|\| (mediaPathKey\(u\) \|\| )?normalizeStreamUrl/.test(ctSrc) && /elementFilePaths\(video\)/.test(ctSrc));
 check('desktop payload collapses before the picker',
   /collapseVideoRows\(enriched\)/.test(bgSrc));
 check('popup collapses in dedupeMedia',

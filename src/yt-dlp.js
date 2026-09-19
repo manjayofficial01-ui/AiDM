@@ -541,15 +541,25 @@ function parseProgressLine(line) {
  * @returns {Promise<{filePath:string,size:number}>}
  */
 function download(o) {
-  return new Promise(async (resolve, reject) => {
-    const runner = await detectRunner();
-    if (!runner) {
-      const err = new Error(ytdlpMissingMessage());
-      err.code = 'missing';
-      reject(err);
-      return;
-    }
+  return new Promise((resolve, reject) => {
+    // detectRunner resolves always (never throws), but the whole body used to
+    // live in an async executor — any early rejection there would hang the
+    // caller instead of surfacing. Explicit .then/.catch keeps the outer
+    // promise settled on every path.
+    detectRunner().then((runner) => {
+      if (!runner) {
+        const err = new Error(ytdlpMissingMessage());
+        err.code = 'missing';
+        reject(err);
+        return;
+      }
+      return downloadWithRunner(o, runner, resolve, reject);
+    }).catch(reject);
+  });
+}
 
+function downloadWithRunner(o, runner, resolve, reject) {
+  {
     const {
       url, formatSpec, outputTemplate,
       timeoutMs = 30 * 60 * 1000,
@@ -762,7 +772,7 @@ function download(o) {
       });
       finish(err);
     });
-  });
+  }
 }
 
 module.exports = {

@@ -41,7 +41,7 @@ const electronStub = {
     quit: () => { quitCalled = true; },
     getPath: (n) => path.join(os.tmpdir(), 'aidm-boot-test', n),
     getName: () => 'AiDM',
-    getVersion: () => '4.5.2',
+    getVersion: () => '4.8.0',
     isPackaged: false,
     setLoginItemSettings: () => {},
     getLoginItemSettings: () => ({ openAtLogin: false }),

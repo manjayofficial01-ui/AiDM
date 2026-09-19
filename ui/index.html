@@ -156,7 +156,7 @@
     </div>
     <div class="status-right">
       <span class="status-item clipboard-indicator" id="clipboard-status">
-        📋 Clipboard: <span class="indicator-dot active"></span>
+        📋 Clipboard: <span class="indicator-dot active" id="clipboard-dot"></span>
       </span>
       <span class="status-item" id="status-connection">🔌 Extension: Connected</span>
     </div>
@@ -381,6 +381,16 @@
             </select>
           </div>
           <div class="settings-hint">Cookies the browser extension captures are always forwarded, whatever you pick here.</div>
+        </div>
+
+        <div class="settings-section">
+          <h4>Post-download actions</h4>
+          <p class="settings-hint">Run a command on every finished download (IDM-style antivirus hook). Use <code>{file}</code> where the file path goes. Example (Windows Defender): <code>"C:\Program Files\Windows Defender\MpCmdRun.exe" -Scan -ScanType 3 -File "{file}"</code>. Empty = off.</p>
+          <div class="form-group">
+            <label>Command to run on completion</label>
+            <input type="text" id="setting-post-download-cmd" placeholder='&quot;C:\Program Files\Windows Defender\MpCmdRun.exe&quot; -Scan -ScanType 3 -File &quot;{file}&quot;' />
+            <div class="settings-hint">Result is recorded on the download row. Runs once, after any audio-mux step, with a 2-minute timeout.</div>
+          </div>
         </div>
 
         <div class="settings-section">

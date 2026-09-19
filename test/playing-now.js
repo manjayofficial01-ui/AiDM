@@ -169,7 +169,7 @@ check('rows record needsSession for restart decisions',
 check('auto-resume skips rows that needed session cookies',
   /settings\.autoResume !== false[\s\S]{0,300}?!d\.needsSession/.test(managerSrc));
 check('downloads state writes atomically (tmp + rename)',
-  /_persistDownloads\(\)[\s\S]{0,2600}?\.tmp['"][\s\S]{0,600}?renameSync/.test(managerSrc));
+  /_persistDownloads\(force = false\)[\s\S]{0,2600}?\.tmp['"][\s\S]{0,600}?renameSync/.test(managerSrc));
 check('downloads state keeps a .bak fallback and _loadDownloads uses it',
   /copyFileSync\(dataPath, dataPath \+ '\.bak'\)/.test(managerSrc) &&
   /readFileSync\(dataPath \+ '\.bak'/.test(managerSrc));

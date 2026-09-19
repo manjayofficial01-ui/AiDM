@@ -1,5 +1,5 @@
 /**
- * AiDM v2 — UI Controller
+ * AiDM v4.8.0 - UI Controller
  * Features: Video quality picker, per-category paths, ask-every-time, auto-detection
  */
 
@@ -35,10 +35,15 @@ document.addEventListener('DOMContentLoaded', async () => {
 async function loadAppVersion() {
   try {
     const v = await window.aidm.getAppVersion();
+    // Newer builds return { version, apiPort }; older ones a bare string.
+    const ver = (v && typeof v === 'object') ? v.version : v;
     const el = document.getElementById('app-version');
-    if (el && v) el.textContent = 'v' + v;
+    if (el && ver) el.textContent = 'v' + ver;
+    if (v && typeof v === 'object' && v.apiPort) aidmApiPort = v.apiPort;
   } catch (e) { /* older preload — hide the badge */ }
 }
+
+let aidmApiPort = 18765;
 
 /** Hit the local API server to see if the extension path is alive. */
 async function updateExtensionStatus() {
@@ -47,7 +52,7 @@ async function updateExtensionStatus() {
   try {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 2000);
-    const res = await fetch('http://127.0.0.1:18765/api/status', { signal: ctrl.signal });
+    const res = await fetch('http://127.0.0.1:' + aidmApiPort + '/api/status', { signal: ctrl.signal });
     clearTimeout(timer);
     if (res.ok) {
       el.innerHTML = '🔌 Extension: <span style="color:var(--success)">Connected</span>';
@@ -511,6 +516,11 @@ function showContextMenu(x, y, dl) {
     if (a === 'copy-hash' && !dl.sha256) item.style.display = 'none';
     // "Delete file…" only makes sense when there is a file on disk
     if (a === 'delete-file' && dl.status !== 'completed' && dl.status !== 'paused') item.style.display = 'none';
+    // Cancel = remove for a finished/failed row — duplicate action, hide it
+    // so a completed row doesn't offer Cancel + Remove + Delete.
+    if (a === 'cancel' && !['downloading', 'connecting', 'queued', 'paused'].includes(dl.status)) {
+      item.style.display = 'none';
+    }
   });
 }
 function hideContextMenu() { document.getElementById('context-menu').style.display = 'none'; }
@@ -667,7 +677,11 @@ function setupIPCListeners() {
       dl.speed = data.speed; dl.percent = data.percent;
       // `segments` is the count; the live per-segment array is `segmentDetails`
       if (Array.isArray(data.segments)) dl.segmentDetails = data.segments;
-      dl.status = 'downloading';
+      // Same overridable-status guard as the manager: a stale 500ms tick from
+      // the old run must not flip a row the user just paused back to
+      // "Downloading".
+      const ACTIVE_OVERRIDABLE = new Set(['connecting', 'downloading', 'queued']);
+      if (ACTIVE_OVERRIDABLE.has(dl.status)) dl.status = 'downloading';
       if (typeof data.eta === 'number' || data.eta === null) dl.eta = data.eta;
     }
     scheduleProgressRender();
@@ -1195,6 +1209,11 @@ async function showSettingsModal() {
   document.getElementById('setting-launch-startup').checked = settings.launchAtStartup !== false;
   document.getElementById('setting-minimize-tray').checked = settings.minimizeToTray !== false;
   document.getElementById('setting-autoresume').checked = settings.autoResume !== false;
+  // The status-bar clipboard dot must reflect the real toggle, not stay
+  // statically "active" forever.
+  const clipDot = document.getElementById('clipboard-dot');
+  if (clipDot) clipDot.classList.toggle('active', !!settings.clipboardMonitor);
+  document.getElementById('setting-post-download-cmd').value = settings.postDownloadCmd || '';
   // AI (TokenHarbor) — never display existing key back in full; show placeholder only
   document.getElementById('setting-ai-enabled').checked = settings.aiEnabled !== false;
   document.getElementById('setting-ai-baseurl').value = settings.aiBaseURL || 'https://tokenharbor.ai/v1';
@@ -1261,6 +1280,9 @@ async function saveSettings() {
     minimizeToTray: document.getElementById('setting-minimize-tray').checked,
     autoResume: document.getElementById('setting-autoresume').checked,
     categoryPaths,
+    // Honor the toggle live: the status-bar dot flips with the setting too.
+    // (The main process applies clipboardMonitor on save + startup.)
+    clipboardMonitor: document.getElementById('setting-clipboard').checked,
     // File hosts (v4.5.0): only overwrite a stored secret when the user typed
     // a new one, so opening Settings and saving never wipes the account.
     fileHosts: {
@@ -1271,6 +1293,7 @@ async function saveSettings() {
       },
     },
     youtubeCookiesFromBrowser: (document.getElementById('setting-yt-cookies-browser')?.value || '').trim(),
+    postDownloadCmd: document.getElementById('setting-post-download-cmd').value.trim(),
     aiEnabled: document.getElementById('setting-ai-enabled').checked,
     aiBaseURL: document.getElementById('setting-ai-baseurl').value.trim() || 'https://tokenharbor.ai/v1',
     aiPrimaryModel: document.getElementById('setting-ai-primary').value,
@@ -1279,6 +1302,8 @@ async function saveSettings() {
     ...(aiKeyInput ? { aiApiKey: aiKeyInput } : {}),
   };
   await window.aidm.saveSettings(settings);
+  const clipDot = document.getElementById('clipboard-dot');
+  if (clipDot) clipDot.classList.toggle('active', !!settings.clipboardMonitor);
   hideSettingsModal();
   showNotification('Settings saved');
 }
@@ -1336,7 +1361,7 @@ function renderSchedulerList() {
   const list = document.getElementById('scheduler-list');
   list.innerHTML = '';
   if (!schedules.length) {
-    list.innerHTML = '<div class="aidm-cap-empty">No schedules yet — add one below.</div>';
+    list.innerHTML = '<div class="sched-empty">No schedules yet — add one below.</div>';
     return;
   }
   schedules.forEach((s) => {

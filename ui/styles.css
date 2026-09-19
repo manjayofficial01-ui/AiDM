@@ -1,4 +1,4 @@
-/* AiDM v2 — Classic IDM Light-Blue Theme with Video Quality & Category Paths */
+/* AiDM v4.8.0 - Classic IDM Light-Blue Theme with Video Quality & Category Paths */
 :root {
   --bg-primary: #f2f6fc;
   --bg-secondary: #e4edf9;
@@ -299,6 +299,7 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
 .empty-icon { font-size: 64px; margin-bottom: 16px; opacity: .5; }
 .empty-text { font-size: 18px; font-weight: 600; margin-bottom: 8px; }
 .empty-hint { font-size: 13px; text-align: center; max-width: 400px; }
+.sched-empty { text-align: center; padding: 20px; color: var(--text-muted); font-size: 13px; }
 
 /* ── Status Bar ────────────────────────────────────────────────────────────── */
 
@@ -326,7 +327,6 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
 }
 .settings-modal { width: 540px; }
 .quality-modal { width: 480px; }
-.approval-modal { width: 460px; }
 .delete-modal { width: 420px; }
 .delete-msg { font-size: 13px; color: var(--text-primary); margin-bottom: 16px; line-height: 1.5; }
 .delete-checkbox {
@@ -478,24 +478,10 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
   width: 8px; height: 8px; background: var(--accent); border-radius: 50%;
 }
 
-/* ── Approval Modal ────────────────────────────────────────────────────────── */
-
-.approval-file-info {
-  margin-bottom: 14px; padding: 10px 12px;
-  background: var(--bg-primary); border-radius: var(--radius);
-  border: 1px solid var(--border);
-}
-.approval-filename { font-size: 13px; font-weight: 600; color: var(--text-primary); }
-.approval-category { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
-.approval-file-info .form-group { margin-bottom: 8px; }
-.approval-file-info input[type="text"] {
-  font-weight: 600; color: var(--text-primary);
-}
-.approval-hint {
-  font-size: 10px; color: var(--text-muted); margin-top: 5px;
-  min-height: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.approval-hint.warn { color: #c2410c; }
+/* ── Approval Modal ──────────────────────────────────────────────────────────
+   Removed v4.7.0: the approval UI is a separate BrowserWindow
+   (ui/location-dialog.html with its own styles) — these rules styled a modal
+   that no longer exists in index.html. */
 
 /* ── Context Menu ──────────────────────────────────────────────────────────── */
 

@@ -295,7 +295,15 @@ try {
 } catch (e) { /* webRequest unavailable — page scan still works */ }
 
 try {
-  chrome.tabs.onRemoved.addListener((tabId) => { tabStreams.delete(tabId); tabDashActive.delete(tabId); });
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    tabStreams.delete(tabId);
+    tabDashActive.delete(tabId);
+    // Per-tab state must go with the tab — these maps were never cleaned
+    // and grew for the whole browser session.
+    tabNavAt.delete(tabId);
+    tabYtPage.delete(tabId);
+    pruneResolvedCaches();
+  });
 } catch (e) {}
 
 // ── Twitter / X tweet pages ────────────────────────────────────────────────
@@ -400,6 +408,16 @@ const YT_PAGE_URL_RE = /^https?:\/\/(?:www\.|m\.|music\.)?(?:youtube\.com\/(?:wa
 const resolvedYtPages = new Map(); // pageUrl -> last attempt time
 const YT_RETRY_MS = 60 * 1000;
 const tabYtPage = new Map();       // tabId -> true while the tab shows YouTube
+// tabYtPage values are booleans, not timestamps — pruning uses a set copy.
+function pruneResolvedCaches() {
+  const cutoff = Date.now() - RESOLVED_TTL_MS;
+  const prune = (m) => {
+    for (const [k, t] of m) { if (typeof t === 'number' && t < cutoff) m.delete(k); }
+  };
+  try { prune(resolvedTweets); } catch (e) {}
+  try { prune(resolvedFbPages); } catch (e) {}
+  try { prune(resolvedYtPages); } catch (e) {}
+}
 
 function isYouTubePageUrl(url) {
   if (!url || typeof url !== 'string') return false;
@@ -1444,7 +1462,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.action === 'video-detected') {
-    // Forward video detection with quality metadata to AiDM desktop
+    // Legacy alias: older content builds sent a bare `data` payload; the live
+    // path is `videos-with-quality` (flat pageTitle/pageUrl/videos).
     sendVideoDetection(msg.data).then(result => {
       sendResponse({ ok: true, result });
     });

@@ -517,8 +517,8 @@ ipcMain.handle('remove-download', async (event, { id }) => {
   return downloadManager.removeDownload(id);
 });
 
-ipcMain.handle('approve-download', async (event, { id, savePath }) => {
-  return downloadManager.approveDownload(id, savePath);
+ipcMain.handle('approve-download', async (event, { id, savePath, filename }) => {
+  return downloadManager.approveDownload(id, savePath, filename);
 });
 
 ipcMain.handle('reject-download', async (event, { id }) => {
@@ -662,7 +662,12 @@ ipcMain.handle('get-autostart', () => {
 });
 
 ipcMain.handle('get-app-version', () => {
-  return app.getVersion();
+  return {
+    version: app.getVersion(),
+    // The server auto-increments past a stale 18765 holder — the UI's
+    // extension-status check must probe the port actually in use.
+    apiPort: ipcServer ? ipcServer.port : 18765,
+  };
 });
 
 /**

@@ -15,6 +15,37 @@
   // ── Dedup & rate-limit ────────────────────────────────────────────────────
   const sentUrls = new Set();
   const MAX_SENT = 2000;
+  // SPA navigation resets the dedup set — otherwise re-fetched identical
+  // URLs on the NEW page are swallowed while the content script and
+  // background already dropped their copies (rows go missing until a
+  // token-rotated URL happens to appear).
+  let interceptorPageUrl = location.href;
+  function onSpaNavigation() {
+    try {
+      if (location.href === interceptorPageUrl) return;
+      interceptorPageUrl = location.href;
+      sentUrls.clear();
+    } catch (e) { /* ignore */ }
+  }
+  try {
+    const _iPush = history.pushState;
+    if (typeof _iPush === 'function') {
+      history.pushState = function () {
+        const r = _iPush.apply(this, arguments);
+        onSpaNavigation();
+        return r;
+      };
+    }
+    const _iReplace = history.replaceState;
+    if (typeof _iReplace === 'function') {
+      history.replaceState = function () {
+        const r = _iReplace.apply(this, arguments);
+        onSpaNavigation();
+        return r;
+      };
+    }
+    window.addEventListener('popstate', onSpaNavigation);
+  } catch (e) { /* frozen history — page-lifetime dedup still applies */ }
 
   function postToContentScript(type, payload) {
     try {
@@ -614,7 +645,4 @@
     setInterval(scanPerformanceResources, 3000);
     setTimeout(scanPerformanceResources, 1500);
   } catch (e) { /* swallow */ }
-
-  // Mark ourselves as loaded
-  postToContentScript('interceptor-ready', {});
 })();

@@ -170,20 +170,31 @@ document.addEventListener('DOMContentLoaded', async () => {
           chrome.runtime.sendMessage({ action: 'get-panel-data', tabId: tab.id }, (r) => res(r || null));
         } catch (e) { res(null); }
       });
+      let items = videos.map(v => ({ ...v, type: 'video' }));
       const metaMap = (pd && pd.meta) || null;
-      if (metaMap) {
-        videos.forEach(v => {
-          const meta = metaMap[v.url];
-          if (meta) {
-            if (!v.filename && meta.filename) v.filename = meta.filename;
-            if (!v.size && meta.size) v.size = meta.size;
-          }
-        });
+      // Same treatment as the Scan path: hide what's already in AiDM and
+      // enrich via token-insensitive meta lookup (FB rotates ?efg/oh/oe per
+      // re-fetch — an exact-only match showed "unknown" filename/size).
+      if (pd && !chrome.runtime.lastError) {
+        if (pd.sent && pd.sent.length) {
+          const exact = new Set(pd.sent);
+          const norm = new Set(pd.sent.map(normalizeInline).filter(Boolean));
+          items = items.filter(m => !exact.has(m.url) && !norm.has(normalizeInline(m.url)));
+        }
+        if (metaMap) {
+          items.forEach(v => {
+            const meta = metaMap[v.url] || (normalizeInline(v.url) && Object.entries(metaMap).find(([k]) => normalizeInline(k) === normalizeInline(v.url))?.[1]);
+            if (meta) {
+              if (!v.filename && meta.filename) v.filename = meta.filename;
+              if (!v.size && meta.size) v.size = meta.size;
+            }
+          });
+        }
       }
-      const deduped = dedupeMedia(videos.map(v => ({ ...v, type: 'video' })));
+      const deduped = dedupeMedia(items);
       renderMediaList(deduped, tab, metaMap);
       mediaCount.textContent = deduped.length;
-      showStatus(`Found ${deduped.length} video source(s)`, 'success');
+      showStatus(deduped.length ? `Found ${deduped.length} video source(s)` : 'No new videos — everything found is already in AiDM', deduped.length ? 'success' : 'info');
       return;
     }
 
@@ -487,13 +498,6 @@ document.addEventListener('DOMContentLoaded', async () => {
                    /\.(zip|rar|7z)/i.test(item.url) ? '📦' :
                    /\.(exe|msi)/i.test(item.url) ? '💿' : '📄';
 
-      const qualityText = item.quality && item.quality !== 'unknown'
-        ? item.quality.toUpperCase()
-        : (item.resolution || '');
-
-      const sizeText = item.size ? formatBytes(item.size) : '';
-      const formatText = item.format ? item.format.toUpperCase() : '';
-
       el.innerHTML = `
         <div class="media-icon">${icon}</div>
         <div class="media-info">
@@ -712,13 +716,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       return /audio/i.test(tag) ? 'audio' : 'video';
     } catch (e) { return null; }
   }
-  function fbVideoIdOfUrlInline(u) {
-    try {
-      const efg = new URL(String(u || '')).searchParams.get('efg');
-      const obj = fbEfgObjInline(efg);
-      return (obj && obj.video_id != null) ? String(obj.video_id) : null;
-    } catch (e) { return null; }
-  }
   function fbKeyInline(u) {
     try {
       const x = new URL(String(u || '').trim());
@@ -769,9 +766,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     msg.style.cssText = `
       padding: 6px 12px; margin-top: 8px; border-radius: 4px;
       font-size: 11px; text-align: center;
-      background: ${type === 'success' ? '#dcfce7' : '#fee2e2'};
-      color: ${type === 'success' ? '#15803d' : '#b91c1c'};
-      border: 1px solid ${type === 'success' ? '#86efac' : '#fca5a5'};
+      background: ${type === 'success' ? '#dcfce7' : type === 'info' ? '#dbeafe' : '#fee2e2'};
+      color: ${type === 'success' ? '#15803d' : type === 'info' ? '#1d4ed8' : '#b91c1c'};
+      border: 1px solid ${type === 'success' ? '#86efac' : type === 'info' ? '#93c5fd' : '#fca5a5'};
     `;
     msg.textContent = text;
     document.querySelector('.body').appendChild(msg);

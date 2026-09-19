@@ -1,6 +1,39 @@
-# ⚡ AiDM - AI-Powered Download Manager v4.7.0
+# ⚡ AiDM - AI-Powered Download Manager v4.8.0
 
 > Classic IDM-style download manager with next-generation modular download engine, dynamic in-flight segment splitting, positional random-access disk I/O, multi-mirror failover, atomic `.part.meta` crash recovery, Chrome browser integration, video quality detection, smart per-category file organization, ETA, dual-layer speed limiting, streaming multi-algorithm checksum verification, and a yt-dlp + FFmpeg extraction engine for YouTube.
+
+---
+
+## What's New in v4.8.0
+
+Deep-audit release: 15+ bugs and dead-code findings fixed across the engine, manager, UI and extension — headlined by **per-video link scoping**: the capsule pill (and its badge) now shows only the playing video's own download links on every site, not every link detected anywhere on the page.
+
+### New
+- **Per-video link scoping (every site)** | Generalizes Facebook's exact per-video path family to all sites: `mediaPathKey()` builds a query-immune canonical family for any media URL, and `elementMediaKeys()` collects the playing element's own file paths (blob: resolved through the interceptor map). Capsule rows from a *different* video's path family now rank under the "Other videos on this page" divider instead of polluting this pill, and the pill's badge counts only this video's links. Nothing is ever hidden — a wrong guess can never cause a wrong-video download.
+- **Post-download actions (AV hook)** | Settings › Post-download actions: run a command on every finished download with `{file}` substituted — the IDM/AntDM antivirus pattern (e.g. Windows Defender `MpCmdRun.exe -Scan -ScanType 3 -File "{file}"`). Runs once per row, after the audio-mux step so the final file is what gets scanned; result recorded on the row.
+- **HLS resume now actually resumes** | The engine's HLS write cursor (`hlsResumeIndex`/`hlsResumeBytes`) is persisted with the row and fed back after an app restart — restarted HLS downloads no longer start from zero.
+
+### Fixed (desktop)
+- UI progress handler no longer flips a just-paused row back to "Downloading" (same overridable-status guard as the manager).
+- `approve-download` IPC silently dropped the rename argument (`filename` now flows through preload → main → manager).
+- Extension-status check hardcoded port 18765 while the server auto-increments on conflict — the UI now probes the port actually in use.
+- `_persistDownloads` copied the whole `.bak` file on every 5 s progress tick (main-thread stall on large lists) — the backup now refreshes at most every 60 s on the tick, and immediately at state boundaries.
+- yt-dlp `download()` used an `async` Promise executor — any early rejection would hang the caller; restructured to settle every path.
+- Cancel context-menu item is hidden for finished/failed rows (it was a duplicate of Remove).
+- Clipboard status dot reflects the real setting instead of always showing "active"; scheduler empty-state class styled.
+
+### Fixed (extension)
+- **SPA state leaks**: `clearPageDetections()` now also resets `detectedLinks`, `twitterVariants`, `metaProbeCache`, `hlsExpandCache`, `audioPlaylistPaths` and `pageScanComplete` — the previous page's links and tweet variants no longer resurface after an in-app navigation.
+- **Stale page-HTML race**: an in-flight page fetch that resolves after an SPA navigation can no longer plant the previous page's links into the new page's registry.
+- **Interceptor dedup reset**: `sentUrls` clears on pushState/replaceState/popstate, so re-fetched identical URLs on the new page are not silently swallowed.
+- **Popup Grab path parity**: "Grab Video" now hides already-sent rows and enriches filename/size via token-insensitive meta lookup, exactly like "Scan Page".
+- **Background map hygiene**: tab close now clears `tabNavAt`/`tabYtPage`, and the `resolvedTweets`/`resolvedFbPages`/`resolvedYtPages` retry maps are TTL-pruned.
+- Sniffed HLS playlist URLs no longer enter the capsule candidate stream (masters expand via the HLS engine only); images are never counted in the badge.
+
+### Removed (dead code)
+- `AiService.summarize`, `pickBestVariant`, `resolutionOf` alias, `fbVideoIdOfUrlInline`, unused popup badge locals, `.quality-select` CSS, `FB_VIDEO_PATH_RE`, the `interceptor-ready` handshake with no listener, and the approval-modal CSS for a modal that no longer exists.
+
+**Tests:** 33 suites, all green — new `popup-video-scope` (22 checks) locks the generalized scoping, SPA resets, interceptor dedup reset and background hygiene.
 
 ---
 

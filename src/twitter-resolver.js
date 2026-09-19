@@ -339,10 +339,6 @@ function toPickerVideos(videos) {
   });
 }
 
-/**
- * Best single variant to hand straight to the downloader.
- * Prefers the highest-resolution direct MP4; falls back to HLS.
- */
 function pickBestVariant(videos) {
   if (!videos || !videos.length) return null;
   return videos[0];
@@ -351,7 +347,6 @@ function pickBestVariant(videos) {
 module.exports = {
   resolveTweetVideos,
   toPickerVideos,
-  pickBestVariant,
   extractTweetId,
   isTweetUrl,
   syndicationToken,

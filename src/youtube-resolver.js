@@ -168,11 +168,6 @@ function resolutionOfChoice(choice) {
   return w + 'x' + h;
 }
 
-/** Backwards-compatible alias (older internal name). */
-function resolutionOf(choice) {
-  return resolutionOfChoice(choice);
-}
-
 /** Shown when a video genuinely has no audio stream at all. */
 const NO_AUDIO_NOTE = 'This video has no audio track — the file will be silent.';
 
@@ -582,7 +577,6 @@ module.exports = {
   resolveYouTubeVideos,
   fallbackPayload,
   // ── geometry (real, never guessed) ──
-  resolutionOf,
   resolutionOfChoice,
   // ── audio invariant ──
   pickBestAudio,

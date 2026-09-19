@@ -158,15 +158,6 @@ class AiService {
     return ['video', 'audio', 'document', 'archive', 'software', 'image', 'other'].includes(cat) ? cat : 'other';
   }
 
-  /** Summarize a page/video title for the quality-picker context. */
-  async summarize(title, pageUrl = '') {
-    const { content } = await this.chat([
-      { role: 'system', content: 'You help organize downloads. Be concise.' },
-      { role: 'user', content: `In one short line, describe what this looks like (for a download manager label):\nTitle: ${title}\nURL: ${pageUrl}` },
-    ], { max_tokens: 150 });
-    return (content || '').trim();
-  }
-
   /** Explain a download error in plain language with one fix suggestion. */
   async explainError(errorMsg, url = '') {
     const { content } = await this.chat([

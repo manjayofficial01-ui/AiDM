@@ -7,7 +7,7 @@ contextBridge.exposeInMainWorld('aidm', {
   resumeDownload: (id) => ipcRenderer.invoke('resume-download', { id }),
   cancelDownload: (id) => ipcRenderer.invoke('cancel-download', { id }),
   removeDownload: (id) => ipcRenderer.invoke('remove-download', { id }),
-  approveDownload: (id, savePath) => ipcRenderer.invoke('approve-download', { id, savePath }),
+  approveDownload: (id, savePath, filename) => ipcRenderer.invoke('approve-download', { id, savePath, filename }),
   rejectDownload: (id) => ipcRenderer.invoke('reject-download', { id }),
   getDownloads: () => ipcRenderer.invoke('get-downloads'),
 
