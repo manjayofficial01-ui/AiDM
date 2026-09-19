@@ -1,5 +1,4 @@
 const http = require('http');
-const twitterResolver = require('./twitter-resolver.js');
 const facebookResolver = require('./facebook-resolver.js');
 const resolvers = require('./resolvers.js');
 
@@ -32,8 +31,15 @@ class RateLimiter {
   }
 }
 
-// 30 resolutions per minute is far above interactive use.
-const RESOLVE_LIMITER = new RateLimiter(30, 60 * 1000);
+// 30 resolutions per minute per endpoint is far above interactive use. One
+// limiter PER endpoint: a shared one let a runaway tab on /api/resolve
+// starve the video endpoints (and vice versa).
+const RESOLVE_LIMITERS = {
+  '/api/resolve': new RateLimiter(30, 60 * 1000),
+  '/api/resolve-twitter': new RateLimiter(30, 60 * 1000),
+  '/api/resolve-facebook': new RateLimiter(30, 60 * 1000),
+  '/api/resolve-youtube': new RateLimiter(30, 60 * 1000),
+};
 
 function sanitizeHeaders(input) {
   const out = {};
@@ -222,7 +228,7 @@ class IPCServer {
             res.end(JSON.stringify(obj));
           };
           try {
-            if (!RESOLVE_LIMITER.allow()) {
+            if (!RESOLVE_LIMITERS[req.url]?.allow()) {
               return respond(429, { success: false, error: 'Too many resolve requests — try again in a minute' });
             }
             const { url, credentials, cookies, referer } = JSON.parse(body || '{}');
@@ -263,28 +269,30 @@ class IPCServer {
       if (req.method === 'POST' && req.url === '/api/resolve-twitter') {
         this._readBody(req).then(async (body) => {
           try {
-            if (!RESOLVE_LIMITER.allow()) {
+            if (!RESOLVE_LIMITERS[req.url]?.allow()) {
               res.writeHead(429, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ success: false, error: 'Too many resolve requests — try again in a minute' }));
               return;
             }
             const { url, pageTitle } = JSON.parse(body || '{}');
-            const { tweetId, videos, title, thumbnail, duration } = await twitterResolver.resolveTweetVideos(url);
-
-            // Shape matches what /api/video-detected sends to the UI. The
-            // post's own text is a far better window title than "Tweet <id>".
+            // Route through the resolver registry (strict parseTwitterUrl) —
+            // calling twitterResolver directly used to accept the loose
+            // "any 15-25 digit run" fallback, so a media CDN URL containing a
+            // 19-digit id could be mistaken for a tweet id. The registry's
+            // twitter adapter only accepts real status permalinks.
+            const r = await resolvers.resolveMedia(url);
             const payload = {
               url,
-              pageUrl: url,
-              pageTitle: pageTitle || title || `Tweet ${tweetId}`,
-              thumbnail,
-              duration,
-              videos: twitterResolver.toPickerVideos(videos),
+              pageUrl: r.canonicalUrl || url,
+              pageTitle: pageTitle || r.title || `Tweet ${r.id}`,
+              thumbnail: r.thumbnail,
+              duration: r.duration,
+              videos: r.pickerVideos || [],
             };
             this.dm.emit('video-detected', payload);
 
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ success: true, tweetId, videos: payload.videos }));
+            res.end(JSON.stringify({ success: true, tweetId: r.id, videos: payload.videos }));
           } catch (err) {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: false, error: err.message }));
@@ -306,7 +314,7 @@ class IPCServer {
       if (req.method === 'POST' && req.url === '/api/resolve-facebook') {
         this._readBody(req).then(async (body) => {
           try {
-            if (!RESOLVE_LIMITER.allow()) {
+            if (!RESOLVE_LIMITERS[req.url]?.allow()) {
               res.writeHead(429, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ success: false, error: 'Too many resolve requests — try again in a minute' }));
               return;
@@ -350,7 +358,7 @@ class IPCServer {
       if (req.method === 'POST' && req.url === '/api/resolve-youtube') {
         this._readBody(req).then(async (body) => {
           try {
-            if (!RESOLVE_LIMITER.allow()) {
+            if (!RESOLVE_LIMITERS[req.url]?.allow()) {
               res.writeHead(429, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ success: false, error: 'Too many resolve requests — try again in a minute' }));
               return;

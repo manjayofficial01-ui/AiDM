@@ -532,26 +532,57 @@ ipcMain.handle('get-downloads', async () => {
 /**
  * Guard against path traversal: the renderer sends a path, but we only open
  * files that actually exist on disk and refuse null-bytes / relative tricks.
+ * For open-file/open-folder the path must additionally belong to AiDM: a
+ * recorded download's file, a location inside a configured save/category
+ * folder, or AiDM's own yt-dlp log folder. Existence alone would let a
+ * compromised renderer open ANY path on disk.
  */
-function isSafePath(p) {
+function isAiOwnedPath(p) {
   if (!p || typeof p !== 'string') return false;
   if (p.includes('\0')) return false;
+  let abs;
   try {
-    // Resolve to absolute; refuse if it escapes to a non-existent location
-    const abs = path.resolve(p);
-    return fs.existsSync(abs);
+    abs = path.resolve(p);
   } catch {
     return false;
   }
+  try {
+    if (!fs.existsSync(abs)) return false;
+  } catch {
+    return false;
+  }
+  // Exact match on any recorded download's file (the common case).
+  try {
+    for (const d of downloadManager.downloads.values()) {
+      if (d.filepath && path.resolve(d.filepath) === abs) return true;
+      if (d.savePath && path.resolve(d.savePath) === abs) return true;
+    }
+  } catch {}
+  // Or inside a configured save location (default + per-category).
+  const roots = new Set();
+  try {
+    if (downloadManager.settings.defaultSavePath) roots.add(path.resolve(downloadManager.settings.defaultSavePath));
+    const cp = downloadManager.settings.categoryPaths || {};
+    Object.values(cp).forEach(v => { if (v) roots.add(path.resolve(v)); });
+  } catch {}
+  for (const root of roots) {
+    if (abs === root || abs.startsWith(root + path.sep)) return true;
+  }
+  // AiDM's own yt-dlp log folder.
+  try {
+    const logDir = path.resolve(youtubeLogDir());
+    if (abs.startsWith(logDir + path.sep)) return true;
+  } catch {}
+  return false;
 }
 
 ipcMain.handle('open-file', async (event, { filePath }) => {
-  if (!isSafePath(filePath)) return;
+  if (!isAiOwnedPath(filePath)) return;
   shell.openPath(filePath);
 });
 
 ipcMain.handle('open-folder', async (event, { folderPath }) => {
-  if (!isSafePath(folderPath)) return;
+  if (!isAiOwnedPath(folderPath)) return;
   shell.showItemInFolder(folderPath);
 });
 
@@ -620,8 +651,14 @@ ipcMain.handle('quit-app', () => {
   app.quit();
 });
 ipcMain.handle('get-autostart', () => {
-  try { return { enabled: app.getLoginItemSettings().openAtLogin }; }
-  catch { return { enabled: false }; }
+  // Report the persisted setting — applyLoginItem enforces it, while the OS
+  // login item can be flipped by other tools and momentarily disagree.
+  try {
+    const enabled = downloadManager && downloadManager.settings
+      ? downloadManager.settings.launchAtStartup !== false
+      : app.getLoginItemSettings().openAtLogin;
+    return { enabled };
+  } catch { return { enabled: false }; }
 });
 
 ipcMain.handle('get-app-version', () => {

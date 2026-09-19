@@ -32,7 +32,10 @@ function runFfmpeg(args, { timeoutMs = 300000 } = {}) {
       reject(new Error('ffmpeg-static is not available'));
       return;
     }
-    const child = spawn(bin, args, { windowsHide: true });
+    // stdout must not stay piped: a tool writing progress to stdout (or a
+    // filter with a chatty banner) can fill the OS pipe buffer and deadlock
+    // the child. ffmpeg reports on stderr, which we do collect.
+    const child = spawn(bin, args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
     let stderr = '';
     let done = false;
     const timer = setTimeout(() => {

@@ -115,7 +115,7 @@ if (!m) {
   const ep = /req\.url === '\/api\/resolve-youtube'[\s\S]*?\n      \}\n/.exec(srv);
   check('/api/resolve-youtube exists', !!ep);
   if (ep) {
-    check('rate limited like every resolve endpoint', /RESOLVE_LIMITER\.allow\(\)/.test(ep[0]));
+    check('rate limited like every resolve endpoint', /RESOLVE_LIMITERS\[req\.url\]\?\.allow\(\)/.test(ep[0]));
     check('uses the resolver registry (provider dispatch)', /resolvers\.resolveMedia\(/.test(ep[0]));
     check('emits video-detected for the capsule', /emit\('video-detected'/.test(ep[0]));
     check('page url is the canonical watch url', /pageUrl: r\.canonicalUrl \|\| url/.test(ep[0]));

@@ -396,7 +396,7 @@ const DEFAULT_SETTINGS = {
   maxLiveMinutes: 180,   // hard cap when recording a live stream (Xtream/IPTV)
   autoResume: true,
   speedLimit: 0,
-  queueMaxActive: 3,
+  queueMaxActive: 3, // historical default kept for settings-file compatibility (unused; concurrency uses maxConcurrentDownloads)
   clipboardMonitor: true,
   browserIntegration: true,
   notifications: true,
@@ -664,6 +664,10 @@ class DownloadManager extends EventEmitter {
       meta: meta || null,            // video metadata from detection
       headers: replay.headers,       // allowlisted replay headers (Referer/Origin/UA)
       cookies: replay.cookies,       // session cookies for authenticated downloads (KVS etc.)
+      // Persisted (cookies themselves are not): a row that needed session
+      // cookies cannot resume after a restart — the cookies are gone, the
+      // probe would 401/403. _loadDownloads reads this to skip auto-resume.
+      needsSession: !!replay.cookies,
       audioUrl: audioUrl || null,    // paired audio-only track to mux in (split-AV)
       isHls: isHlsUrl(url),
       isDash: isDashUrl(url),
@@ -1411,6 +1415,12 @@ class DownloadManager extends EventEmitter {
         // Live (no ENDLIST, e.g. Xtream/IPTV channels) records until stopped
         // or the user's cap elapses. VOD has no cap (0).
         download.maxSeconds = download.isLive ? ((this.settings.maxLiveMinutes || 180) * 60) : 0;
+        // Persisted resume point for a restart: the engine's in-memory record
+        // is gone after a restart, so feed the last flushed HLS state back in
+        // from the row's saved progress (segProgress[0] = bytes written).
+        // Without this the file was re-opened 'w' and every segment
+        // re-downloaded from zero.
+        const hlsProgress = Array.isArray(download._segProgress) ? (download._segProgress[0] || 0) : 0;
         await this.engine.startHlsDownload({
           id: download.id,
           url: download.url,
@@ -1419,6 +1429,7 @@ class DownloadManager extends EventEmitter {
           expectedSize: download.totalSize || 0,
           variantUrl: download.hlsVariantUrl || null,
           maxSeconds: download.maxSeconds || 0,
+          resumeBytes: download.downloaded > 0 ? hlsProgress : 0,
         });
         return;
       }
@@ -1906,7 +1917,15 @@ class DownloadManager extends EventEmitter {
           status: d.status === 'downloading' ? 'paused' : d.status,
         };
       });
-      fs.writeFileSync(dataPath, JSON.stringify(data, null, 2));
+      // Atomic write (tmp + rename): a crash or power loss mid-write used to
+      // leave a torn JSON file behind, and the next start silently wiped the
+      // whole download list. The previous file stays intact until the rename.
+      const tmpPath = dataPath + '.tmp';
+      fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2));
+      try {
+        fs.copyFileSync(dataPath, dataPath + '.bak');
+      } catch (e) { /* first run — no previous file to back up */ }
+      fs.renameSync(tmpPath, dataPath);
       // One-time cleanup: remove dotfiles left in download folders / Desktop
       // by older versions so they never reappear.
       try {
@@ -1938,22 +1957,44 @@ class DownloadManager extends EventEmitter {
         }
       } catch {}
       if (fs.existsSync(dataPath)) {
-        const data = JSON.parse(fs.readFileSync(dataPath, 'utf-8'));
-        data.forEach(d => {
+        let data = null;
+        try {
+          data = JSON.parse(fs.readFileSync(dataPath, 'utf-8'));
+        } catch (parseErr) {
+          // Torn/corrupt main file: fall back to the last good copy instead of
+          // silently starting with an empty list (which the next persist would
+          // bake in, permanently deleting the user's history).
+          try {
+            data = JSON.parse(fs.readFileSync(dataPath + '.bak', 'utf-8'));
+          } catch (bakErr) {
+            data = null;
+          }
+        }
+        if (Array.isArray(data)) data.forEach(d => {
           if (!d._normUrl) d._normUrl = normalizeMediaUrl(d.url); // migrate old saves
           if (typeof d.isHls !== 'boolean') d.isHls = isHlsUrl(d.url);
-          if (d.status !== 'completed' && d.status !== 'cancelled' && d.status !== 'pending-approval') {
+          // A restart must not resurrect a failed download as "paused" — the
+          // user dismissed that error deliberately. Only genuinely
+          // interrupted states become paused (and thus auto-resumable).
+          if (d.status !== 'completed' && d.status !== 'cancelled' &&
+              d.status !== 'pending-approval' && d.status !== 'error') {
             d.status = 'paused';
             d.speed = 0;
             d.percent = d.totalSize > 0 ? (d.downloaded / d.totalSize * 100).toFixed(1) : 0;
+          } else if (d.status === 'error' || d.status === 'completed' || d.status === 'paused') {
+            d.speed = 0;
           }
           this.downloads.set(d.id, d);
         });
 
-        // Auto-resume incomplete downloads on startup (if the user left it on)
+        // Auto-resume incomplete downloads on startup (if the user left it on).
+        // Rows that needed session cookies are excluded (needsSession): the
+        // cookies are deliberately not persisted, so resuming them after a
+        // restart sends an unauthenticated probe that fails 401/403. They stay
+        // paused — the user can re-send them from the browser (fresh cookies).
         if (this.settings.autoResume !== false) {
           const incomplete = [...this.downloads.values()].filter(
-            d => d.status === 'paused' && d.totalSize > 0 && d.downloaded < d.totalSize
+            d => d.status === 'paused' && d.totalSize > 0 && d.downloaded < d.totalSize && !d.needsSession
           );
           for (const d of incomplete.slice(0, this.maxConcurrent)) {
             this._startDownload(d).catch(() => {});
@@ -2002,7 +2043,8 @@ class DownloadManager extends EventEmitter {
         process.env.USERPROFILE || process.env.HOME || '',
         '.aidm_settings.json'
       );
-      fs.writeFileSync(settingsPath, JSON.stringify(this.settings, null, 2));
+      fs.writeFileSync(settingsPath + '.tmp', JSON.stringify(this.settings, null, 2));
+      fs.renameSync(settingsPath + '.tmp', settingsPath);
     } catch (e) {}
   }
 }

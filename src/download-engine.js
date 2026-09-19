@@ -483,7 +483,6 @@ class DownloadEngine extends EventEmitter {
     this.globalSpeedLimit = 0;        // bytes/sec, 0 = unlimited
     this.globalLimiter = new TokenBucket(0);
     this.hlsConcurrency = 6;          // parallel segment fetches for HLS streams
-    this._gen = 0;
   }
 
   /** Set a global download speed limit (bytes/sec). 0 disables the limit. */
@@ -1146,12 +1145,16 @@ class DownloadEngine extends EventEmitter {
     });
   }
 
-  async startHlsDownload({ id, url, filepath, headers = {}, expectedSize = 0, variantUrl = null, maxSeconds = 0, concurrency = 0 }) {
+  async startHlsDownload({ id, url, filepath, headers = {}, expectedSize = 0, variantUrl = null, maxSeconds = 0, concurrency = 0, resumeIndex: resumeIndexArg = 0, resumeBytes: resumeBytesArg = 0 }) {
     let download = this.activeSegments.get(id);
-    const resumeIndex = (download && download.hlsResumeIndex) || 0;
-    const resumeBytes = (download && download.hlsResumeBytes) || 0;
-
-    if (!download || !download.hls) {
+    // Resume state comes from two sources: an in-memory engine record
+    // (pause → resume in the same session) or explicit params from the
+    // manager's persisted row (resume after an app restart — the engine has
+    // no record then, and without the params the file was re-opened 'w' and
+    // every segment re-downloaded from zero).
+    const resumeIndex = (download && download.hlsResumeIndex) || resumeIndexArg || 0;
+    const resumeBytes = (download && download.hlsResumeBytes) || resumeBytesArg || 0;
+    if (!download) {
       download = {
         id, url, filepath, headers,
         finalUrl: url,
@@ -1220,6 +1223,15 @@ class DownloadEngine extends EventEmitter {
       this.emit('download-error', { id, error: msg });
       throw new Error(msg);
     };
+
+    // Generation token: bumped on cancel/pause so in-flight workers and the
+    // flusher stop touching `fd` and the file. Without it, cancelDownload
+    // unlinked the file while a worker was still fs.writeSync-ing (EBADF →
+    // spurious download-error for a deleted id) and a resume re-opened 'w'
+    // while the old run's workers were still draining (two writers, one fd).
+    let hlsGen = (download._hlsGen || 0) + 1;
+    download._hlsGen = hlsGen;
+    const genDead = () => download._hlsGen !== hlsGen || stopped();
 
     const fetchTracked = async (u, opts) => {
       let req = null;
@@ -1412,6 +1424,10 @@ class DownloadEngine extends EventEmitter {
         while (pending.has(writeIdx)) {
           const item = pending.get(writeIdx);
           pending.delete(writeIdx);
+          // A pause/cancel during a pending fetch: this run is obsolete — its
+          // fd belongs to a previous generation. Drop the buffer instead of
+          // writing into a file that may already be unlinked or re-opened.
+          if (genDead()) return;
           let buf = item.buf;
           if (item.key && item.key.key) {
             let iv = item.key.iv;
@@ -1442,7 +1458,7 @@ class DownloadEngine extends EventEmitter {
 
       const worker = async () => {
         for (;;) {
-          if (stopped() || liveDone) return;
+          if (genDead() || liveDone) return;
           if (nextIndex >= queue.length) {
             if (!isLive) return;
             await sleep(250);
@@ -1453,7 +1469,7 @@ class DownloadEngine extends EventEmitter {
           let buf = null;
           let lastErr = null;
           for (let attempt = 0; attempt < 3; attempt++) {
-            if (stopped() || liveDone) return;
+            if (genDead() || liveDone) return;
             try {
               const segHeaders = seg.range
                 ? { ...headers, Range: `bytes=${seg.range.offset}-${seg.range.offset + seg.range.length - 1}` }
@@ -1541,6 +1557,9 @@ class DownloadEngine extends EventEmitter {
       liveDone = true;
       if (refresher) { try { await refresher; } catch (e) {} }
 
+      // Superseded run (cancel/pause/start raced): never close, emit, or
+      // touch the file — the current generation owns it now.
+      if (genDead()) return;
       try { fs.closeSync(fd); } catch (e) {}
       fd = null;
 
@@ -1567,6 +1586,9 @@ class DownloadEngine extends EventEmitter {
       this._hashFileAsync(id, filepath);
     } catch (err) {
       if (fd !== null && fd !== undefined) { try { fs.closeSync(fd); } catch (e) {} }
+      // fail() already emitted download-error for pre-flight failures (bad
+      // playlist, DRM, …) and set status='error' — emitting again sent the
+      // UI two errors for one failure.
       if (download.status !== 'paused' && !download.cancelled && download.status !== 'error') {
         fail(err.message);
       }

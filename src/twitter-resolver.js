@@ -264,7 +264,14 @@ function metaFromSyndication(json) {
 }
 
 async function resolveTweetVideos(input) {
-  const tweetId = extractTweetId(input);
+  const s = String(input || '').trim();
+  // A URL-shaped input must be a real status permalink — media CDN URLs
+  // contain 19-digit ids that the loose digit-run fallback would mis-resolve.
+  // Bare numeric ids stay accepted (internal callers pass them directly).
+  if (/^https?:\/\//i.test(s) && !isTweetUrl(s)) {
+    throw new Error('Not a Twitter/X status URL');
+  }
+  const tweetId = extractTweetId(s);
   if (!tweetId) throw new Error('Not a Twitter/X status URL');
 
   const token = syndicationToken(tweetId);

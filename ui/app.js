@@ -675,7 +675,24 @@ function setupIPCListeners() {
 
   window.aidm.onDownloadComplete((data) => {
     const dl = downloads.find(d => d.id === data.id);
-    if (dl) { dl.status = 'completed'; dl.completedAt = Date.now(); }
+    if (dl) {
+      dl.status = 'completed';
+      dl.completedAt = Date.now();
+      // Zero the speed and snap downloaded to the real total — otherwise the
+      // last progress tick's rate stayed baked into the row forever and the
+      // aggregate "network speed" figure never returned to zero.
+      dl.speed = 0;
+      if (typeof data.totalSize === 'number' && data.totalSize > 0) {
+        dl.totalSize = data.totalSize;
+        dl.downloaded = data.totalSize;
+        dl.percent = 100;
+      } else if (dl.totalSize > 0) {
+        dl.downloaded = dl.totalSize;
+        dl.percent = 100;
+      }
+      if (data.filepath) dl.filepath = data.filepath;
+      if (Array.isArray(data.segments)) dl.segmentDetails = data.segments;
+    }
     renderDownloads();
     updateStats();
     showNotification(`Download complete: ${dl?.filename || 'File'}`);
@@ -683,7 +700,7 @@ function setupIPCListeners() {
 
   window.aidm.onDownloadError((data) => {
     const dl = downloads.find(d => d.id === data.id);
-    if (dl) { dl.status = 'error'; dl.error = data.error; }
+    if (dl) { dl.status = 'error'; dl.error = data.error; dl.speed = 0; }
     renderDownloads();
     updateStats();
     showNotification(`Download failed: ${data.error || 'unknown error'}`, 'error');
@@ -691,7 +708,7 @@ function setupIPCListeners() {
 
   window.aidm.onDownloadPaused((data) => {
     const dl = downloads.find(d => d.id === data.id);
-    if (dl) dl.status = 'paused';
+    if (dl) { dl.status = 'paused'; dl.speed = 0; }
     renderDownloads();
     updateStats();
   });
@@ -1177,6 +1194,7 @@ async function showSettingsModal() {
   document.getElementById('setting-ask-location').checked = settings.askLocationEveryTime || false;
   document.getElementById('setting-launch-startup').checked = settings.launchAtStartup !== false;
   document.getElementById('setting-minimize-tray').checked = settings.minimizeToTray !== false;
+  document.getElementById('setting-autoresume').checked = settings.autoResume !== false;
   // AI (TokenHarbor) — never display existing key back in full; show placeholder only
   document.getElementById('setting-ai-enabled').checked = settings.aiEnabled !== false;
   document.getElementById('setting-ai-baseurl').value = settings.aiBaseURL || 'https://tokenharbor.ai/v1';
@@ -1241,6 +1259,7 @@ async function saveSettings() {
     askLocationEveryTime: document.getElementById('setting-ask-location').checked,
     launchAtStartup: document.getElementById('setting-launch-startup').checked,
     minimizeToTray: document.getElementById('setting-minimize-tray').checked,
+    autoResume: document.getElementById('setting-autoresume').checked,
     categoryPaths,
     // File hosts (v4.5.0): only overwrite a stored secret when the user typed
     // a new one, so opening Settings and saving never wipes the account.
@@ -1608,9 +1627,10 @@ function updateSpeedDisplay() {
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
 function formatBytes(bytes) {
-  if (!bytes || bytes === 0) return '0 B';
-  const k = 1024, sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  if (!bytes || bytes <= 0 || !isFinite(bytes)) return '0 B';
+  const k = 1024, sizes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  // Clamp: a corrupt/huge value must not index past the unit table.
+  const i = Math.min(sizes.length - 1, Math.floor(Math.log(bytes) / Math.log(k)));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 function formatSpeed(bytes) { return !bytes ? '0 B/s' : formatBytes(bytes) + '/s'; }

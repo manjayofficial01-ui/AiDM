@@ -187,13 +187,16 @@ console.log('── 3. scanVideoElements: same rule ──');
   const v = makeVideo(cur, ['https://cdn.example.com/get_file/9/?id=other']);
   const doc = { querySelectorAll: () => [v] };
   // scanVideoElements reads `document` as a free variable; bind a stub.
+  // isPlayingVideo/isActuallyPlaying are the playing-now gate added in v4.6.0.
   const scan = new Function('document', 'QUALITY_MAP', 'blobToRealUrlMap', 'window', 'probeSizeAsync',
+    'isPlayingVideo', 'isActuallyPlaying',
     grab(CONTENT, 'normalizeStreamUrl') + '\n' +
     grab(CONTENT, 'detectQuality') + '\n' +
     grab(CONTENT, 'qualityFromHeight') + '\n' +
     grab(CONTENT, 'scanVideoElements') + '\n' +
     'return scanVideoElements;'
-  )(doc, QUALITY_MAP, new Map(), { location: { origin: 'https://cdn.example.com' } }, () => {});
+  )(doc, QUALITY_MAP, new Map(), { location: { origin: 'https://cdn.example.com' } }, () => {},
+    () => false, () => false);
 
   const out = scan();
   const playing = out.filter(r => r.url === cur)[0];

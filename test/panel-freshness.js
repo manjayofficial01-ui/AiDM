@@ -113,9 +113,10 @@ check("content.js sends since=performance.timeOrigin with get-panel-data",
   /action:\s*'get-panel-data'[\s\S]{0,200}?since:\s*Math\.round\(performance\.timeOrigin\)/.test(contentSrc) ||
   /since:\s*Math\.round\(performance\.timeOrigin\)[\s\S]{0,40}\}\s*,\s*\(resp\)/.test(contentSrc));
 
-// ── 4. get-panel-data handler passes msg.since through ──────────────────────
-check('background get-panel-data forwards msg.since to getTabStreams',
-  /getTabStreams\(tabId,\s*msg\.since\)/.test(bgSrc));
+// ── 4. get-panel-data handler passes the page floor through ─────────────────
+// v4.6.0: msg.since is preferred, else the tab's recorded navigation time.
+check('background get-panel-data forwards the page floor to getTabStreams',
+  /getTabStreams\(tabId,\s*since\)/.test(bgSrc));
 
 console.log('\npanel-freshness: ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

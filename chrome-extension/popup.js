@@ -104,6 +104,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       // Hide anything already sent to AiDM — no double offers.
       // Also enrich rows with sniffed Content-Disposition filenames/sizes.
+      // No `since`: the popup has no page clock — the background falls back
+      // to the tab's recorded last-navigation time.
       chrome.runtime.sendMessage({ action: 'get-panel-data', tabId: tab.id }, (pd) => {
         let items = allMedia;
         let metaMap = null;
@@ -285,6 +287,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (seen.has(n)) {
         const prev = out.find(o => (normalizeInline(o.url) || o.url) === n);
         if (prev) {
+          if (m.playing) prev.playing = true;
           if (!prev.filename && m.filename) prev.filename = m.filename;
           if (!prev.size && m.size) prev.size = m.size;
         }
@@ -301,6 +304,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const k = collapseRowKeyInline(m);
       const prev = collapsed.get(k);
       if (!prev) { collapsed.set(k, m); continue; }
+      if (m.playing) prev.playing = true;
       if (!prev.filename && m.filename) prev.filename = m.filename;
       if (!prev.size && m.size) prev.size = m.size;
       if ((!prev.quality || prev.quality === 'unknown') && m.quality && m.quality !== 'unknown') {
@@ -337,10 +341,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   function collapseRowKeyInline(v) {
     const url = String((v && v.url) || '');
     if (!fbPathKeyInline(url)) return 'u:' + (normalizeInline(url) || url);
+    // No `size` in the key — mirrors content.js/background.js.
     const q = (v && v.quality && v.quality !== 'unknown') ? v.quality : '?';
     const res = (v && v.resolution) || '?';
-    const size = (v && v.size) || '?';
-    return fbPathKeyInline(url) + '|' + fbEfgTagOfUrlInline(url) + '|' + q + '|' + res + '|' + size;
+    return fbPathKeyInline(url) + '|' + fbEfgTagOfUrlInline(url) + '|' + q + '|' + res;
   }
 
   /**
@@ -568,7 +572,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       : (item.resolution || '');
     const sizeText = item.size ? formatBytes(item.size) : '';
     const formatText = item.format ? item.format.toUpperCase() : '';
-    return (qualityText ? `<span class="quality-badge">${escapeHtml(qualityText)}</span>` : '') +
+    return (item.playing && item.type === 'video' ? '<span class="quality-badge playing-badge">▶ NOW PLAYING</span>' : '') +
+      (qualityText ? `<span class="quality-badge">${escapeHtml(qualityText)}</span>` : '') +
       (item.resolution ? `<span class="size-badge">${escapeHtml(item.resolution)}</span>` : '') +
       (sizeText ? `<span class="size-badge">${sizeText}</span>` : '') +
       (formatText ? `<span class="format-badge">${formatText}</span>` : '');

@@ -1,14 +1,34 @@
-# ⚡ AiDM - AI-Powered Download Manager v4.5.2
+# ⚡ AiDM - AI-Powered Download Manager v4.6.0
 
 > Classic IDM-style download manager with next-generation modular download engine, dynamic in-flight segment splitting, positional random-access disk I/O, multi-mirror failover, atomic `.part.meta` crash recovery, Chrome browser integration, video quality detection, smart per-category file organization, ETA, dual-layer speed limiting, streaming multi-algorithm checksum verification, and a yt-dlp + FFmpeg extraction engine for YouTube.
 
 ---
 
-## What's New in v4.5.2
+## What's New in v4.6.0
 
-Four user-reported defects, one fix each — plus the same dimension bug found still live in the browser extension, and the browser session that was never reaching yt-dlp.
+Reliability + truth-in-UI release: 18 bugs fixed across the engine, manager, server and extension; dead code removed; and a new **"Playing now"** badge that marks the exact video variant the player is rendering (its quality label is the live-measured one — no more guessing which row is the real 1080p).
 
-> **Why the 4.5.x patch numbers?** The first 4.5.0 installer was built before the extension dimension fix and the yt-dlp cookie fix, and 4.5.1 was built before the local API endpoints forwarded the session. A rebuilt binary carrying the same version string is invisible to the in-app updater, so each rebuild that changes the binary gets a new patch number — anyone who installed an earlier 4.5.x gets the later fixes automatically.
+### New
+- **▶ NOW PLAYING badge** (capsule panel + extension popup): rows for the variant actually playing carry a green badge; blob/MSE players map their playing `<video>` to the real CDN URL and tag that row too.
+- **Auto-resume setting wired up**: the "Auto-resume downloads on startup" checkbox in Settings was decorative — now it is saved and honored.
+- **Atomic state files**: the downloads list and settings are now written tmp+rename with a `.bak` copy; a crash mid-write can no longer wipe your history.
+
+### Fixed (desktop)
+- HLS resume after an app restart always re-downloaded from 0% — the persisted resume point is now fed back into the engine.
+- Cancel/pause during an HLS stream could leave ghost writers flushing into the deleted/reopened file (generation-token guard).
+- HLS failures emitted two `download-error` events (UI flashed two error states).
+- Corrupt state JSON silently reset the download list; now falls back to the last good backup.
+- Restart no longer resurrects failed downloads as "paused" (auto-resume would retry dismissed errors).
+- Rows needing session cookies are never auto-resumed after a restart (cookies are intentionally not persisted — the resume would 401/403).
+- `/api/resolve-twitter` bypassed the strict URL registry (a 19-digit media-CDN id could be mistaken for a tweet id); it now routes through the same resolver registry as everything else, and per-endpoint rate limiters stop one runaway tab from starving the others.
+- `open-file`/`open-folder` IPC only checked path existence — now restricted to AiDM's own downloads, save folders and logs.
+- Settings no longer lose `minimizeToTray`-adjacent toggles; yt-dlp cookie file no longer leaks when spawn fails; ffmpeg stdout can no longer deadlock the mux; scheduler stop windows now fire even if the exact minute is missed, and old fired-keys are pruned.
+- UI: completed rows zero their speed and snap to 100%, the aggregate speed counter returns to 0 after finishes, and `formatBytes` can't NaN on corrupt sizes.
+
+### Fixed (extension)
+- **SPA navigation staleness**: history.pushState navigations (X, Facebook, Instagram, YouTube) now clear both the background's per-tab stream cache and the page's detection caches — the previous video's links no longer haunt the next one.
+- **True sizes only**: rows no longer stamp `performance.transferSize`/`decodedBodySize` (bytes-so-far or compressed bytes) as file size — sizes come from Content-Length/Content-Range probes only. One file can no longer split into "known size"/"unknown size" twin rows either.
+- Unbounded caches capped and cleared on navigation; dead `storage`/`activeTab`/`downloads.open`/`declarativeNetRequestWithHostAccess` permissions removed.
 
 | Change | Impact |
 |--------|--------|

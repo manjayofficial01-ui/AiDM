@@ -416,8 +416,6 @@ function extractFacebookVariants(html, pageUrl) {
         quality = '480p'; width = 854; height = 480;
       }
     }
-    // playable_url_quality_hd without a label is the HD rendition.
-    if (!height && /playable_url_quality_hd/i.test(src.slice(0, 0))) { /* unreachable guard */ }
     out.push({
       url,
       contentType: format === 'hls' ? 'application/x-mpegURL' : 'video/mp4',

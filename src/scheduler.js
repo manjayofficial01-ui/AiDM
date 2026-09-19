@@ -299,12 +299,15 @@ class Scheduler extends EventEmitter {
         }
       }
 
-      // Stop: fixed offset after the firing minute (may land the next day).
+      // Stop: fixed offset after the firing minute. Fires on any tick at or
+      // after the stop time (keyed by the firing minute) — with the old
+      // "stop minute must equal the tick minute" rule, a missed minute
+      // (sleep, app busy) meant the scheduled stop NEVER fired.
       const stopAfter = Number(s.stopAfterMinutes);
       if (firing && Number.isFinite(stopAfter) && stopAfter > 0) {
-        const stopAt = new Date(firing.getTime() + stopAfter * 60000);
-        if (minuteKey(stopAt) === key) {
-          const sk = `${s.id}@${key}`;
+        const stopAt = firing.getTime() + stopAfter * 60000;
+        if (at.getTime() >= stopAt) {
+          const sk = `${s.id}@${minuteKey(firing)}`;
           if (!this._firedStop.has(sk)) {
             this._firedStop.add(sk);
             this.emit('schedule-stop', { schedule: s, at: new Date(at.getTime()) });
@@ -312,6 +315,24 @@ class Scheduler extends EventEmitter {
         }
       }
     }
+    this._pruneFired(at);
+  }
+
+  /** Fired-key sets grow one entry per schedule per run — prune old ones. */
+  _pruneFired(at) {
+    if (this._firedStart.size < 512 && this._firedStop.size < 512) return;
+    const cutoff = at.getTime() - 2 * 24 * 60 * 60 * 1000;
+    const keepRecent = (set) => {
+      for (const k of set) {
+        // Keys are `${id}@${Y-M-D-H-M}` — parse the minute back out.
+        const m = /^(.*)@(\d+)-(\d+)-(\d+)-(\d+)-(\d+)$/.exec(k);
+        if (!m) { set.delete(k); continue; }
+        const t = new Date(+m[2], +m[3], +m[4], +m[5], +m[6]).getTime();
+        if (t < cutoff) set.delete(k);
+      }
+    };
+    keepRecent(this._firedStart);
+    keepRecent(this._firedStop);
   }
 }
 

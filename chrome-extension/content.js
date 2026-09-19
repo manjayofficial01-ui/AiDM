@@ -88,6 +88,7 @@
           // Merge anything the survivor is missing (filename/size/quality).
           try {
             if (v && info) {
+              if (info.playing) v.playing = true;
               if (!v.filename && info.filename) v.filename = info.filename;
               if (!v.size && info.size) v.size = info.size;
               if ((!v.quality || v.quality === 'unknown') && info.quality && info.quality !== 'unknown') {
@@ -103,6 +104,13 @@
       }
     }
     detectedVideos.set(url, info);
+    // Bounded: a page that mints endless unique media URLs (one ad-rotation
+    // or per-request nonce per poll) must not grow this registry forever —
+    // the oldest entries are least likely to be the video the user wants.
+    if (detectedVideos.size > 400) {
+      const oldest = detectedVideos.keys().next().value;
+      detectedVideos.delete(oldest);
+    }
     return true;
   }
 
@@ -437,16 +445,18 @@ function normalizeStreamUrl(u) {
   function collapseRowKey(v) {
     const url = String((v && v.url) || '');
     if (!fbPathKey(url)) return 'u:' + (normalizeStreamUrl(url) || url);
+    // No `size` in the key: the same file probed at different moments can be
+    // known vs unknown, and keying on it split one file into two rows.
     const q = (v && v.quality && v.quality !== 'unknown') ? v.quality : '?';
     const res = (v && v.resolution) || '?';
-    const size = (v && v.size) || '?';
-    return fbPathKey(url) + '|' + fbEfgTagOfUrl(url) + '|' + q + '|' + res + '|' + size;
+    return fbPathKey(url) + '|' + fbEfgTagOfUrl(url) + '|' + q + '|' + res;
   }
 
   /** Merge a collapsed-away duplicate's known fields into the kept row. */
   function mergeRowInto(prev, v) {
     try {
       if (!prev || !v) return;
+      if (v.playing) prev.playing = true;
       if (!prev.filename && v.filename) prev.filename = v.filename;
       if (!prev.size && v.size) prev.size = v.size;
       if ((!prev.quality || prev.quality === 'unknown') && v.quality && v.quality !== 'unknown') {
@@ -899,7 +909,13 @@ function normalizeStreamUrl(u) {
             if (normalizeStreamUrl(u) === nUrl) { dup = true; break; }
           }
         }
-        if (!dup) interceptedMediaUrls.add(url);
+        if (!dup) {
+          interceptedMediaUrls.add(url);
+          // Bounded: same anti-bloat rule as detectedVideos above.
+          if (interceptedMediaUrls.size > 400) {
+            interceptedMediaUrls.delete(interceptedMediaUrls.values().next().value);
+          }
+        }
         const info = detectQuality(url, null);
         addDetectedVideo(url, info);
         // NOTE: do NOT forward to the desktop here. Passive detection used to
@@ -910,6 +926,12 @@ function normalizeStreamUrl(u) {
         document.querySelectorAll('video').forEach(v => {
           if (isPlayingVideo(v) && v.currentSrc && v.currentSrc.startsWith('blob:')) {
             blobToRealUrlMap.set(v.currentSrc, url);
+            // This real URL is what the playing element renders — tag it so
+            // the capsule panel can show the "Playing now" badge on the row.
+            try {
+              const info = detectedVideos.get(url);
+              if (info) info.playing = true;
+            } catch (e) {}
           }
         });
         scheduleSyncCapsules();
@@ -944,6 +966,8 @@ function normalizeStreamUrl(u) {
       scheduleSyncCapsules();
     } else if (type === 'mse-blob' && blobUrl) {
       mseBlobUrls.add(blobUrl);
+      // Bounded: long sessions mint a new blob per video/seek.
+      if (mseBlobUrls.size > 200) mseBlobUrls.delete(mseBlobUrls.values().next().value);
       scheduleSyncCapsules();
     } else if (type === 'twitter-variants' && event.data) {
       // Attributed variant sets straight out of the tweet's own GraphQL JSON:
@@ -1156,10 +1180,14 @@ function normalizeStreamUrl(u) {
           // Only fill in when the URL yielded nothing AND this candidate is
           // what the element is actually playing. Otherwise leave it unknown:
           // the desktop app proves real geometry from the file (media-probe).
-          if (!info.resolution && video.videoWidth && video.videoHeight &&
-              srcUrl === video.currentSrc) {
+          const isThisPlaying = srcUrl === video.currentSrc;
+          if (!info.resolution && isThisPlaying && video.videoWidth && video.videoHeight) {
             info.resolution = `${video.videoWidth}x${video.videoHeight}`;
             info.quality = qualityFromHeight(video.videoHeight);
+          }
+          // "Playing now": this exact variant is what the element renders.
+          if (isThisPlaying && (isPlayingVideo(video) || isActuallyPlaying(video))) {
+            info.playing = true;
           }
           videos.push(info);
         }
@@ -1246,8 +1274,11 @@ function normalizeStreamUrl(u) {
       if (VIDEO_EXT.test(url) || STREAM_EXT.test(url) || XTREAM_RE.test(url) ||
           VIDEO_HOSTS.some(p => p.test(url)) || isFacebookVideoUrl(url)) {
         const info = detectQuality(url, null);
-        // Performance API gives us transfer size
-        if (entry.transferSize > 0) info.size = entry.transferSize;
+        // No size from the Performance API here: transferSize/decodedBodySize
+        // are bytes-so-far (or compressed bytes) for THIS request — for ranged
+        // or adaptive media they are never the file's true total, and a wrong
+        // size is worse than none. The panel's Range probe (probe-streams)
+        // fills in the exact Content-Range total instead.
         videos.push(info);
       }
     });
@@ -1994,6 +2025,19 @@ function normalizeStreamUrl(u) {
       border-bottom: 1px solid #e4edf9;
     }
     .aidm-cap-dashlock { opacity: .9; }
+
+    .aidm-cap-now {
+      flex: none;
+      font-size: 8px;
+      font-weight: 700;
+      letter-spacing: .5px;
+      color: #16a34a;
+      background: #dcfce7;
+      border: 1px solid #86efac;
+      border-radius: 999px;
+      padding: 2px 6px;
+      white-space: nowrap;
+    }
   `;
 
   function getCapsuleHost() {
@@ -2252,13 +2296,13 @@ function normalizeStreamUrl(u) {
         info.resolution = video.videoWidth + 'x' + video.videoHeight;
         info.quality = qualityFromHeight(video.videoHeight);
       }
+      // "Playing now": the variant this element renders right now.
+      if (isCurrentSrc && (isPlayingVideo(video) || isActuallyPlaying(video))) {
+        info.playing = true;
+      }
       if (!info.size) {
-        try {
-          const entries = performance.getEntriesByName(url);
-          for (const e of entries) {
-            if (e.transferSize > 0) { info.size = e.transferSize; break; }
-          }
-        } catch (e) {}
+        // Same rule as scanNetworkResources(): no transferSize — it is bytes
+        // received so far for THIS request, not the file's total size.
       }
       out.push(info);
     };
@@ -3210,20 +3254,13 @@ function normalizeStreamUrl(u) {
       }
       // Sniffed response metadata for this exact URL (background webRequest):
       // the Content-Disposition filename is what a native browser download
-      // would save and Content-Length is the exact final size.
+      // would save and Content-Length is the exact final size. The Range
+      // probe (probe-streams, above) fills anything the sniffer missed —
+      // performance-entry transferSize is never used: it is bytes-so-far for
+      // a partial/ranged request, not the file's true total.
       const nMeta = urlMeta(pd, v.url);
       const nativeName = (nMeta && nMeta.filename) || v.filename || null;
-      // Try performance API for a transfer size if none was detected
       let size = v.size || (nMeta && nMeta.size) || null;
-      if (!size) {
-        try {
-          const entries = performance.getEntriesByName(v.url);
-          for (const e of entries) {
-            if (e.transferSize > 0) { size = e.transferSize; break; }
-            if (e.decodedBodySize > 0) { size = e.decodedBodySize; break; }
-          }
-        } catch (e) {}
-      }
       // Format from URL extension when not set
       let fmt = v.format;
       if (!fmt) {
@@ -3235,6 +3272,17 @@ function normalizeStreamUrl(u) {
       const q = document.createElement('span');
       q.className = 'aidm-cap-q';
       q.textContent = isImg ? 'IMAGE' : (qual && qual !== 'unknown' ? String(qual).toUpperCase() : 'VIDEO');
+      // "Playing now" badge: this row is the variant the player renders right
+      // now — its label/resolution (element-measured or URL-derived) is the
+      // video's real quality, so the user can pick it with confidence.
+      const playing = !!v.playing && !isImg;
+      if (playing) {
+        const now = document.createElement('span');
+        now.className = 'aidm-cap-now';
+        now.textContent = '▶ NOW PLAYING';
+        now.title = 'This is the variant currently playing — its quality is live-measured';
+        row.appendChild(now);
+      }
 
       // Real filename next to resolution/size so users never grab the wrong
       // video when several qualities look identical. Preference: the site's
@@ -3623,6 +3671,41 @@ function normalizeStreamUrl(u) {
       });
     }
   }, true);
+
+  // ── SPA navigation cache clearing ────────────────────────────────────────────
+  // X/Facebook/Instagram/YouTube swap videos via history.pushState; no load
+  // event fires, so the previous page's detected URLs, blob mappings and
+  // intercepted media would keep resurfacing in the capsule panel on every
+  // new video (stale rows, dead downloads). The desktop side clears its
+  // per-tab stream cache on onHistoryStateUpdated — this clears the page
+  // side. The capsule DOM itself is rebuilt by the regular sync loops.
+  let aidmPageUrl = location.href;
+  function clearPageDetections() {
+    if (location.href === aidmPageUrl) return; // hash-only change: same page
+    aidmPageUrl = location.href;
+    detectedVideos.clear();
+    interceptedMediaUrls.clear();
+    mseBlobUrls.clear();
+    blobToRealUrlMap.clear();
+    pageHtmlFetches.clear();
+    sizeProbeCache.clear();
+    scheduleSyncCapsules();
+  }
+  try {
+    const _push = history.pushState;
+    history.pushState = function () {
+      const r = _push.apply(this, arguments);
+      try { clearPageDetections(); } catch (e) {}
+      return r;
+    };
+    const _replace = history.replaceState;
+    history.replaceState = function () {
+      const r = _replace.apply(this, arguments);
+      try { clearPageDetections(); } catch (e) {}
+      return r;
+    };
+  } catch (e) { /* frozen history — falls back to webNavigation clearing */ }
+  window.addEventListener('popstate', () => { try { clearPageDetections(); } catch (e) {} });
 
   // ── MutationObserver for Dynamic Content ─────────────────────────────────────
 

@@ -633,6 +633,8 @@ function download(o) {
         detached: !IS_WIN,
       });
     } catch (e) {
+      // The cookie file is already on disk — don't leak it on a failed spawn.
+      if (cookieFile) deleteCookieFile(cookieFile);
       reject(e);
       return;
     }

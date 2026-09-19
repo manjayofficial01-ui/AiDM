@@ -77,6 +77,7 @@ function isTwitterPlaylistUrl(u) {
 }
 
 const tabStreams = new Map(); // tabId -> [{ url, time }]
+const tabNavAt = new Map();   // tabId -> epoch ms of the tab's last navigation start
 const STREAM_KEEP_MS = 10 * 60 * 1000;
 const STREAM_MAX = 80;
 
@@ -445,6 +446,7 @@ try {
     if (changeInfo.status === 'loading') {
       tabStreams.delete(tabId);
       tabYtPage.delete(tabId);
+      tabNavAt.set(tabId, Date.now());
     }
     if (changeInfo.status === 'complete' && tab && tab.url) {
       if (isYouTubePageUrl(tab.url)) tabYtPage.set(tabId, true);
@@ -469,6 +471,13 @@ try {
         // so the "hide the player's own CDN urls" flag must follow pushState.
         if (isYouTubePageUrl(details.url)) tabYtPage.set(details.tabId, true);
         else tabYtPage.delete(details.tabId);
+        // SPA navigations get no tabs.onUpdated 'loading' either, so the
+        // tab's sniffed-stream history must be dropped here too — otherwise
+        // the previous page's tokenized links keep resurfacing in the
+        // capsule panel on the next video (same mydaddy class of bug as the
+        // full-navigation one).
+        tabStreams.delete(details.tabId);
+        tabNavAt.set(details.tabId, Date.now());
         maybeResolveTweet(details.url);
         maybeResolveFacebook(details.url);
         maybeResolveYouTube(details.url);
@@ -691,10 +700,11 @@ function fbEfgTagOfUrl(u) {
 function collapseRowKey(v) {
   const url = String((v && v.url) || '');
   if (!fbPathKey(url)) return 'u:' + (normalizeSentUrl(url) || url);
+  // No `size` in the key: the same file probed at different moments can be
+  // known vs unknown, and keying on it split one file into two rows.
   const q = (v && v.quality && v.quality !== 'unknown') ? v.quality : '?';
   const res = (v && v.resolution) || '?';
-  const size = (v && v.size) || '?';
-  return fbPathKey(url) + '|' + fbEfgTagOfUrl(url) + '|' + q + '|' + res + '|' + size;
+  return fbPathKey(url) + '|' + fbEfgTagOfUrl(url) + '|' + q + '|' + res;
 }
 
 /** Collapse same-file rows, merging known fields into the kept row. */
@@ -706,6 +716,7 @@ function collapseVideoRows(list) {
     const prev = out.get(k);
     if (!prev) { out.set(k, v); continue; }
     try {
+      if (v.playing) prev.playing = true;
       if (!prev.filename && v.filename) prev.filename = v.filename;
       if (!prev.size && v.size) prev.size = v.size;
       if ((!prev.quality || prev.quality === 'unknown') && v.quality && v.quality !== 'unknown') {
@@ -1455,6 +1466,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // One round-trip for the capsule/popup: recent tab streams + sent URLs
   if (msg.action === 'get-panel-data') {
     const tabId = msg.tabId != null ? msg.tabId : (sender.tab && sender.tab.id);
+    // Page-load floor for stream freshness. Content scripts send their own
+    // performance.timeOrigin; the popup has no page clock, so fall back to
+    // the tab's last-navigation time recorded by this worker.
+    const since = (typeof msg.since === 'number' && msg.since > 0)
+      ? msg.since
+      : (tabNavAt.get(tabId) || 0);
     // Attach fresh response metadata (native filename + exact size) so the
     // capsule rows mirror what a browser download would have produced.
     const now = Date.now();
@@ -1464,7 +1481,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         meta[k] = { filename: v.filename, size: v.size, contentType: v.contentType };
       }
     }
-    sendResponse({ streams: getTabStreams(tabId, msg.since), sent: [...sentExact].slice(-500), meta, dashActive: isDashActiveTab(tabDashActive, tabId) });
+    sendResponse({ streams: getTabStreams(tabId, since), sent: [...sentExact].slice(-500), meta, dashActive: isDashActiveTab(tabDashActive, tabId) });
     return false;
   }
 
