@@ -7,6 +7,7 @@ const dns = require('dns');
 const net = require('net');
 const { URL } = require('url');
 const { EventEmitter } = require('events');
+const { agentFor, destroyAgents } = require('./engine/agents');
 
 const {
   DownloadTask,
@@ -175,6 +176,7 @@ function robustFetch(url, init = {}) {
         timeout: 30000,
         rejectUnauthorized: !insecure,
         lookup: dohFallbackLookup,
+        agent: agentFor(parsed, { insecure }),
       }, (res) => {
         responded = true;
         // Follow redirects manually so we can re-apply DoH/TLS on the next hop
@@ -830,14 +832,42 @@ class DownloadEngine extends EventEmitter {
         timeout,
         rejectUnauthorized: !insecure,
         lookup: dohFallbackLookup,
+        agent: agentFor(parsed, { insecure }),
       }, (res) => {
         resolve({
           status: res.statusCode,
           headers: res.headers,
           url,
           destroy: () => {
-            try { res.destroy(); } catch (e) {}
-            try { req.destroy(); } catch (e) {}
+            // Reuse-friendly close: drain empty/small bodies so the pooled
+            // keep-alive socket returns to the agent for the next request
+            // (fresh-socket-per-request was our #1 measured bottleneck).
+            // Force-destroy only potentially large bodies, which would be
+            // wasteful to drain (e.g. the plain-GET fallback probe).
+            // Returns a promise that resolves when the socket is reusable —
+            // callers firing another request right away should await it.
+            const len = parseInt(res.headers['content-length'], 10);
+            const small = method === 'HEAD' || !Number.isFinite(len) || len <= 1024 * 1024;
+            if (!small) {
+              try { res.destroy(); } catch (e) {}
+              try { req.destroy(); } catch (e) {}
+              return Promise.resolve();
+            }
+            return new Promise((done) => {
+              let settled = false;
+              const finish = () => { if (!settled) { settled = true; done(); } };
+              // Wait for 'close' (fires after the message completes and the
+              // agent reclaims the keep-alive socket), not just message
+              // completion — returning early reintroduces the per-request
+              // new-connection race.
+              res.on('error', finish);
+              res.on('end', finish);
+              res.on('close', finish);
+              // Safety valve: never let a stalled drain hang the caller.
+              const t = setTimeout(finish, 1000);
+              if (typeof t.unref === 'function') t.unref();
+              try { res.resume(); } catch (e) { finish(); }
+            });
           },
         });
       });
@@ -882,14 +912,14 @@ class DownloadEngine extends EventEmitter {
     }
     if (head) {
       const loc = redirectTo(head);
-      if (loc) { head.destroy(); return this._probeFile(loc, extraHeaders, redirectCount + 1, jar); }
+      if (loc) { await head.destroy(); return this._probeFile(loc, extraHeaders, redirectCount + 1, jar); }
     }
     if (!head || head.status === 405 || head.status === 403 || head.status === 501 || head.status === 401) {
-      if (head) head.destroy();
+      if (head) await head.destroy();
       head = await this._openRequestAuto(url, { method: 'GET', headers: { ...headers, Range: 'bytes=0-0' } });
       jarNote(jar, head.headers);
       const loc = redirectTo(head);
-      if (loc) { head.destroy(); return this._probeFile(loc, extraHeaders, redirectCount + 1, jar); }
+      if (loc) { await head.destroy(); return this._probeFile(loc, extraHeaders, redirectCount + 1, jar); }
     }
 
     const contentType = head.headers['content-type'] || '';
@@ -903,8 +933,8 @@ class DownloadEngine extends EventEmitter {
       jarNote(jar, rangeProbe.headers);
       const loc = redirectTo(rangeProbe);
       if (loc) {
-        rangeProbe.destroy();
-        head.destroy();
+        await rangeProbe.destroy();
+        await head.destroy();
         return this._probeFile(loc, extraHeaders, redirectCount + 1, jar);
       }
       if (rangeProbe.status === 206) {
@@ -920,7 +950,7 @@ class DownloadEngine extends EventEmitter {
     } catch (e) {
       supportsRange = false;
     } finally {
-      if (rangeProbe) rangeProbe.destroy();
+      if (rangeProbe) await rangeProbe.destroy();
     }
 
     // Plain-GET fallback: some tube/CDN hosts (WAF, mod_security, hotlink
@@ -950,13 +980,13 @@ class DownloadEngine extends EventEmitter {
             status: 200,
             responseCookies: jar.cookies || null,
           };
-          plain.destroy();
-          head.destroy();
+          await plain.destroy();
+          await head.destroy();
           return res;
         }
       } catch (e) { /* plain GET also failed — report the probe status below */ }
       finally {
-        if (plain) { try { plain.destroy(); } catch (e) {} }
+        if (plain) { try { await plain.destroy(); } catch (e) {} }
       }
     }
 
@@ -971,7 +1001,7 @@ class DownloadEngine extends EventEmitter {
       status: head.status,
       responseCookies: jar.cookies || null,
     };
-    head.destroy();
+    await head.destroy();
     return result;
   }
 
@@ -988,7 +1018,7 @@ class DownloadEngine extends EventEmitter {
     if (r.status >= 300 && r.status < 400 && r.headers.location) {
       try {
         const loc = new URL(r.headers.location, r.url).href;
-        r.destroy();
+        await r.destroy();
         return this._probePlainGet(loc, extraHeaders, redirectCount + 1, jar);
       } catch (e) { /* malformed Location — return the response as-is */ }
     }
@@ -1041,7 +1071,7 @@ class DownloadEngine extends EventEmitter {
           try {
             const probe = await this._openRequestAuto(parsed.segs[i].url, { method: 'HEAD', headers });
             const cl = parseInt(probe.headers['content-length'], 10);
-            probe.destroy();
+            await probe.destroy();
             if (cl > 0) { sampleTotal += cl; samplesRead++; }
           } catch (e) {}
         }
@@ -1087,6 +1117,7 @@ class DownloadEngine extends EventEmitter {
           timeout: timeoutMs,
           rejectUnauthorized: !allowInsecure,
           lookup: dohFallbackLookup,
+          agent: agentFor(parsed, { insecure: allowInsecure }),
         }, (res) => {
           jarNote(jar, res.headers);
           if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirectsLeft > 0) {

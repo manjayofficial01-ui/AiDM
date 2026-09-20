@@ -1,5 +1,5 @@
 /**
- * AiDM v4.8.0 - UI Controller
+ * AiDM v4.8.2 - UI Controller
  * Features: Video quality picker, per-category paths, ask-every-time, auto-detection
  */
 
@@ -1020,7 +1020,14 @@ function showQualityPicker(data) {
   // Sort by REAL height when the resolver measured the variant, otherwise by
   // quality tier (highest first). A lying "2160p" label can no longer outrank
   // a variant that is actually taller.
-  qualityVideos.sort((a, b) => qualityVideoCompare(a, b, QUALITY_TIER_ORDER));
+  qualityVideos.sort((a, b) => {
+    // Prefer progressive / audio-bearing rows first (Facebook DASH video-only
+    // downloads are silent; playable_url progressive usually has sound).
+    const aSound = (a.audioUrl || a.progressive) ? 1 : 0;
+    const bSound = (b.audioUrl || b.progressive) ? 1 : 0;
+    if (aSound !== bSound) return bSound - aSound;
+    return qualityVideoCompare(a, b, QUALITY_TIER_ORDER);
+  });
 
   // Token-normalized dedup: one file, one row — rotated CDN signatures and
   // repeated segment-style URLs previously stacked as false "qualities".
@@ -1040,6 +1047,88 @@ function showQualityPicker(data) {
     _seenQ.add(n);
     return true;
   });
+
+  // Facebook quality picker: playing / page video only. Watch pages embed
+  // every related video's progressive URLs — listing them all downloads the
+  // wrong clip. Scope to the page's own video id or one path family.
+  try {
+    const FB_HOST = /fbcdn\.net|scontent\.|facebook\.com|fb\.com|instagram\.com|cdninstagram\.com/i;
+    const pageUrl = qualityContext?.pageUrl || data.pageUrl || data.url || '';
+    const isFb = FB_HOST.test(pageUrl) || qualityVideos.some(v => v && FB_HOST.test(String(v.url || '')));
+    if (isFb && qualityVideos.length) {
+      const pageId = (() => {
+        try {
+          const u = new URL(pageUrl);
+          const host = u.hostname.toLowerCase();
+          if (/facebook\.com$/i.test(host) && /^\/watch\/?$/i.test(u.pathname)) {
+            return u.searchParams.get('v') || null;
+          }
+          if (/facebook\.com$/i.test(host)) {
+            const m = /\/videos\/(?:[^/]+\/)?(\d{5,25})\//.exec(u.pathname) ||
+                      /\/reel\/([A-Za-z0-9_-]{3,64})\//.exec(u.pathname) ||
+                      /\/share\/v\/([A-Za-z0-9_-]{3,64})\//.exec(u.pathname) ||
+                      /\/(?:video|story)\.php/.test(u.pathname) && (u.searchParams.get('v') || u.searchParams.get('video_id'));
+            return m ? (m[1] || m) : null;
+          }
+          if (/instagram\.com$/i.test(host)) {
+            const m = /\/(?:reel|p|tv)\/([A-Za-z0-9_-]{3,64})\//.exec(u.pathname);
+            return m ? m[1] : null;
+          }
+        } catch (e) {}
+        return null;
+      })();
+      const pathOf = (u) => {
+        try {
+          const x = new URL(String(u));
+          if (!FB_HOST.test(x.hostname)) return null;
+          return x.hostname.replace(/^(www\.|m\.|web\.)/, '') + x.pathname;
+        } catch (e) { return null; }
+      };
+      const idOf = (u) => {
+        try {
+          const x = new URL(String(u));
+          const efg = x.searchParams.get('efg');
+          if (efg) {
+            let s = String(efg).replace(/-/g, '+').replace(/_/g, '/');
+            while (s.length % 4) s += '=';
+            try {
+              const obj = JSON.parse(atob(s));
+              if (obj && obj.video_id != null) return String(obj.video_id);
+            } catch (e) {}
+          }
+          const m = /\/(\d{6,25})[_/.]/.exec(x.pathname || '');
+          return m ? m[1] : null;
+        } catch (e) { return null; }
+      };
+      const playing = qualityVideos.filter(v => v && v.playing);
+      let scoped = qualityVideos;
+      if (playing.length) {
+        const keys = new Set();
+        playing.forEach(v => { const p = pathOf(v.url); if (p) keys.add(p); const i = idOf(v.url); if (i) keys.add('vid:' + i); });
+        scoped = qualityVideos.filter(v => {
+          const p = pathOf(v.url); const i = idOf(v.url);
+          return (p && keys.has(p)) || (i && keys.has('vid:' + i)) || !!v.playing || !p;
+        });
+      } else if (pageId) {
+        scoped = qualityVideos.filter(v => {
+          const i = idOf(v.url);
+          if (i) return String(i) === String(pageId);
+          const p = pathOf(v.url) || '';
+          if (p.includes('/' + pageId + '_') || p.includes('/' + pageId + '/')) return true;
+          return false;
+        });
+        if (!scoped.length) scoped = qualityVideos;
+      } else {
+        const fams = new Map();
+        qualityVideos.forEach(v => { const p = pathOf(v.url); if (!p) return; fams.set(p, (fams.get(p) || 0) + 1); });
+        if (fams.size > 1) {
+          const best = [...fams.entries()].sort((a, b) => b[1] - a[1])[0][0];
+          scoped = qualityVideos.filter(v => { const p = pathOf(v.url); return !p || p === best; });
+        }
+      }
+      if (scoped.length) qualityVideos = scoped;
+    }
+  } catch (e) {}
 
   qualityVideos.forEach((video, i) => {
     const opt = document.createElement('div');
@@ -1155,7 +1244,12 @@ async function downloadSelectedQuality() {
   const headers = {};
   const pageUrl = qualityContext?.pageUrl || video.pageUrl || '';
   if (pageUrl) headers.Referer = pageUrl;
-  headers['User-Agent'] = navigator.userAgent;
+  // Facebook CDN rate-limits browser UAs — pin the same UA yt-dlp uses.
+  const isFbCdn = /fbcdn\.net|scontent\.|cdninstagram\.com|facebook\.com|fb\.watch|instagram\.com/i
+    .test(String(video.url || '') + String(pageUrl || ''));
+  headers['User-Agent'] = isFbCdn
+    ? 'facebookexternalhit/1.1'
+    : navigator.userAgent;
 
   await window.aidm.addDownload({
     url: video.url,
@@ -1171,6 +1265,8 @@ async function downloadSelectedQuality() {
     meta: { ...video, pageUrl, pageTitle: qualityContext?.pageTitle || '' },
     headers,
     cookies: qualityContext?.cookies || null,
+    // Facebook split-AV: paired audio-only track for post-download mux.
+    audioUrl: video.audioUrl || video.meta?.audioUrl || undefined,
   });
 
   hideQualityPicker();
@@ -1203,6 +1299,7 @@ async function showSettingsModal() {
   document.getElementById('setting-excluded-sites').value = (settings.excludedSites || []).join(', ');
   document.getElementById('setting-force-key').value = settings.forceTakeoverKey || 'Shift';
   document.getElementById('setting-clipboard').checked = settings.clipboardMonitor;
+  document.getElementById('setting-jev-assist').checked = settings.jevAssist !== false;
   document.getElementById('setting-browser').checked = settings.browserIntegration;
   document.getElementById('setting-notifications').checked = settings.notifications;
   document.getElementById('setting-ask-location').checked = settings.askLocationEveryTime || false;
@@ -1283,6 +1380,7 @@ async function saveSettings() {
     // Honor the toggle live: the status-bar dot flips with the setting too.
     // (The main process applies clipboardMonitor on save + startup.)
     clipboardMonitor: document.getElementById('setting-clipboard').checked,
+    jevAssist: document.getElementById('setting-jev-assist').checked,
     // File hosts (v4.5.0): only overwrite a stored secret when the user typed
     // a new one, so opening Settings and saving never wipes the account.
     fileHosts: {

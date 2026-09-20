@@ -86,5 +86,13 @@ check('narrow-window rules shed chrome',
 check('form rows wrap in narrow modals',
   /\.form-row\s*\{[^}]*flex-wrap:\s*wrap/.test(css));
 
+// ── 6. Jev assist toggle (v4.8.2) ────────────────────────────────────────────
+check('settings exposes the Jev assist toggle',
+  /id="setting-jev-assist"/.test(html));
+check('settings loads the Jev assist toggle (default on)',
+  /getElementById\('setting-jev-assist'\)\.checked = settings\.jevAssist !== false/.test(app));
+check('settings saves the Jev assist toggle',
+  /jevAssist: document\.getElementById\('setting-jev-assist'\)\.checked/.test(app));
+
 console.log(`\nui-layout: ${pass} passed, ${fail} failed`);
 process.exitCode = fail ? 1 : 0;

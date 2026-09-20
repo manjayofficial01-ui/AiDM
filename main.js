@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, clipboard, shell, Tray, Menu, nativeImage, 
 const path = require('path');
 const fs = require('fs');
 const { DownloadManager, youtubeLogDir } = require('./src/download-manager');
+const { destroyAgents } = require('./src/engine/agents');
 const { ClipboardMonitor } = require('./src/clipboard-monitor');
 const { IPCServer } = require('./src/server');
 const { AiService } = require('./src/ai-service');
@@ -155,7 +156,10 @@ function createWindow() {
   mainWindow.loadFile(path.join(__dirname, 'ui', 'index.html'));
 
   downloadManager = new DownloadManager();
-  clipboardMonitor = new ClipboardMonitor();
+  clipboardMonitor = new ClipboardMonitor({
+    // Gate the Jev link-triage fallback on the settings toggle (live).
+    jevAssist: () => downloadManager.getSettings().jevAssist !== false,
+  });
   ipcServer = new IPCServer(downloadManager);
 
   // ── Download scheduler (v4.3.0, original implementation) ──────────────
@@ -834,6 +838,9 @@ app.on('before-quit', () => {
   isQuitting = true;
   // Never leave a topmost window or a temporary owner behind on exit.
   locationDialog.teardown();
+  // Pooled keep-alive sockets hold the event loop open — release them so the
+  // process exits promptly (engine connection reuse, see src/engine/agents.js).
+  destroyAgents();
 });
 
 app.on('window-all-closed', () => {

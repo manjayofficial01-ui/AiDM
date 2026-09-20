@@ -1,6 +1,35 @@
-# ⚡ AiDM - AI-Powered Download Manager v4.8.0
+# ⚡ AiDM - AI-Powered Download Manager v4.8.2
 
 > Classic IDM-style download manager with next-generation modular download engine, dynamic in-flight segment splitting, positional random-access disk I/O, multi-mirror failover, atomic `.part.meta` crash recovery, Chrome browser integration, video quality detection, smart per-category file organization, ETA, dual-layer speed limiting, streaming multi-algorithm checksum verification, and a yt-dlp + FFmpeg extraction engine for YouTube.
+
+---
+
+## What's New in v4.8.2
+
+**Faster engine + smarter link capture.** The download engine now reuses pooled keep-alive connections across segment and probe requests (IDM's headline technique — no fresh TCP+TLS handshake per request), and copied URLs the static patterns can't classify get a second opinion from Jev (TypeSafe System One) link triage instead of being silently dropped.
+
+### New
+- **Keep-alive connection pooling** | One shared `http`/`https` agent per mode (secure / insecure-TLS / plain HTTP, LIFO, 64-socket cap) across all three request paths; probe bodies drain reuse-friendly so sockets return to the pool. Measured: 6 probe requests over 4 connections (was 6/6); segment GETs fully reuse. Pooled sockets are released on app quit.
+- **Jev link-triage fallback** | When clipboard capture meets a URL no static pattern recognizes, `src/jev.js` asks Jev (Choice: video/audio/image/file/webpage + Noul: downloadable?) with URL-anatomy state, 4 s timeout, 10-min cache, circuit breaker and fail-open everywhere. Confident downloadable verdicts surface as links; pages stay ignored. Toggle: the `jevAssist` setting (default on), gated live at call time. Key comes only from `TYPESAFE_API_KEY` — never logged, never stored.
+
+**Tests:** new `jev-classify` (16) and `engine-agents` (11) suites, both wired into `npm test`.
+
+---
+
+## What's New in v4.8.1
+
+**Facebook/Instagram videos used to download with no sound.** Facebook serves some videos as *split DASH* renditions — the picture and the sound are two separate URLs that share an `efg` video_id. The desktop muxes them back together after download, but four gaps could leave a video row without its audio counterpart, producing a silent file.
+
+### Fixed
+- **Extensionless audio renditions were dropped.** Audio harvesting ran *after* the `.mp4`/`.m3u8` extension gate, so an audio-only DASH URL with no extension was discarded and the video row shipped with no `audioUrl` → silent. Audio is now classified first, regardless of extension.
+- **Audio-specific page keys were never scanned.** Added `audio_url`, `dash_audio`, `audio_browser_native_hd/sd_url`, `playable_audio_url` patterns (previously only the video keys were read).
+- **Duplicate audio entries broke the single-audio fallback.** The same audio surfacing under two keys was harvested twice, so the sole-audio pairing path never fired. Audio URLs are now deduped.
+- **Id-less video rows never paired.** Added a page-identity fallback so a progressive row with an opaque hash filename still pairs with the page video's audio.
+- **`queueDownload` silently dropped `audioUrl`** (only `addDownload` kept it).
+- **Re-adding a duplicate lost a newly-found audio track** — the live row (and a already-completed file) now gets the audio attached and re-muxed instead of staying silent.
+- **Audio recovery picked the wrong track** when several qualities re-resolved — now prefers the audio matching the downloaded variant (exact URL → same video id/dir → first).
+
+**Tests:** `facebook-resolver` (54) and `av-tracks` (34) gained regression coverage for extensionless audio, `audio_url` keys, dedupe, `queueDownload` audio preservation and duplicate re-add attach.
 
 ---
 

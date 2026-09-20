@@ -1,12 +1,19 @@
 const { EventEmitter } = require('events');
+const jev = require('./jev');
 
 /**
  * Clipboard Monitor - Inspired by JDownloader's clipboard monitoring
  * Watches clipboard for download URLs and notifies the UI
  */
 class ClipboardMonitor extends EventEmitter {
-  constructor() {
+  /**
+   * @param {{ jevAssist?: () => boolean }} [opts] `jevAssist` lets the host
+   *   gate the Jev fallback at call time (settings toggle). Default: on when
+   *   TYPESAFE_API_KEY is present.
+   */
+  constructor(opts = {}) {
     super();
+    this.opts = opts;
     this.interval = null;
     this.lastContent = '';
     this.downloadPatterns = [
@@ -91,7 +98,32 @@ class ClipboardMonitor extends EventEmitter {
     // Check if it looks like a download URL
     if (this._isDownloadUrl(content)) {
       this.emit('link-found', content);
+      return;
     }
+
+    // Jev fallback: the static patterns missed this URL. Ask the System One
+    // model whether it is a downloadable file link; if confident, promote it
+    // exactly like a regex hit. Fail-open — no key, network trouble, or a
+    // "webpage" verdict all mean the URL is simply ignored, as before.
+    this._jevRescue(content);
+  }
+
+  /**
+   * @param {string} url
+   */
+  _jevRescue(url) {
+    if (this._jevPending === url) return; // still deciding on this exact URL
+    this._jevPending = url;
+    const enabled = this.opts.jevAssist ? !!this.opts.jevAssist() : jev.isConfigured();
+    Promise.resolve()
+      .then(() => (enabled ? jev.classifyLink(url) : null))
+      .then((verdict) => {
+        if (verdict && verdict.downloadable) this.emit('link-found', url);
+      })
+      .catch(() => { /* never let the AI path break clipboard polling */ })
+      .finally(() => {
+        if (this._jevPending === url) this._jevPending = null;
+      });
   }
 
   _isDownloadUrl(text) {

@@ -5,7 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const { isGenericFilename, cleanPageTitle } = require('./titles');
 const { DEFAULT_INTERCEPT_TYPES } = require('./scheduler');
-const { muxAudioVideo, isAvailable: ffmpegAvailable } = require('./media-mux');
+const { muxAudioVideo, isAvailable: ffmpegAvailable, facebookMediaHeaders } = require('./media-mux');
 const ytdlp = require('./yt-dlp');
 const youtubeResolver = require('./youtube-resolver');
 
@@ -422,6 +422,10 @@ const DEFAULT_SETTINGS = {
   aiApiKey: '',
   aiPrimaryModel: 'mimo-v2.5:free',
   aiFallbackModel: 'deepseek-v4-flash:free',
+  // Jev (TypeSafe System One) link-triage assist: when clipboard/extension
+  // capture produces a URL the static patterns can't classify, Jev decides
+  // whether it is a downloadable file. Needs TYPESAFE_API_KEY in the env.
+  jevAssist: true,
   // Per-category save paths — empty string means use defaultSavePath
   categoryPaths: {
     video: '',
@@ -623,7 +627,21 @@ class DownloadManager extends EventEmitter {
     // always download the full-file URL (auth params kept, only range dropped).
     try { url = stripFbRange(url); } catch {}
     const dup = this.findDuplicate(url, youtubeFields(meta).ytFormat);
-    if (dup) return { ...dup, duplicate: true };
+    if (dup) {
+      // A re-sent row may carry what the first one lacked: attach a missing
+      // paired audio track (Facebook split-AV) so the finished file can still
+      // be muxed with sound instead of staying silent.
+      try {
+        const live = (dup && dup.id && this.downloads.get(dup.id)) || dup;
+        if (live && !live.audioUrl && typeof audioUrl === 'string' && /^https?:/i.test(audioUrl)) {
+          live.audioUrl = audioUrl;
+          this._persistDownloads(true);
+          if (live.status === 'completed') this._finishRow(live);
+          else this.emit('download-updated', { ...live });
+        }
+      } catch (e) { /* attach is best-effort */ }
+      return { ...dup, duplicate: true };
+    }
 
     // File hosters (Rapidgator) reject Range and corrupt parallel segments:
     // one connection, honestly marked non-resumable.
@@ -833,7 +851,19 @@ class DownloadManager extends EventEmitter {
 
   queueDownload(opts) {
     const dup = this.findDuplicate(opts.url, youtubeFields(opts.meta).ytFormat);
-    if (dup) return { ...dup, duplicate: true };
+    if (dup) {
+      // Same split-AV attach as addDownload: a re-queued row may carry the
+      // paired audio track the first one lacked.
+      try {
+        const live = (dup && dup.id && this.downloads.get(dup.id)) || dup;
+        if (live && !live.audioUrl && opts && typeof opts.audioUrl === 'string' && /^https?:/i.test(opts.audioUrl)) {
+          live.audioUrl = opts.audioUrl;
+          this._persistDownloads(true);
+          this.emit('download-updated', { ...live });
+        }
+      } catch (e) { /* attach is best-effort */ }
+      return { ...dup, duplicate: true };
+    }
 
     const transport = resolverTransport(opts.meta);
     const replay = replayHeaders(opts.headers, opts.cookies, transport.headers);
@@ -873,6 +903,7 @@ class DownloadManager extends EventEmitter {
       meta: opts.meta || null,
       headers: replay.headers,
       cookies: replay.cookies,
+      audioUrl: (opts && typeof opts.audioUrl === 'string' && /^https?:/i.test(opts.audioUrl)) ? opts.audioUrl : null,
       isHls: isHlsUrl(opts.url),
       isDash: isDashUrl(opts.url),
       _customPath: !!opts.savePath,
@@ -1024,17 +1055,26 @@ class DownloadManager extends EventEmitter {
   }
 
   /**
-   * A video-only file with a paired audio track (Facebook split-AV, and any
-   * other provider that ships the sound separately) gets the audio muxed in.
-   * Only runs when the probe actually proved the file has no audio track.
+   * A video-only file with a paired audio track (Facebook split-AV) gets the
+   * audio muxed in. If no pair is attached but the file is silent on a
+   * Facebook/Instagram page, try to recover audioUrl from the page first.
    */
   async _ensureAudio(dl) {
     try {
-      if (!dl || !dl.audioUrl || dl._muxDone) return false;
-      const audioMissing = !!(dl.media && dl.media.hasVideo && !dl.media.hasAudio);
-      if (!audioMissing) {
-        // Nothing to repair — and never try again on a later refresh.
+      if (!dl || dl._muxDone) return false;
+      if (!dl.media) {
+        try { await this.probeMedia(dl); } catch (e) {}
+      }
+      if (dl.media && dl.media.hasAudio) {
         dl._muxDone = true;
+        return false;
+      }
+      if (!dl.audioUrl) {
+        const recovered = await this._recoverFacebookAudioUrl(dl);
+        if (recovered) dl.audioUrl = recovered;
+      }
+      if (!dl.audioUrl) {
+        if (dl.media && dl.media.hasVideo && !dl.media.hasAudio) dl.audioMissing = true;
         return false;
       }
       return await this._muxFacebookAudio(dl);
@@ -1044,41 +1084,88 @@ class DownloadManager extends EventEmitter {
   }
 
   /**
-   * Split-AV mux (Facebook today, any provider that supplies `audioUrl`).
-   * The picture and the sound arrive as two separate tracks; the row carries
-   * the paired audio URL as `audioUrl`. Download that track, then remux both
-   * into one file with FFmpeg so the saved video has sound.
-   *
-   * Runs AFTER the video download completes; the row flips to 'muxing' while
-   * it works. Guarantees:
-   *   • never muxes twice (`_muxDone`);
-   *   • without FFmpeg the file is left alone and the row gets `muxNote`
-   *     instead of an error — a silent video still beats a failed row;
-   *   • a failed/empty mux restores the original file, so no zero-byte or
-   *     truncated file is ever left behind;
-   *   • on success the row is re-probed, which clears `audioMissing`.
-   *
-   * @returns {Promise<boolean>} true when the audio was merged in.
+   * Silent Facebook download with no audioUrl: re-resolve the watch page and
+   * pick a paired audio track (yt-dlp documents playable_url/DASH pairing).
+   */
+  async _recoverFacebookAudioUrl(download) {
+    try {
+      const pageUrl = (download.meta && (download.meta.pageUrl || download.meta.url)) || '';
+      if (!pageUrl || !/facebook\.com|fb\.watch|instagram\.com/i.test(String(pageUrl))) return null;
+      if (download._audioRecoverTried) return null;
+      download._audioRecoverTried = true;
+      let facebookResolver;
+      try { facebookResolver = require('./facebook-resolver'); } catch (e) { return null; }
+      if (!facebookResolver || typeof facebookResolver.resolveFacebookVideos !== 'function') return null;
+      if (!facebookResolver.isFacebookUrl(pageUrl)) return null;
+      const r = await facebookResolver.resolveFacebookVideos(pageUrl, {
+        cookies: download.cookies || null,
+        userAgent: (typeof facebookMediaHeaders === 'function'
+          ? facebookMediaHeaders(pageUrl)['User-Agent']
+          : null) || 'facebookexternalhit/1.1',
+      });
+      const videos = (r && r.videos) || [];
+      const withAudio = videos.filter(v => v && v.audioUrl && /^https?:/i.test(v.audioUrl));
+      if (!withAudio.length) return null;
+      if (withAudio.length === 1) return withAudio[0].audioUrl;
+      // Several qualities re-resolved: return the audio that belongs to THIS
+      // download, not just the first row's. A wrong-video audio track would
+      // mux foreign sound (or fail); fail-open keeps first-found only when
+      // nothing matches.
+      try {
+        const targetNorm = normalizeMediaUrl(download.url);
+        if (targetNorm) {
+          const exact = withAudio.find(v => v.url && normalizeMediaUrl(v.url) === targetNorm);
+          if (exact) return exact.audioUrl;
+        }
+      } catch (e) { /* fall through to family matching */ }
+      try {
+        const vidOf = (u) => facebookResolver.videoIdFromFbUrl(u);
+        const dirOf = (u) => {
+          try { return new URL(String(u)).pathname.replace(/\/[^/]+$/, ''); }
+          catch (e) { return null; }
+        };
+        const vid = vidOf(download.url);
+        const dir = dirOf(download.url);
+        if (vid) {
+          const m = withAudio.find(v => vidOf(v.url) === vid || (v.audioUrl && vidOf(v.audioUrl) === vid));
+          if (m) return m.audioUrl;
+        }
+        if (dir) {
+          const m = withAudio.find(v => dirOf(v.url) === dir);
+          if (m) return m.audioUrl;
+        }
+      } catch (e) { /* fall through to first-found */ }
+      return withAudio[0].audioUrl;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * Split-AV mux. Facebook CDN MUST be fetched with facebookexternalhit/1.1
+   * (yt-dlp: browser UA is rate-limited). Stream-copy first, AAC re-encode
+   * fallback for fragmented MP4 pairs.
    */
   async _muxFacebookAudio(download) {
-    if (!download || !download.audioUrl || download._muxDone) return false;
+    if (!download || !download.audioUrl) return false;
     if (!ffmpegAvailable()) {
-      // No FFmpeg: leave the file alone. Not an error — the row keeps the
-      // video it downloaded and says why the sound is missing.
       download.audioMissing = true;
       download.muxNote = 'FFmpeg is unavailable, so the separate audio track could not be merged in. The video-only file was kept exactly as downloaded.';
+      download._muxDone = true;
       this.emit('download-updated', { ...download });
       return false;
     }
-    download._muxDone = true;
     const videoPath = download.filepath;
     const audioPath = videoPath + '.audio.part';
     const muxedPath = videoPath + '.muxed.mp4';
     const backupPath = videoPath + '.video.bak';
     let backedUp = false;
     try {
-      if (!fs.existsSync(videoPath)) return false;
-      const reqHeaders = { ...(download.headers || {}) };
+      if (!fs.existsSync(videoPath)) { download._muxDone = true; return false; }
+      // Always pin facebookexternalhit on FB CDN — never replay browser UA.
+      const reqHeaders = facebookMediaHeaders(download.audioUrl, {
+        ...(download.headers || {}),
+      });
       if (!Object.keys(reqHeaders).some(k => k.toLowerCase() === 'referer') && download.meta && download.meta.pageUrl) {
         reqHeaders.Referer = download.meta.pageUrl;
       }
@@ -1092,8 +1179,6 @@ class DownloadManager extends EventEmitter {
       if (!buf.length) throw new Error('empty audio track');
       fs.writeFileSync(audioPath, buf);
       await muxAudioVideo(videoPath, audioPath, muxedPath);
-      // Prove the mux before trusting it: a zero-byte or truncated output
-      // must never replace the video the user just downloaded.
       let muxedSize = 0;
       try { muxedSize = fs.statSync(muxedPath).size; } catch (e) { muxedSize = 0; }
       if (!muxedSize) throw new Error('mux produced an empty file');
@@ -1103,7 +1188,6 @@ class DownloadManager extends EventEmitter {
       try {
         fs.renameSync(muxedPath, videoPath);
       } catch (e) {
-        // Windows cannot rename over an existing file — drop the stale one.
         try { if (fs.existsSync(videoPath)) fs.unlinkSync(videoPath); } catch (err) {}
         fs.renameSync(muxedPath, videoPath);
       }
@@ -1112,10 +1196,13 @@ class DownloadManager extends EventEmitter {
       try { fs.unlinkSync(audioPath); } catch (e) {}
       download.status = prevStatus === 'completed' ? 'completed' : prevStatus;
       download.muxed = true;
+      download._muxDone = true;
       delete download.muxNote;
-      // Re-probe: the merged file now carries an audio track, so
-      // `audioMissing` must clear and the geometry is re-proven.
       await this.probeMedia(download);
+      if (download.media && download.media.hasVideo && !download.media.hasAudio) {
+        download.audioMissing = true;
+        download.muxNote = 'Audio merge finished but the file still reports no audio track. Facebook may be serving a protected stream — try the page URL again while logged in.';
+      }
       this._persistDownloads(true);
       this.emit('download-updated', { ...download });
       return true;
@@ -1123,8 +1210,6 @@ class DownloadManager extends EventEmitter {
       try { if (fs.existsSync(muxedPath)) fs.unlinkSync(muxedPath); } catch (err) {}
       try { if (fs.existsSync(audioPath)) fs.unlinkSync(audioPath); } catch (err) {}
       if (backedUp) {
-        // Restore the original video. The backup is only ever deleted AFTER a
-        // successful rename, so the download can never be lost.
         try {
           if (fs.existsSync(backupPath)) {
             try { fs.renameSync(backupPath, videoPath); }
@@ -1139,9 +1224,11 @@ class DownloadManager extends EventEmitter {
         download.status = 'completed';
         download.audioMissing = true;
         download.muxNote = 'The separate audio track could not be merged in, so the video-only file was kept as downloaded.';
-        this._persistDownloads(true);
-        this.emit('download-updated', { ...download });
       }
+      // Allow one later retry (e.g. after audio recovery or re-scan).
+      download._muxDone = false;
+      this._persistDownloads(true);
+      this.emit('download-updated', { ...download });
       return false;
     }
   }

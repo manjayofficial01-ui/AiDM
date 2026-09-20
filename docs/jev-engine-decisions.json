@@ -1,0 +1,127 @@
+{
+  "model": "jev-1.13.0",
+  "usage": {
+    "input_tokens": 3390,
+    "output_tokens": 695
+  },
+  "confidenceGate": 0.55,
+  "decisions": {
+    "F1": {
+      "raw": "adopt",
+      "confidence": 0.29,
+      "acted": false,
+      "impact": 3.85,
+      "impactConfidence": 0.73,
+      "final": "defer"
+    },
+    "F2": {
+      "raw": "defer",
+      "confidence": 0.9,
+      "acted": true,
+      "impact": 2.85,
+      "impactConfidence": 0.63,
+      "final": "defer"
+    },
+    "F3": {
+      "raw": "defer",
+      "confidence": 0.49,
+      "acted": false,
+      "impact": 2.94,
+      "impactConfidence": 0.73,
+      "final": "defer"
+    },
+    "F4": {
+      "raw": "defer",
+      "confidence": 0.63,
+      "acted": true,
+      "impact": 3.07,
+      "impactConfidence": 0.71,
+      "final": "defer"
+    },
+    "F5": {
+      "raw": "defer",
+      "confidence": 0.94,
+      "acted": true,
+      "impact": 2.64,
+      "impactConfidence": 0.64,
+      "final": "defer"
+    },
+    "F6": {
+      "raw": "defer",
+      "confidence": 0.75,
+      "acted": true,
+      "impact": 0.54,
+      "impactConfidence": 0.64,
+      "final": "defer"
+    },
+    "F7": {
+      "raw": "defer",
+      "confidence": 0.8,
+      "acted": true,
+      "impact": 2.7,
+      "impactConfidence": 0.56,
+      "final": "defer"
+    },
+    "F8": {
+      "raw": "skip",
+      "confidence": 0.97,
+      "acted": true,
+      "impact": 0.31,
+      "impactConfidence": 0.79,
+      "final": "skip"
+    },
+    "F9": {
+      "raw": "defer",
+      "confidence": 0.87,
+      "acted": true,
+      "impact": 1.75,
+      "impactConfidence": 0.63,
+      "final": "defer"
+    },
+    "F10": {
+      "raw": "defer",
+      "confidence": 0.74,
+      "acted": true,
+      "impact": 1.64,
+      "impactConfidence": 0.52,
+      "final": "defer"
+    }
+  },
+  "biggest_bottleneck": {
+    "type": "choice",
+    "choice": "f1_no_keepalive",
+    "confidence": 0.98,
+    "probabilities": {
+      "f9_adapt": 0,
+      "f4_fixed_splits": 0.01,
+      "none": 0,
+      "f3_host_cap": 0.01,
+      "f1_no_keepalive": 0.98
+    }
+  },
+  "segmentation_parity": {
+    "type": "noul",
+    "noul": 0.3
+  },
+  "risk_matrix": {
+    "type": "score",
+    "score": 4.28,
+    "confidence": 0.61,
+    "legend": {
+      "0": "0 trivial",
+      "1": "1 low",
+      "2": "2 moderate",
+      "3": "3 elevated",
+      "4": "4 high",
+      "5": "5 severe"
+    },
+    "probabilities": {
+      "0": 0,
+      "1": 0.01,
+      "2": 0.02,
+      "3": 0.09,
+      "4": 0.45,
+      "5": 0.43
+    }
+  }
+}

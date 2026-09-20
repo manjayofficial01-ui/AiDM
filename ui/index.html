@@ -459,6 +459,11 @@
             <input type="checkbox" id="setting-clipboard" checked />
           </div>
           <div class="form-group toggle">
+            <label>AI link triage (Jev) for unrecognized copied URLs</label>
+            <input type="checkbox" id="setting-jev-assist" checked />
+          </div>
+          <p class="settings-hint">When a copied URL matches no known pattern, Jev (TypeSafe System One) classifies it — confident downloadable links are captured, pages ignored. Fail-open: off or unreachable means old behavior. Key via <code>TYPESAFE_API_KEY</code> env only.</p>
+          <div class="form-group toggle">
             <label>Browser Integration (intercept all downloads)</label>
             <input type="checkbox" id="setting-browser" checked />
           </div>
