@@ -650,3 +650,5 @@ npm run test:youtube
 ## 📝 License
 
 MIT — Free and open source. Inspired by the best, built for the future.
+
+Copyright (c) 2026 VibeCoder ManjayOfficial01. See [LICENSE](LICENSE) for details.
