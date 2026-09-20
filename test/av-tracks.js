@@ -70,6 +70,8 @@ const bgSrc = fs.readFileSync(path.join(ROOT, 'chrome-extension', 'background.js
 const dmSrc = fs.readFileSync(path.join(ROOT, 'src', 'download-manager.js'), 'utf8');
 const srvSrc = fs.readFileSync(path.join(ROOT, 'src', 'server.js'), 'utf8');
 const pkgSrc = fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8');
+const fbSrc = fs.readFileSync(path.join(ROOT, 'src', 'facebook-resolver.js'), 'utf8');
+const uiSrc = fs.readFileSync(path.join(ROOT, 'ui', 'app.js'), 'utf8');
 
 const audioLib = new Function(
   'audioPlaylistPaths',
@@ -129,11 +131,16 @@ check('popup probe always resolves the file object',
   /finish\(\{ width: w, height: h, durationSec: Number\.isFinite/.test(popSrc));
 
 // ── 4. Facebook split-AV audio pairing ──────────────────────────────────
-check('content.js pairs audio-only tracks by efg video_id',
-  /fbTrackKindOfUrl\(u\) !== 'audio'/.test(ctSrc) &&
-  /fbVideoIdOfUrl\(u\)/.test(ctSrc) &&
-  /audioByVid/.test(ctSrc) &&
-  /v\.audioUrl = a/.test(ctSrc));
+check('content.js pairs audio-only tracks by efg video_id / path dir',
+  /function rememberFbAudioUrl\(/.test(ctSrc) &&
+  /function attachFbAudioUrl\(/.test(ctSrc) &&
+  /fbAudioByVid/.test(ctSrc) &&
+  /attachFbAudioUrl/.test(ctSrc));
+check('content.js attaches audioUrl on the download list path',
+  /attachFbAudioUrls\(/.test(ctSrc) && /videosForDownloadList/.test(ctSrc));
+check('content.js harvests audio before the playing-only filter',
+  /rememberFbAudioUrl/.test(ctSrc) &&
+  /Harvest audio-only Facebook tracks|rememberFbAudioUrl\(v\.url\)/.test(ctSrc));
 check('background.js ships fbTrackKindOfUrl + fbVideoIdOfUrl + fbEfgObj helpers',
   /function fbTrackKindOfUrl\(u\)/.test(bgSrc) &&
   /function fbVideoIdOfUrl\(u\)/.test(bgSrc) &&
@@ -142,15 +149,48 @@ check('background.js skip-audio-and-pair post-pass is present',
   /fbAudioByVid\.set\(vid, v\.url\)/.test(bgSrc) &&
   /fbAudioByVid\.size/.test(bgSrc) &&
   /v\.audioUrl = fbAudioByVid\.get\(vid\)/.test(bgSrc));
+check('background.js also pairs by path dir / sole audio track',
+  /fbAudioByDir/.test(bgSrc) && /fbSoleAudio/.test(bgSrc));
 check('audioUrl propagated to desktop single-download opts',
   /audioUrl:\s*v\.audioUrl/.test(ctSrc) &&
   /audioUrl:\s*item\.audioUrl/.test(popSrc) &&
   /audioUrl:\s*typeof data\.audioUrl/.test(srvSrc));
+check('quality picker forwards audioUrl to addDownload',
+  /audioUrl:\s*video\.audioUrl/.test(uiSrc) || /audioUrl:\s*video\.audioUrl \|\|/.test(uiSrc));
+check('facebook-resolver pairs audio onto picker variants',
+  /audioUrl:\s*v\.audioUrl/.test(fbSrc) && /audioTracks/.test(fbSrc));
+check('facebook-resolver prefers progressive (audio-bearing) URLs',
+  /progressive: !!progressive/.test(fbSrc) || /progressive: !!v\.progressive/.test(fbSrc));
+check('download-manager muxes when audioUrl is present even if probe is silent',
+  /if \(!dl \|\| dl\._muxDone\) return false;/.test(dmSrc) &&
+  /dl\.media && dl\.media\.hasAudio/.test(dmSrc) &&
+  /_recoverFacebookAudioUrl/.test(dmSrc));
+check('mux audio fetch pins facebookexternalhit on Facebook CDN',
+  /facebookMediaHeaders/.test(dmSrc) &&
+  /facebookexternalhit\/1\.1/.test(fs.readFileSync(path.join(ROOT, 'src', 'media-mux.js'), 'utf8')));
+check('mux has AAC re-encode fallback for fragmented Facebook pairs',
+  /-c:a['"],\s*['"]aac['"]/.test(fs.readFileSync(path.join(ROOT, 'src', 'media-mux.js'), 'utf8')) ||
+  /'aac'/.test(fs.readFileSync(path.join(ROOT, 'src', 'media-mux.js'), 'utf8')));
+check('extension send pins FB UA on fbcdn downloads',
+  /facebookexternalhit\/1\.1/.test(bgSrc) && /isFbCdn/.test(bgSrc));
 check('desktop mux module exists and is required by download-manager',
   fs.existsSync(path.join(ROOT, 'src', 'media-mux.js')) &&
   /require\('\.\/media-mux'\)/.test(dmSrc) &&
   /_muxFacebookAudio\(dl\)/.test(dmSrc) &&
   /muxAudioVideo\(videoPath, audioPath, muxedPath\)/.test(dmSrc));
+check('queueDownload preserves a paired audioUrl',
+  /queueDownload\(opts\)/.test(dmSrc) &&
+  /audioUrl: \(opts && typeof opts\.audioUrl/.test(dmSrc));
+check('duplicate re-add attaches a missing audioUrl to the live row',
+  /live\.audioUrl = audioUrl/.test(dmSrc) &&
+  /live\.audioUrl = opts\.audioUrl/.test(dmSrc));
+check('audio recovery prefers the downloaded variant over first-found',
+  /withAudio\.find\(v => v\.url && normalizeMediaUrl\(v\.url\) === targetNorm\)/.test(dmSrc));
+check('resolver harvests extensionless efg-audio + audio keys, deduped',
+  /rememberAudio\(u\)/.test(fbSrc) &&
+  /"audio_url"/.test(fbSrc) &&
+  /dash_audio\(\?:_url\)\?/.test(fbSrc) &&
+  /seenAudio\.has\(abs\)/.test(fbSrc));
 check('ffmpeg-static is bundled and asarUnpack is configured',
   /ffmpeg-static/.test(pkgSrc) &&
   /asarUnpack/.test(pkgSrc));

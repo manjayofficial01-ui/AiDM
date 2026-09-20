@@ -96,16 +96,20 @@ check('Download sends live quality/resolution/filename',
 check('metadata probe is cached + time-boxed',
   /metaProbeCache/.test(ctSrc) && /preload = 'metadata'/.test(ctSrc));
 
-// ── 3. facebook ranked sections (nothing hidden) ───────────────────────────
-check('candidates are tagged, never dropped, for ranking',
+// ── 3. facebook playing-only download list ─────────────────────────────────
+check('candidates are tagged for attribution',
   /v\._fbScope = \(!fbScope \|\| !fbScope\.size\) \? 'all'/.test(ctSrc));
 check('no hard scope-drop remains in pushCand',
   !/if \(useFbScope && !fbScopeAllows\(v\.url, fbScope\)\) return;/.test(ctSrc));
-check('mine-first + others divider rendering',
-  /mineRows/.test(ctSrc) && /otherRows/.test(ctSrc) &&
-  /aidm-cap-sep/.test(ctSrc) && /Other videos on this page/.test(ctSrc));
-check('sub-line reports the split',
-  /this video/.test(ctSrc));
+check('Facebook download list is playing-only',
+  /function filterFacebookPlayingOnly\(/.test(ctSrc) &&
+  /filterFacebookPlayingOnly\(rows, video\)/.test(ctSrc) &&
+  /videosForDownloadList\(\)/.test(ctSrc));
+check('not-playing related videos are never listed on Facebook',
+  !/Other videos on this page/.test(ctSrc) &&
+  /facebookPageVideoId\(/.test(ctSrc));
+check('sub-line reports the scoped link count',
+  /downloadable link/.test(ctSrc));
 
 // ── 4. popup parity ────────────────────────────────────────────────────────
 check('popup probes dimension-less twitter mp4s',

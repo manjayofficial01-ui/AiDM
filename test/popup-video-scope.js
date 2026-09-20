@@ -127,8 +127,17 @@ check('badge generalizes scoping via elementMediaKeys',
   /const k = mediaPathKey\(u\);\s*\n\s*return !k \|\| scope\.has\(k\);/.test(ctSrc));
 check('badge counts mediaPathKey-keyed URLs too',
   /fbPathKey\(u\) \|\| mediaPathKey\(u\) \|\| normalizeStreamUrl/.test(ctSrc));
-check('divider render keeps the non-destructive ranking',
-  /Other videos on this page/.test(ctSrc));
+// v4.8.1+: Facebook download list is PLAYING-video only — related feed/watch
+// links are hard-filtered, never ranked under a divider.
+check('Facebook capsule hard-filters to playing video only',
+  /filterFacebookPlayingOnly\(rows, video\)/.test(ctSrc));
+check('Facebook scan/grab responses use playing-only list',
+  /videosForDownloadList\(\)/.test(ctSrc));
+check('playing-only helper exists',
+  /function filterFacebookPlayingOnly\(/.test(ctSrc) &&
+  /function facebookPageVideoId\(/.test(ctSrc));
+check('no Facebook "other videos" divider remains',
+  !/Other videos on this page/.test(ctSrc));
 
 // ── 4. SPA staleness: new page state cleared on navigation ──────────────────
 check('clearPageDetections resets detectedLinks', /detectedLinks = new Set\(\);/.test(ctSrc));

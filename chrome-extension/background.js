@@ -1073,9 +1073,15 @@ async function sendToAiDM(url, filename, opts = {}) {
       (opts.meta && opts.meta.pageUrl) ||
       (body.headers && (body.headers.Referer || body.headers.referer)) ||
       (new URL(url).origin + '/');
+    // Facebook CDN rate-limits browser User-Agents (yt-dlp facebook extractor
+    // pins facebookexternalhit/1.1 for the same reason). Captured browser UA
+    // is exactly what gets rejected — override on fbcdn/scontent hosts.
+    const isFbCdn = /fbcdn\.net|scontent\.|cdninstagram\.com/i.test(String(url));
     body.headers = Object.assign({}, body.headers, {
       Referer: ref,
-      'User-Agent': (captured && captured.userAgent) || navigator.userAgent || '',
+      'User-Agent': isFbCdn
+        ? 'facebookexternalhit/1.1'
+        : ((captured && captured.userAgent) || navigator.userAgent || ''),
       'Accept-Language': (navigator.language || 'en-US') + ',en;q=0.9',
     });
     if (captured && captured.origin && !body.headers.Origin && !body.headers.origin) {
@@ -1176,6 +1182,8 @@ async function sendVideoDetection(videoData) {
       const seen = new Set();
       const enriched = [];
       const fbAudioByVid = new Map();
+      const fbAudioByDir = new Map();
+      let fbSoleAudio = null;
       for (const v of vids) {
         if (!v || !v.url || !/^https?:/i.test(v.url)) continue;
         // Facebook range-slices are partial chunks, never playable files:
@@ -1191,6 +1199,11 @@ async function sendVideoDetection(videoData) {
         if (fbTrackKindOfUrl(v.url) === 'audio') {
           const vid = fbVideoIdOfUrl(v.url);
           if (vid && !fbAudioByVid.has(vid)) fbAudioByVid.set(vid, v.url);
+          try {
+            const dir = new URL(v.url).pathname.replace(/\/[^/]+$/, '');
+            if (dir && !fbAudioByDir.has(dir)) fbAudioByDir.set(dir, v.url);
+          } catch (e) {}
+          if (!fbSoleAudio) fbSoleAudio = v.url;
           continue;
         }
         // Not-a-video filter: audio-typed responses (DASH audio slices as
@@ -1240,13 +1253,28 @@ async function sendVideoDetection(videoData) {
         enriched.push(v);
       }
       // Pair each Facebook video-only track with the audio-only track that
-      // shares its efg video_id; the desktop downloads both and muxes them
-      // with FFmpeg (without this the saved file has no sound).
-      if (fbAudioByVid.size) {
+      // shares its efg video_id (or path directory / sole audio track). The
+      // desktop downloads both and muxes them with FFmpeg — without this the
+      // saved file has no sound.
+      if (fbAudioByVid.size || fbAudioByDir.size || fbSoleAudio) {
         for (const v of enriched) {
           if (!v || v.audioUrl) continue;
           const vid = fbVideoIdOfUrl(v.url);
-          if (vid && fbAudioByVid.has(vid)) v.audioUrl = fbAudioByVid.get(vid);
+          if (vid && fbAudioByVid.has(vid)) {
+            v.audioUrl = fbAudioByVid.get(vid);
+            continue;
+          }
+          try {
+            const dir = new URL(v.url).pathname.replace(/\/[^/]+$/, '');
+            if (dir && fbAudioByDir.has(dir)) {
+              v.audioUrl = fbAudioByDir.get(dir);
+              continue;
+            }
+          } catch (e) {}
+          // DASH video track + a single audio track on this page → pair them.
+          if (fbSoleAudio && fbTrackKindOfUrl(v.url) === 'video') {
+            v.audioUrl = fbSoleAudio;
+          }
         }
       }
       // Same-file rows (token rotation, player re-fetches) collapse here so

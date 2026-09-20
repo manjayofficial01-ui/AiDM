@@ -235,5 +235,100 @@ check('desktop payload collapses before the picker',
 check('popup collapses in dedupeMedia',
   /collapseRowKeyInline\(m\)/.test(popSrc));
 
+// ── 7. playing-only download list (user: never list not-playing videos) ────
+check('playing-only filter is wired into the capsule',
+  /filterFacebookPlayingOnly\(rows, video\)/.test(ctSrc));
+check('scan/grab/get-videos return playing-only Facebook lists',
+  (ctSrc.match(/videosForDownloadList\(\)/g) || []).length >= 4);
+check('popup applies the same Facebook playing-only filter',
+  /filterFacebookPlayingOnlyInline/.test(popSrc));
+check('resolver scopes variants to the page video',
+  /filterVariantsToPageVideo/.test(fs.readFileSync(path.join(ROOT, 'src/facebook-resolver.js'), 'utf8')));
+
+{
+  // Extract shipped filterFacebookPlayingOnly + helpers with browser stubs.
+  const needs = [
+    'fbCanonicalHost', 'fbVideoIdOfUrl', 'fbPathKey', 'fbScopeAllows',
+    'elementFilePaths', 'facebookPageVideoId', 'fbUrlBelongsToVideoId',
+    'playingFbPathKey', 'playingFbVideoId', 'filterFacebookPlayingOnly',
+    'isSegmentUrl', 'stripFbRange', 'fbEfgTag', 'fbEfgObj', 'fbFileKey',
+    'isFacebookPage', 'isFacebookVideoUrl',
+  ];
+  const body = needs.map(n => grabShipped(ctSrc, n)).join('\n');
+  const locationStub = { hostname: 'www.facebook.com', href: 'https://www.facebook.com/watch/?v=111' };
+  const resources = [];
+  const performanceStub = { getEntriesByType: () => resources };
+  const playingEl = {
+    currentSrc: 'blob:https://www.facebook.com/aaaa',
+    src: '',
+    querySelectorAll: () => [],
+    paused: false, ended: false, readyState: 4,
+  };
+  const filt = new Function(
+    'FB_HOST_RE', 'location', 'performance', 'blobToRealUrlMap',
+    'isPlayingVideo', 'isActuallyPlaying',
+    body + '\nreturn { filterFacebookPlayingOnly, facebookPageVideoId, fbUrlBelongsToVideoId };'
+  )(
+    constRegexLiteral(ctSrc, 'FB_HOST_RE'),
+    locationStub,
+    performanceStub,
+    new Map([['blob:https://www.facebook.com/aaaa', rotA]]),
+    (v) => !!(v && v.paused === false && !v.ended && v.readyState > 2),
+    (v) => !!(v && v.paused === false && !v.ended && v.readyState >= 3)
+  );
+
+  const playingRow = { url: rotA, playing: true, quality: '1080p' };
+  const siblingRow = { url: rendSD, quality: '720p' }; // same path family, no playing flag
+  const otherRow = { url: otherVideo, quality: '1080p' };
+
+  const onlyPlaying = filt.filterFacebookPlayingOnly([playingRow, otherRow, siblingRow], playingEl);
+  check('playing flag drops other videos, keeps same-path siblings',
+    onlyPlaying.some(v => v.url === rotA || v.url === rendSD) &&
+    !onlyPlaying.some(v => v.url === otherVideo),
+    onlyPlaying.map(v => v.url).join(' | '));
+
+  locationStub.href = 'https://www.facebook.com/watch/?v=111';
+  const byPage = filt.filterFacebookPlayingOnly([
+    { url: 'https://video.xx.fbcdn.net/v/t/111_hd.mp4?oh=1' },
+    { url: 'https://video.xx.fbcdn.net/v/t/999999999_n.mp4?oh=2' },
+  ], null);
+  check('page id keeps own video, drops related',
+    byPage.length === 1 && /111_/.test(byPage[0].url));
+
+  // FAIL-OPEN: blob+MSE progressive URLs often carry no page id in the path.
+  // A playing <video> must still get those links — never an empty panel.
+  locationStub.href = 'https://www.facebook.com/watch/?v=111';
+  const unattr = filt.filterFacebookPlayingOnly([
+    { url: 'https://video.xx.fbcdn.net/v/t42.9040-2/abcdef_n.mp4?oh=1', source: 'facebook' },
+    { url: 'https://video.xx.fbcdn.net/v/t/999999999_n.mp4?oh=2' },
+  ], playingEl);
+  check('playing element keeps unattributable progressive links',
+    unattr.some(v => /abcdef_n\.mp4/.test(v.url)) &&
+    !unattr.some(v => /999999999/.test(v.url)),
+    unattr.map(v => v.url).join(' | '));
+
+  const allUnattr = filt.filterFacebookPlayingOnly([
+    { url: 'https://video.xx.fbcdn.net/v/t42.9040-2/aaa_n.mp4', source: 'facebook' },
+    { url: 'https://video.xx.fbcdn.net/v/t42.9040-2/bbb_hd.mp4', source: 'facebook' },
+  ], playingEl);
+  check('fail-open: playing + unattributable rows are never emptied',
+    allUnattr.length === 2, 'got ' + allUnattr.length);
+
+  locationStub.href = 'https://www.facebook.com/';
+  locationStub.hostname = 'www.facebook.com';
+  const feed = filt.filterFacebookPlayingOnly([
+    { url: 'https://video.xx.fbcdn.net/v/t/222_n.mp4' },
+    { url: 'https://video.xx.fbcdn.net/v/t/333_n.mp4' },
+  ], null);
+  check('feed with nothing playing lists nothing',
+    feed.length === 0, 'got ' + feed.length);
+
+  locationStub.href = 'https://www.facebook.com/watch/?v=111';
+  check('page id parser', filt.facebookPageVideoId('https://www.facebook.com/watch/?v=111') === '111');
+  check('belongs-to-id via path',
+    filt.fbUrlBelongsToVideoId('https://video.xx.fbcdn.net/v/t/111_hd.mp4?oh=a', '111') === true &&
+    filt.fbUrlBelongsToVideoId('https://video.xx.fbcdn.net/v/t/999999999_n.mp4?oh=a', '111') === false);
+}
+
 console.log(`\nfacebook-panel: ${pass} passed, ${fail} failed`);
 process.exitCode = fail ? 1 : 0;

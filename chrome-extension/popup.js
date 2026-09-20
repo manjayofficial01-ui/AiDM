@@ -82,6 +82,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       // Videos with quality info — show everything the page offers
       // (video/audio + generic download links: zip/rar/pdf/exe/doc/images/etc.).
+      // Facebook/Instagram: playing video's links only.
       if (response.videos && response.videos.length > 0) {
         response.videos.forEach(v => allMedia.push({ ...v, type: 'video' }));
       }
@@ -95,6 +96,13 @@ document.addEventListener('DOMContentLoaded', async () => {
           }
         });
       }
+
+      // Hard filter before count/render: Facebook download list = playing only.
+      try {
+        const fbOnly = filterFacebookPlayingOnlyInline(allMedia, tab && tab.url);
+        allMedia.length = 0;
+        fbOnly.forEach(m => allMedia.push(m));
+      } catch (e) {}
 
       mediaCount.textContent = allMedia.length;
 
@@ -171,6 +179,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         } catch (e) { res(null); }
       });
       let items = videos.map(v => ({ ...v, type: 'video' }));
+      try {
+        items = filterFacebookPlayingOnlyInline(items, tab && tab.url);
+      } catch (e) {}
       const metaMap = (pd && pd.meta) || null;
       // Same treatment as the Scan path: hide what's already in AiDM and
       // enrich via token-insensitive meta lookup (FB rotates ?efg/oh/oe per
@@ -337,6 +348,125 @@ document.addEventListener('DOMContentLoaded', async () => {
     } catch (e) { return null; }
   }
 
+  /** efg.video_id of a Facebook URL, or null. */
+  function fbVideoIdOfUrlInline(u) {
+    try {
+      const x = new URL(String(u || ''));
+      const efg = x.searchParams.get('efg');
+      if (!efg) return null;
+      let s = String(efg).replace(/-/g, '+').replace(/_/g, '/');
+      while (s.length % 4) s += '=';
+      let obj = null;
+      if (s.charAt(0) === '{') { try { obj = JSON.parse(String(efg)); } catch (e) {} }
+      if (!obj) { try { obj = JSON.parse(atob(s)); } catch (e) { return null; } }
+      return obj && obj.video_id != null ? String(obj.video_id) : null;
+    } catch (e) { return null; }
+  }
+
+  /** Facebook/Instagram page video id from a tab URL, or null. */
+  function facebookPageVideoIdInline(href) {
+    try {
+      const u = new URL(String(href || ''));
+      const host = u.hostname.toLowerCase().replace(/\.$/, '');
+      if (host === 'fb.watch') {
+        const m = /^\/([A-Za-z0-9_-]{3,64})\/?$/i.exec(u.pathname);
+        return m ? m[1] : null;
+      }
+      if (/facebook\.com$/i.test(host)) {
+        if (/^\/watch\/?$/i.test(u.pathname)) {
+          const v = u.searchParams.get('v');
+          return v && /^\d{3,25}$/.test(v) ? v : null;
+        }
+        if (/^\/(video|story)\.php$/i.test(u.pathname)) {
+          const v = u.searchParams.get('v') || u.searchParams.get('video_id') || u.searchParams.get('story_fbid');
+          return v && /^\d{3,25}$/.test(v) ? v : null;
+        }
+        const m = /^\/[^/]+\/videos\/(?:[^/]+\/)?(\d{3,25})\/?$/i.exec(u.pathname) ||
+                  /^\/reel\/([A-Za-z0-9_-]{3,64})\/?$/i.exec(u.pathname) ||
+                  /^\/share\/v\/([A-Za-z0-9_-]{3,64})\/?$/i.exec(u.pathname);
+        return m ? m[1] : null;
+      }
+      if (/instagram\.com$/i.test(host)) {
+        const m = /^\/(reel|p|tv)\/([A-Za-z0-9_-]{3,64})\/?/i.exec(u.pathname);
+        return m ? m[2] : null;
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  /**
+   * Facebook download list = playing video links. Related videos that prove
+   * a different id are dropped. Fail-open when the tab has a playing video
+   * or a dedicated watch/reel URL — never empty the list the user asked for.
+   */
+  function filterFacebookPlayingOnlyInline(items, tabUrl) {
+    const list = (items || []).filter(Boolean);
+    if (!list.length) return list;
+    const isFbTab = !!(tabUrl && /facebook\.com|fb\.watch|instagram\.com/i.test(String(tabUrl)));
+    if (!isFbTab) return list;
+
+    const family = (row) => {
+      const keys = new Set();
+      try {
+        const k = fbPathKeyInline(row && row.url);
+        if (k) keys.add(k);
+        const vid = fbVideoIdOfUrlInline(row && row.url);
+        if (vid) keys.add('vid:' + vid);
+      } catch (e) {}
+      return keys;
+    };
+
+    const isVideoShaped = (v) => {
+      try {
+        if (!v || !v.url) return false;
+        if (v.playing) return true;
+        return /\.(mp4|m4v|webm|mov|m3u8)(\?|#|$)/i.test(String(v.url)) ||
+          /fbcdn\.net|scontent\./i.test(String(v.url));
+      } catch (e) { return true; }
+    };
+
+    const prefer = (fn) => {
+      const out = list.filter(fn);
+      return out.length ? out : null;
+    };
+
+    // 1) Playing flags win — keep the playing family only.
+    const playing = list.filter(v => v && v.playing);
+    if (playing.length) {
+      const keys = new Set();
+      playing.forEach(v => family(v).forEach(k => keys.add(k)));
+      if (!keys.size) return playing;
+      return prefer(v => {
+        if (v.playing) return true;
+        const ks = family(v);
+        for (const k of ks) if (keys.has(k)) return true;
+        return false;
+      }) || playing;
+    }
+
+    // 2) Page watch/reel id — drop only URLs that prove another id.
+    const pageId = facebookPageVideoIdInline(tabUrl);
+    if (pageId) {
+      const out = prefer(v => {
+        const vid = fbVideoIdOfUrlInline(v.url);
+        if (vid) return String(vid) === String(pageId);
+        try {
+          const path = new URL(String(v.url)).pathname || '';
+          if (path.includes('/' + pageId + '_') || path.includes('/' + pageId + '/')) return true;
+          const m = /\/(\d{3,25})[_/.]/.exec(path);
+          if (m && /^\d+$/.test(String(pageId))) return m[1] === String(pageId);
+        } catch (e) {}
+        return true; // unattributable → likely this page's video
+      });
+      return out || prefer(isVideoShaped) || list;
+    }
+
+    // 3) Feed / no page id — keep video-shaped rows if any playing flag
+    //    slipped through later; otherwise empty (nothing is playing).
+    if (playing.length) return playing;
+    return prefer(isVideoShaped) || [];
+  }
+
   /** Stable rendition tag of a Facebook URL ('' when absent/unparseable). */
   function fbEfgTagOfUrlInline(u) {
     try {
@@ -444,6 +574,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   function renderMediaList(mediaItems, tab, metaMap) {
     mediaList.innerHTML = '';
     mediaItems = dedupeMedia(mediaItems);
+    // Facebook/Instagram tabs: drop non-playing related videos at render time
+    // too (defense in depth — scan/grab paths already filter).
+    try {
+      if (tab && tab.url && /facebook\.com|fb\.watch|instagram\.com/i.test(tab.url)) {
+        mediaItems = filterFacebookPlayingOnlyInline(mediaItems, tab.url);
+      }
+    } catch (e) {}
 
         // Sort: playing video first, then videos with quality, then by quality tier
     const tierOrder = { '2160p': 5, '1440p': 4, '1080p': 3, '720p': 2, '480p': 1, '360p': 0 };

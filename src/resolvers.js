@@ -261,6 +261,7 @@ const facebookMediaResolver = {
         quality: v.quality || undefined,
         format: isHls ? 'hls' : 'mp4',
         filename: v.filename,
+        audioUrl: v.audioUrl || undefined,
       };
     });
 

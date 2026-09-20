@@ -311,18 +311,146 @@ function qualityFromHeight(h) {
 }
 
 /**
+ * Loose page-video id from a href — used to scope variants to the page's own
+ * (playing) video. Does NOT enforce parseFacebookUrl's strict id rules, so
+ * short fixture ids and reel tokens still scope the list.
+ */
+function looseFacebookVideoId(href) {
+  try {
+    const u = new URL(String(href || ''));
+    const host = u.hostname.toLowerCase().replace(/\.$/, '');
+    if (host === 'fb.watch') {
+      const m = /^\/([A-Za-z0-9_-]{3,64})\/?$/i.exec(u.pathname);
+      return m ? m[1] : null;
+    }
+    if (/facebook\.com$/i.test(host)) {
+      if (/^\/watch\/?$/i.test(u.pathname)) return u.searchParams.get('v') || null;
+      if (/^\/(video|story)\.php$/i.test(u.pathname)) {
+        return u.searchParams.get('v') || u.searchParams.get('video_id') || u.searchParams.get('story_fbid') || null;
+      }
+      const m = /^\/[^/]+\/videos\/(?:[^/]+\/)?(\d{3,25})\/?$/i.exec(u.pathname) ||
+                /^\/reel\/([A-Za-z0-9_-]{3,64})\/?$/i.exec(u.pathname) ||
+                /^\/share\/v\/([A-Za-z0-9_-]{3,64})\/?$/i.exec(u.pathname);
+      return m ? m[1] : null;
+    }
+    if (/instagram\.com$/i.test(host)) {
+      const m = /^\/(reel|p|tv)\/([A-Za-z0-9_-]{3,64})\/?/i.exec(u.pathname);
+      return m ? m[2] : null;
+    }
+  } catch (e) {}
+  return null;
+}
+
+/** efg.video_id or path-token id of a Facebook CDN URL, or null. */
+function videoIdFromFbUrl(u) {
+  try {
+    const x = new URL(String(u), 'https://www.facebook.com/');
+    const efg = x.searchParams.get('efg');
+    if (efg) {
+      let parsed = null;
+      try {
+        if (String(efg).charAt(0) === '{') parsed = JSON.parse(String(efg));
+      } catch (e) {}
+      if (!parsed) {
+        let b64 = String(efg).replace(/-/g, '+').replace(/_/g, '/');
+        while (b64.length % 4) b64 += '=';
+        try { parsed = JSON.parse(Buffer.from(b64, 'base64').toString('utf8')); } catch (e) { parsed = null; }
+      }
+      if (parsed && parsed.video_id != null) return String(parsed.video_id);
+    }
+    const path = x.pathname || '';
+    const m = /\/(\d{3,25})[_/.]/.exec(path) || /\/(\d{3,25})$/.exec(path);
+    if (m) return m[1];
+  } catch (e) {}
+  return null;
+}
+
+/**
+ * Drop variants that belong to OTHER videos on the same page payload.
+ * Fail-open: when nothing is attributable to `videoId`, return variants
+ * unchanged — a wrong empty list is worse than a slightly broad one.
+ * Only URLs that PROVE a different video id are dropped when matches exist.
+ */
+function filterVariantsToPageVideo(variants, videoId, html) {
+  const list = (variants || []).slice();
+  if (!list.length || !videoId) return list;
+  const id = String(videoId);
+  if (/^watch-/i.test(id)) return list; // fb.watch short token — no CDN id
+
+  const idOf = (u) => videoIdFromFbUrl(u);
+  const matches = list.filter(v => idOf(v.url) === id);
+  const pathMatch = list.filter(v => {
+    try {
+      const path = new URL(String(v.url), 'https://www.facebook.com/').pathname || '';
+      return path.includes('/' + id + '_') || path.includes('/' + id + '/') || path.includes('/' + id + '.');
+    } catch (e) { return false; }
+  });
+  const scored = matches.length ? matches : pathMatch;
+  if (!scored.length) {
+    // Nothing carries this id (common: progressive URLs are hash paths).
+    // Drop only rows that PROVE a different numeric id; keep the rest.
+    return list.filter(v => {
+      const vid = idOf(v.url);
+      if (!vid) return true;
+      return String(vid) === id;
+    });
+  }
+  // At least one URL is proven to be this page's video — keep that family
+  // plus unattributable siblings (same page playable_url cluster).
+  const keepIds = new Set(scored.map(v => idOf(v.url)).filter(Boolean));
+  const keepPaths = new Set(scored.map(v => {
+    try { return new URL(String(v.url), 'https://www.facebook.com/').pathname || ''; }
+    catch (e) { return ''; }
+  }).filter(Boolean));
+  return list.filter(v => {
+    const vid = idOf(v.url);
+    if (vid) return keepIds.has(vid) || vid === id;
+    try {
+      const path = new URL(String(v.url), 'https://www.facebook.com/').pathname || '';
+      if (keepPaths.has(path)) return true;
+      // Same path directory as a proven match (rendition siblings).
+      for (const p of keepPaths) {
+        const dir = p.replace(/\/[^/]+$/, '');
+        if (dir && path.startsWith(dir + '/')) return true;
+      }
+    } catch (e) {}
+    return true; // unattributable progressive URL stays
+  });
+}
+
+function pathDirOf(u) {
+  try {
+    return new URL(String(u), 'https://www.facebook.com/').pathname.replace(/\/[^/]+$/, '');
+  } catch (e) { return null; }
+}
+
+/**
  * Fresh progressive MP4s from a Facebook/Instagram video page. Covers the
  * keys the web player itself embeds (`playable_url`, `playable_url_quality_hd`,
  * `browser_native_hd/sd_url`, `hd_src`/`sd_src`, and the newer
  * `videoDeliveryResponseFragment…progressive_urls[]`), plus a generic fbcdn
  * …mp4 fallback. HLS masters are kept as a last resort (the engine assembles
  * them); DASH manifests (.mpd) are counted but never offered. Audio-only
- * efg renditions are skipped — they are half of a split track, not a video.
+ * efg renditions are collected and paired onto video variants as `audioUrl`
+ * so the desktop can mux sound into split-AV downloads. Variants belonging
+ * to other videos on the page are filtered out.
  * Returns best-first (MP4 before HLS), de-duplicated. Pure function.
  */
 function extractFacebookVariants(html, pageUrl) {
   const src = String(html || '');
   const found = new Map(); // url -> { url, format, quality, width, height }
+  const audioTracks = []; // { url, videoId, pathDir }
+  const seenAudio = new Set();
+  // One URL can surface under several keys (audio_url + generic efg sweep):
+  // dedupe so the single-audio fallback (`soleAudio`) still fires.
+  const rememberAudio = (u) => {
+    try {
+      const abs = new URL(String(u), pageUrl || undefined).href;
+      if (seenAudio.has(abs)) return;
+      seenAudio.add(abs);
+      audioTracks.push({ url: abs, videoId: videoIdFromFbUrl(abs), pathDir: pathDirOf(abs) });
+    } catch (e) { /* ignore */ }
+  };
   let mpdCount = 0;
 
   const unescape = (s) => String(s || '')
@@ -333,69 +461,128 @@ function extractFacebookVariants(html, pageUrl) {
     .replace(/\\"/g, '"')
     .replace(/&amp;/g, '&');
 
-  const take = (raw, qualityHint) => {
+  const take = (raw, qualityHint, sourceTag) => {
     if (!raw || typeof raw !== 'string') return;
     let u = unescape(raw).trim().replace(/&amp;/g, '&').replace(/["'\),;\\]+$/, '');
     if (!u) return;
     if (u.startsWith('//')) u = 'https:' + u;
     if (!/^https?:\/\//i.test(u)) return;
-    const isHls = /\.m3u8(\?|#|$)/i.test(u);
-    const isMp4 = /\.(mp4|m4v|mov|webm)(\?|#|$)/i.test(u);
-    if (/\.mpd(\?|#|$)/i.test(u)) { mpdCount++; return; }
-    if (!isMp4 && !isHls) return;
-    if (/\.(jpe?g|png|gif|webp|avif|bmp|svg|ico|css|js|vtt|srt|woff2?)(\?|#|$)/i.test(u)) return;
-    // Audio-only half of a split DASH rendition — never a video row.
+    // Split-AV audio harvest FIRST: an audio-only DASH rendition is never a
+    // video row, no matter its extension (or lack of one). Classifying before
+    // the container gate keeps extensionless fbcdn audio URLs pairable —
+    // otherwise the paired video downloads silent with no audioUrl attached.
     try {
       const efg = new URL(u, pageUrl || undefined).searchParams.get('efg');
-      if (efg && efgIsAudio(efg)) return;
+      if (efg && efgIsAudio(efg)) {
+        rememberAudio(u);
+        return;
+      }
+    } catch (e) { /* keep — unparseable efg is not proof of audio */ }
+    // Explicit audio keys (audio_url, dash_audio, …) are trusted when the URL
+    // is either efg-audio (handled above) or audio-typed by container/path.
+    // Anything else falls through to normal video handling — a mislabeled key
+    // must never hide the only playable file.
+    if (sourceTag === 'audio' &&
+        !/\.(mp3|m4a|aac|ogg|oga|opus|wav|flac|wma)(\?|#|$)/i.test(u) &&
+        !/(^|[/_?&-])audio([/_?&-]|$)/i.test(u)) {
+      sourceTag = null;
+    }
+    const isHls = /\.m3u8(\?|#|$)/i.test(u);
+    const isMp4 = /\.(mp4|m4v|mov|webm)(\?|#|$)/i.test(u);
+    const isAudioFile = /\.(mp3|m4a|aac|ogg|oga|opus|wav|flac|wma)(\?|#|$)/i.test(u);
+    if (/\.mpd(\?|#|$)/i.test(u)) { mpdCount++; return; }
+    if (!isMp4 && !isHls && !isAudioFile && sourceTag !== 'audio') return;
+    if (/\.(jpe?g|png|gif|webp|avif|bmp|svg|ico|css|js|vtt|srt|woff2?)(\?|#|$)/i.test(u)) return;
+    // Audio-only half of a split DASH rendition — never a video row, but
+    // remember it so the paired video track can be muxed with sound.
+    // (efg-audio was already harvested above; this covers audio-typed files
+    // and explicit audio keys without an efg tag.)
+    if (sourceTag === 'audio' || isAudioFile) {
+      rememberAudio(u);
+      return;
+    }
+    try {
+      const efg = new URL(u, pageUrl || undefined).searchParams.get('efg');
+      if (efg && efgIsAudio(efg)) {
+        rememberAudio(u);
+        return;
+      }
     } catch (e) { /* keep — unparseable efg is not proof of audio */ }
     try {
       const normalized = new URL(u, pageUrl || undefined).href;
+      // progressive: named playable_url / browser_native / progressive_url /
+      // hd_src / sd_src — these usually carry audio. Generic fbcdn scrapes
+      // are often DASH video-only (silent) — tag them so we can rank.
+      const prog = sourceTag === 'progressive';
       if (!found.has(normalized)) {
-        found.set(normalized, { url: normalized, format: isHls ? 'hls' : 'mp4', qualityHint: qualityHint || null });
+        found.set(normalized, {
+          url: normalized,
+          format: isHls ? 'hls' : 'mp4',
+          qualityHint: qualityHint || null,
+          progressive: prog,
+        });
       } else if (qualityHint && !found.get(normalized).qualityHint) {
         found.get(normalized).qualityHint = qualityHint;
+      } else if (prog && !found.get(normalized).progressive) {
+        found.get(normalized).progressive = true;
       }
     } catch (e) { /* malformed URL — skip */ }
   };
 
   const pats = [
-    [/"playable_url_quality_hd"\s*:\s*"([^"]+)"/gi, null],
-    [/"playable_url"\s*:\s*"([^"]+)"/gi, null],
-    [/\bplayable_url_quality_hd["']?\s*[:=]\s*["']([^"']+)/gi, null],
-    [/\bplayable_url["']?\s*[:=]\s*["']([^"']+)/gi, null],
-    [/"browser_native_hd_url"\s*:\s*"([^"]+)"/gi, '1080p'],
-    [/"browser_native_sd_url"\s*:\s*"([^"]+)"/gi, '480p'],
-    [/\bbrowser_native_hd_url["']?\s*[:=]\s*["']([^"']+)/gi, '1080p'],
-    [/\bbrowser_native_sd_url["']?\s*[:=]\s*["']([^"']+)/gi, '480p'],
-    [/"hd_src"\s*:\s*"([^"]+)"/gi, '720p'],
-    [/"sd_src"\s*:\s*"([^"]+)"/gi, '480p'],
-    [/\bhd_src["']?\s*[:=]\s*["']([^"']+)/gi, '720p'],
-    [/\bsd_src["']?\s*[:=]\s*["']([^"']+)/gi, '480p'],
+    [/"playable_url_quality_hd"\s*:\s*"([^"]+)"/gi, null, 'progressive'],
+    [/"playable_url"\s*:\s*"([^"]+)"/gi, null, 'progressive'],
+    [/\bplayable_url_quality_hd["']?\s*[:=]\s*["']([^"']+)/gi, null, 'progressive'],
+    [/\bplayable_url["']?\s*[:=]\s*["']([^"']+)/gi, null, 'progressive'],
+    [/"browser_native_hd_url"\s*:\s*"([^"]+)"/gi, '1080p', 'progressive'],
+    [/"browser_native_sd_url"\s*:\s*"([^"]+)"/gi, '480p', 'progressive'],
+    [/\bbrowser_native_hd_url["']?\s*[:=]\s*["']([^"']+)/gi, '1080p', 'progressive'],
+    [/\bbrowser_native_sd_url["']?\s*[:=]\s*["']([^"']+)/gi, '480p', 'progressive'],
+    [/"hd_src"\s*:\s*"([^"]+)"/gi, '720p', 'progressive'],
+    [/"sd_src"\s*:\s*"([^"]+)"/gi, '480p', 'progressive'],
+    [/\bhd_src["']?\s*[:=]\s*["']([^"']+)/gi, '720p', 'progressive'],
+    [/\bsd_src["']?\s*[:=]\s*["']([^"']+)/gi, '480p', 'progressive'],
     // Newer delivery fragment: {"progressive_url":"…","metadata":{"quality":"hd",…}}
-    [/"progressive_url"\s*:\s*"([^"]+)"/gi, null],
-    [/"hls_playlist_url"\s*:\s*"([^"]+)"/gi, null],
+    [/"progressive_url"\s*:\s*"([^"]+)"/gi, null, 'progressive'],
+    [/"hls_playlist_url"\s*:\s*"([^"]+)"/gi, null, null],
+    // Audio-only counterparts live under their own keys (and extensionless on
+    // some surfaces). take() routes efg-audio / audio-typed values into the
+    // paired-audio pool, never into video rows.
+    [/"audio_url"\s*:\s*"([^"]+)"/gi, null, 'audio'],
+    [/"audio_playable_url"\s*:\s*"([^"]+)"/gi, null, 'audio'],
+    [/"playable_audio_url"\s*:\s*"([^"]+)"/gi, null, 'audio'],
+    [/"audio_browser_native_hd_url"\s*:\s*"([^"]+)"/gi, null, 'audio'],
+    [/"audio_browser_native_sd_url"\s*:\s*"([^"]+)"/gi, null, 'audio'],
+    [/"dash_audio(?:_url)?"\s*:\s*"([^"]+)"/gi, null, 'audio'],
+    [/\baudio_url["']?\s*[:=]\s*["']([^"']+)/gi, null, 'audio'],
+    [/\bdash_audio(?:_url)?["']?\s*[:=]\s*["']([^"']+)/gi, null, 'audio'],
     // DASH manifests: counted (so the resolver can say "DASH-only") but never
     // offered — take() routes .mpd into mpdCount.
-    [/"dash_manifest(?:_url)?"\s*:\s*"([^"]+)"/gi, null],
-    [/\bdash_manifest(?:_url)?["']?\s*[:=]\s*["']([^"']+)/gi, null],
+    [/"dash_manifest(?:_url)?"\s*:\s*"([^"]+)"/gi, null, null],
+    [/\bdash_manifest(?:_url)?["']?\s*[:=]\s*["']([^"']+)/gi, null, null],
   ];
-  for (const [re, q] of pats) {
+  for (const [re, q, tag] of pats) {
     let m;
     re.lastIndex = 0;
-    while ((m = re.exec(src)) !== null) take(m[1], q);
+    while ((m = re.exec(src)) !== null) take(m[1], q, tag);
   }
   // Generic fallback: any fbcdn/scontent …mp4 in the page payload.
   const fbMp4 = /https?:\\?\/\\?\/[^"'\\\s<>]*?(?:fbcdn|scontent)[^"'\\\s<>]*?\.mp4[^"'\\\s<>]*/gi;
   let g;
-  while ((g = fbMp4.exec(src)) !== null) take(g[0], null);
+  while ((g = fbMp4.exec(src)) !== null) take(g[0], null, 'generic');
+  // …and any fbcdn/scontent/cdninstagram URL carrying an efg rendition tag,
+  // whatever its extension (audio DASH renditions are extensionless on some
+  // surfaces — take() harvests the efg-audio ones into the audio pool).
+  const fbEfg = /https?:\\?\/\\?\/[^"'\\\s<>]*?(?:fbcdn|scontent|cdninstagram)[^"'\\\s<>]*?[?&]efg=[^"'\\\s<>]*/gi;
+  let eg;
+  while ((eg = fbEfg.exec(src)) !== null) take(eg[0], null, 'generic');
   // …and any …mpd (counted, never offered).
   const fbMpd = /https?:\\?\/\\?\/[^"'\\\s<>]*?(?:fbcdn|scontent)[^"'\\\s<>]*?\.mpd[^"'\\\s<>]*/gi;
   let d;
-  while ((d = fbMpd.exec(src)) !== null) take(d[0], null);
+  while ((d = fbMpd.exec(src)) !== null) take(d[0], null, null);
 
   const out = [];
-  for (const { url, format, qualityHint } of found.values()) {
+  for (const { url, format, qualityHint, progressive } of found.values()) {
     let quality = null, width = 0, height = 0;
     const qm = qualityHint && /^(\d{3,4})p$/i.exec(qualityHint);
     if (qm) {
@@ -424,15 +611,57 @@ function extractFacebookVariants(html, pageUrl) {
       width,
       height,
       quality: quality || 'unknown',
+      progressive: !!progressive,
     });
   }
 
+  // Prefer progressive (playable_url / progressive_urls) — those usually
+  // carry audio. DASH video-only scrapes sort after and rely on audioUrl mux.
   // playable_url vs playable_url_quality_hd order in the page is SD-then-HD;
   // sort best-first so the picker and "best" selection agree.
-  out.sort((a, b) => (Number(b.isMp4) - Number(a.isMp4)) ||
+  out.sort((a, b) => (Number(!!b.progressive) - Number(!!a.progressive)) ||
+                     (Number(b.isMp4) - Number(a.isMp4)) ||
                      (b.height - a.height) || (b.bitrate - a.bitrate));
-  out._mpdCount = mpdCount;
-  return out;
+
+  // Pair split-AV audio onto video rows (desktop muxes these after download).
+  try {
+    const audioById = new Map();
+    const audioByDir = new Map();
+    for (const a of audioTracks) {
+      if (a.videoId && !audioById.has(a.videoId)) audioById.set(a.videoId, a.url);
+      if (a.pathDir && !audioByDir.has(a.pathDir)) audioByDir.set(a.pathDir, a.url);
+    }
+    // Page identity for hash-path videos: an id-less progressive row (no efg,
+    // opaque filename) still belongs to this page, so its audio sibling —
+    // which usually DOES carry the page video id — pairs by page, not by row.
+    // This is what keeps single-video pages from downloading silent when other
+    // audios on the page defeat the sole-audio fallback.
+    let pageVid = null;
+    try { pageVid = looseFacebookVideoId(pageUrl); } catch (e) { pageVid = null; }
+    if (pageVid) pageVid = String(pageVid);
+    const soleAudio = audioTracks.length === 1 ? audioTracks[0].url : null;
+    for (const v of out) {
+      if (v.audioUrl) continue;
+      const vid = videoIdFromFbUrl(v.url);
+      const dir = pathDirOf(v.url);
+      const paired = (vid && audioById.get(vid)) ||
+        (pageVid && audioById.get(pageVid)) ||
+        (dir && audioByDir.get(dir)) || soleAudio || null;
+      if (paired) v.audioUrl = paired;
+    }
+  } catch (e) { /* pairing is best-effort */ }
+
+  // Only the page's own video — never related/watch-list neighbours.
+  let pageVid = looseFacebookVideoId(pageUrl);
+  if (!pageVid) {
+    try {
+      const parsed = parseFacebookUrl(pageUrl);
+      if (parsed && parsed.id) pageVid = String(parsed.id);
+    } catch (e) {}
+  }
+  const scoped = filterVariantsToPageVideo(out, pageVid, src);
+  scoped._mpdCount = mpdCount;
+  return scoped;
 }
 
 function safeTitle(s, fallback) {
@@ -477,9 +706,27 @@ async function resolveFacebookVideos(input, deps = {}) {
   let title = extractFacebookTitle(html, 'facebook.com');
   const thumbnail = extractFacebookThumbnail(html, finalUrl);
   const duration = extractFacebookDuration(html);
-  const variants = extractFacebookVariants(html, finalUrl);
+  // Prefer the final page id (redirects can change watch?v=) over the input.
+  let pageVid = parsed.id && !String(parsed.id).startsWith('watch-') ? String(parsed.id) : null;
+  const looseFinal = looseFacebookVideoId(finalUrl);
+  if (looseFinal && !String(looseFinal).startsWith('watch-')) pageVid = String(looseFinal);
+  else {
+    try {
+      const fromFinal = parseFacebookUrl(finalUrl);
+      if (fromFinal && fromFinal.id && !String(fromFinal.id).startsWith('watch-')) {
+        pageVid = String(fromFinal.id);
+      }
+    } catch (e) { /* keep input id */ }
+  }
+  const allVariants = extractFacebookVariants(html, finalUrl);
+  // extractFacebookVariants already scopes by pageUrl; re-scope with the
+  // resolved id when the final URL was a short/ambiguous form.
+  const variants = pageVid
+    ? filterVariantsToPageVideo(allVariants, pageVid, html)
+    : allVariants;
+  try { variants._mpdCount = allVariants._mpdCount || 0; } catch (e) {}
   if (!variants.length) {
-    if (variants._mpdCount > 0) {
+    if ((allVariants._mpdCount || 0) > 0) {
       throw new Error('This page only offers DASH streams (.mpd), which AiDM cannot download yet');
     }
     throw new Error('No downloadable video found on this page (it may have been removed, be private, or require login)');
@@ -495,6 +742,8 @@ async function resolveFacebookVideos(input, deps = {}) {
       resolution: v.width && v.height ? `${v.width}x${v.height}` : null,
       format: isHls ? 'hls' : 'mp4',
       filename: `${label}${v.quality && v.quality !== 'unknown' ? ` [${v.quality}]` : ''}.${isHls ? 'm3u8' : 'mp4'}`,
+      audioUrl: v.audioUrl || null,
+      progressive: !!v.progressive,
     };
   });
 
@@ -513,6 +762,7 @@ async function resolveFacebookVideos(input, deps = {}) {
 /**
  * Convert resolver variants into the shape the UI's quality picker expects.
  * Single source of truth — mirrors embed-resolver.toPickerVideos.
+ * `audioUrl` rides along so split-AV Facebook downloads can be muxed.
  */
 function toPickerVideos(videos) {
   return (videos || []).map((v) => ({
@@ -522,6 +772,8 @@ function toPickerVideos(videos) {
     resolution: v.resolution || null,
     format: v.format || 'mp4',
     size: v.size || null,
+    audioUrl: v.audioUrl || null,
+    progressive: !!v.progressive,
   }));
 }
 
@@ -535,6 +787,9 @@ module.exports = {
   extractFacebookDuration,
   extractFacebookVariants,
   efgIsAudio,
+  filterVariantsToPageVideo,
+  videoIdFromFbUrl,
+  looseFacebookVideoId,
   resolveFacebookVideos,
   toPickerVideos,
 };

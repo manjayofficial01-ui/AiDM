@@ -346,6 +346,61 @@ function fbVideoIdOfUrl(u) {
   } catch (e) { return null; }
 }
 
+function fbPathDirOfUrl(u) {
+  try {
+    return new URL(String(u || '')).pathname.replace(/\/[^/]+$/, '');
+  } catch (e) { return null; }
+}
+
+// Persistent Facebook split-AV audio registry. Audio-only DASH tracks are
+// never download-list rows, but they MUST stay available so the desktop can
+// mux sound into the paired video (silent-download regression).
+const fbAudioByVid = new Map();   // efg video_id -> audio url
+const fbAudioByDir = new Map();   // path dir -> audio url
+let fbSoleAudioUrl = null;
+
+function rememberFbAudioUrl(u) {
+  try {
+    if (!u || typeof u !== 'string') return;
+    if (fbTrackKindOfUrl(u) !== 'audio') return;
+    const abs = stripFbRange(u);
+    const vid = fbVideoIdOfUrl(abs);
+    const dir = fbPathDirOfUrl(abs);
+    if (vid && !fbAudioByVid.has(vid)) fbAudioByVid.set(vid, abs);
+    if (dir && !fbAudioByDir.has(dir)) fbAudioByDir.set(dir, abs);
+    if (!fbSoleAudioUrl) fbSoleAudioUrl = abs;
+  } catch (e) {}
+}
+
+function resetFbAudioRegistry() {
+  try { fbAudioByVid.clear(); fbAudioByDir.clear(); fbSoleAudioUrl = null; } catch (e) {}
+}
+
+/**
+ * Attach the paired Facebook audio track to a video row so download-manager
+ * can mux it after the video finishes. Never overwrites an existing audioUrl.
+ */
+function attachFbAudioUrl(row) {
+  if (!row || !row.url || row.audioUrl) return row;
+  try {
+    if (!FB_HOST_RE.test(String(row.url))) return row;
+    const vid = fbVideoIdOfUrl(row.url);
+    if (vid && fbAudioByVid.has(vid)) { row.audioUrl = fbAudioByVid.get(vid); return row; }
+    const dir = fbPathDirOfUrl(row.url);
+    if (dir && fbAudioByDir.has(dir)) { row.audioUrl = fbAudioByDir.get(dir); return row; }
+    // Sole audio track + this row is a DASH video rendition → pair them.
+    if (fbSoleAudioUrl && fbTrackKindOfUrl(row.url) === 'video') {
+      row.audioUrl = fbSoleAudioUrl;
+    }
+  } catch (e) {}
+  return row;
+}
+
+function attachFbAudioUrls(rows) {
+  (rows || []).forEach(r => { try { attachFbAudioUrl(r); } catch (e) {} });
+  return rows || [];
+}
+
 function fbFileKey(u) {
   try {
     const x = new URL(String(u || '').trim());
@@ -559,6 +614,276 @@ function normalizeStreamUrl(u) {
     const k = fbPathKey(url);
     if (!k) return true;
     return scope.has(k);
+  }
+
+  /**
+   * Facebook/Instagram page video id from a href (watch?v=, video.php,
+   * /reel/, /share/v/, page /videos/, instagram reel/p/tv, fb.watch).
+   * Pure — defaults to location.href when href is omitted.
+   */
+  function facebookPageVideoId(href) {
+    let u;
+    try {
+      u = new URL(String(href || (typeof location !== 'undefined' ? location.href : '') || ''));
+    } catch (e) { return null; }
+    const host = u.hostname.toLowerCase().replace(/\.$/, '');
+    if (host === 'fb.watch') {
+      const m = /^\/([A-Za-z0-9_-]{3,64})\/?$/i.exec(u.pathname);
+      return m ? m[1] : null;
+    }
+    if (/facebook\.com$/i.test(host)) {
+      if (/^\/watch\/?$/i.test(u.pathname)) {
+        const v = u.searchParams.get('v');
+        return v && /^\d{3,25}$/.test(v) ? v : null;
+      }
+      if (/^\/(video|story)\.php$/i.test(u.pathname)) {
+        const v = u.searchParams.get('v') || u.searchParams.get('video_id') || u.searchParams.get('story_fbid');
+        return v && /^\d{3,25}$/.test(v) ? v : null;
+      }
+      const m = /^\/[^/]+\/videos\/(?:[^/]+\/)?(\d{3,25})\/?$/i.exec(u.pathname) ||
+                /^\/reel\/([A-Za-z0-9_-]{3,64})\/?$/i.exec(u.pathname) ||
+                /^\/share\/v\/([A-Za-z0-9_-]{3,64})\/?$/i.exec(u.pathname);
+      return m ? m[1] : null;
+    }
+    if (/instagram\.com$/i.test(host)) {
+      const m = /^\/(reel|p|tv)\/([A-Za-z0-9_-]{3,64})\/?/i.exec(u.pathname);
+      return m ? m[2] : null;
+    }
+    return null;
+  }
+
+  /**
+   * Does this Facebook CDN URL belong to `videoId`? Checks efg.video_id and
+   * path tokens (…/12345_n.mp4, …/12345/…). Pure.
+   */
+  function fbUrlBelongsToVideoId(u, videoId) {
+    if (!u || !videoId) return false;
+    const id = String(videoId);
+    try {
+      const efgVid = fbVideoIdOfUrl(u);
+      if (efgVid && String(efgVid) === id) return true;
+      const x = new URL(String(u));
+      const path = x.pathname || '';
+      if (path.includes('/' + id + '_') || path.includes('/' + id + '/') ||
+          path.includes('/' + id + '.') || path.includes('_' + id + '_') ||
+          path.includes('/' + id)) {
+        // Avoid prefix collisions: "123" must not match "1234…".
+        const re = new RegExp('(?:^|/)(' + id + ')(?:[_/.-]|$)');
+        if (re.test(path) || path.includes('/' + id + '_')) return true;
+      }
+      for (const key of ['video_id', 'v', 'id']) {
+        const q = x.searchParams.get(key);
+        if (q && String(q) === id) return true;
+      }
+    } catch (e) { return false; }
+    return false;
+  }
+
+  /** Most recent non-segment Facebook VIDEO path family (playing player traffic). */
+  function playingFbPathKey() {
+    try {
+      const entries = performance.getEntriesByType('resource') || [];
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const name = entries[i] && entries[i].name;
+        if (!name || typeof name !== 'string') continue;
+        if (!/fbcdn\.net|scontent\.|cdninstagram\.com/i.test(name)) continue;
+        if (isSegmentUrl(name)) continue;
+        // Images/thumbs also live on scontent — never use them as the
+        // "playing video" signal (that emptied every download list).
+        if (!isFacebookVideoUrl(name)) continue;
+        let u = name;
+        try { u = stripFbRange(u); } catch {}
+        const k = fbPathKey(u);
+        if (k) return k;
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  /** efg video_id of the most recent Facebook VIDEO resource, or null. */
+  function playingFbVideoId() {
+    try {
+      const entries = performance.getEntriesByType('resource') || [];
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const name = entries[i] && entries[i].name;
+        if (!name || typeof name !== 'string') continue;
+        if (!/fbcdn\.net|scontent\.|cdninstagram\.com/i.test(name)) continue;
+        if (isSegmentUrl(name)) continue;
+        if (!isFacebookVideoUrl(name)) continue;
+        const vid = fbVideoIdOfUrl(name);
+        if (vid) return vid;
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  /**
+   * Facebook download-list filter: prefer the PLAYING video's links.
+   * Related/feed videos that prove a different video id are dropped.
+   *
+   * Fail-open rule: when a video element is playing (or the page is a
+   * dedicated watch/reel), an attribution that would empty the list is
+   * discarded. Blob+MSE Facebook players often expose no path/efg id —
+   * unattributable progressive URLs are THIS video, not junk.
+   *
+   * Attribution order:
+   *   1. rows tagged playing (+ same path / efg video_id family)
+   *   2. the playing <video> element's own file paths (blob-resolved)
+   *   3. page/recent-traffic id — drop only URLs that prove another id
+   *   4. playing element + candidates → keep video-shaped rows
+   *   5. feed, nothing playing → empty
+   */
+  function filterFacebookPlayingOnly(items, videoEl) {
+    const list = (items || []).filter(Boolean);
+    if (!list.length) return list;
+
+    const familyKeys = (row) => {
+      const keys = new Set();
+      try {
+        const k = fbPathKey(row && row.url);
+        if (k) keys.add(k);
+        const vid = fbVideoIdOfUrl(row && row.url);
+        if (vid) keys.add('vid:' + vid);
+      } catch (e) {}
+      return keys;
+    };
+
+    let playingEl = false;
+    try {
+      playingEl = !!videoEl && (
+        (typeof isPlayingVideo === 'function' && isPlayingVideo(videoEl)) ||
+        (typeof isActuallyPlaying === 'function' && isActuallyPlaying(videoEl))
+      );
+    } catch (e) { playingEl = !!videoEl; }
+
+    // Attribution must never hide the playing video: empty result = discard.
+    const prefer = (fn) => {
+      const out = list.filter(fn);
+      return out.length ? out : null;
+    };
+
+    const isVideoShaped = (v) => {
+      try {
+        if (!v || !v.url) return false;
+        if (v.playing || v.source === 'facebook' || v.source === 'video-element') return true;
+        return isFacebookVideoUrl(v.url) || /\.mp4(\?|#|$)/i.test(String(v.url));
+      } catch (e) { return true; }
+    };
+
+    /** Drop only URLs that PROVE a different video id; keep unattributable. */
+    const keepPageId = (pageId) => (v) => {
+      if (!v || !v.url) return false;
+      const vid = fbVideoIdOfUrl(v.url);
+      if (vid) return String(vid) === String(pageId);
+      if (fbUrlBelongsToVideoId(v.url, pageId)) return true;
+      try {
+        const path = new URL(String(v.url)).pathname || '';
+        const m = /\/(\d{3,25})[_/.]/.exec(path);
+        if (m && /^\d+$/.test(String(pageId))) return m[1] === String(pageId);
+      } catch (e) {}
+      return true; // unattributable → likely THIS page's playable_url
+    };
+
+    // 1) Explicit playing flags (and their SD/HD siblings).
+    const playing = list.filter(v => v && v.playing);
+    if (playing.length) {
+      const keys = new Set();
+      playing.forEach(v => familyKeys(v).forEach(k => keys.add(k)));
+      if (!keys.size) return playing;
+      return prefer(v => {
+        if (v.playing) return true;
+        const ks = familyKeys(v);
+        for (const k of ks) if (keys.has(k)) return true;
+        return false;
+      }) || playing;
+    }
+
+    // 2) Playing element's own path family (blob-resolved src/currentSrc).
+    if (videoEl) {
+      try {
+        const scope = elementFilePaths(videoEl);
+        if (scope && scope.size) {
+          const out = prefer(v => fbScopeAllows(v.url, scope));
+          if (out) return out;
+        }
+      } catch (e) {}
+    }
+
+    // 3) Drop URLs that prove a DIFFERENT video id (page or recent traffic).
+    try {
+      const pageId = facebookPageVideoId();
+      if (pageId) {
+        const out = prefer(keepPageId(pageId));
+        if (out) return out;
+      }
+      const playVid = playingFbVideoId();
+      if (playVid) {
+        const out = prefer(v => {
+          const vid = fbVideoIdOfUrl(v && v.url);
+          if (!vid) return true;
+          return String(vid) === String(playVid);
+        });
+        if (out) return out;
+      }
+    } catch (e) {}
+
+    // 4) Playing element + candidates: never strand the user with an empty
+    //    panel just because attribution could not prove the path family.
+    if (playingEl) {
+      return prefer(isVideoShaped) || list;
+    }
+
+    // 5) Dedicated watch/reel page (even if paused right now).
+    try {
+      if (facebookPageVideoId()) {
+        return prefer(isVideoShaped) || list;
+      }
+      const fbHost = isFacebookPage() || FB_HOST_RE.test(location.hostname || '');
+      if (fbHost) {
+        // Pure feed, nothing playing — do not dump every cached feed video.
+        return [];
+      }
+    } catch (e) {}
+
+    return list;
+  }
+
+  /**
+   * Detected video rows destined for popup/picker/desktop on this tab.
+   * Facebook: playing video's links only (fail-open when playing).
+   * Every other site: as scanned.
+   */
+  function videosForDownloadList() {
+    const all = Array.from(detectedVideos.values());
+    // Harvest audio-only Facebook tracks BEFORE filtering — they never appear
+    // as rows but must stay available as audioUrl for post-download mux.
+    try {
+      all.forEach(v => { if (v && v.url) rememberFbAudioUrl(v.url); });
+      interceptedMediaUrls.forEach(u => rememberFbAudioUrl(u));
+    } catch (e) {}
+    if (!isFacebookPage() && !/facebook|instagram|fb\.watch/i.test(location.hostname || '')) {
+      return attachFbAudioUrls(all);
+    }
+    let playingEl = null;
+    try {
+      const els = document.querySelectorAll('video');
+      for (const el of els) {
+        if (isActuallyPlaying(el) || isPlayingVideo(el)) { playingEl = el; break; }
+      }
+    } catch (e) {}
+    // Prefer freshly extracted Facebook playable URLs when the registry is
+    // empty (blob+MSE pages often have nothing until extract runs).
+    let pool = all;
+    if (!pool.length) {
+      try {
+        pool = extractFacebookVideos();
+      } catch (e) { pool = all; }
+    } else {
+      try { extractFacebookVideos().forEach(v => { if (v && v.url) rememberFbAudioUrl(v.url); }); }
+      catch (e) {}
+    }
+    const scoped = filterFacebookPlayingOnly(pool, playingEl);
+    return attachFbAudioUrls(scoped);
   }
 
   /**
@@ -1368,14 +1693,23 @@ function normalizeStreamUrl(u) {
         u = clean(u).replace(/[",);\\]+$/, '');
         if (!/^https?:/i.test(u)) return;
         if (isSegmentUrl(u)) return;
-        if (!isFacebookVideoUrl(u) && !looksLikeMedia(u)) return;
         try { u = stripFbRange(u); } catch {}
+        // Remember audio-only DASH tracks for pairing — never list them as
+        // downloadable video rows.
+        try {
+          if (fbTrackKindOfUrl(u) === 'audio') {
+            rememberFbAudioUrl(u);
+            return;
+          }
+        } catch (e) {}
+        if (!isFacebookVideoUrl(u) && !looksLikeMedia(u)) return;
         const info = detectQuality(u, null);
         if (quality && QUALITY_MAP[quality]) {
           info.quality = quality;
           info.resolution = QUALITY_MAP[quality].resolution;
         }
         info.source = 'facebook';
+        try { attachFbAudioUrl(info); } catch (e) {}
         out.push(info);
       };
       const pats = [
@@ -1399,6 +1733,30 @@ function normalizeStreamUrl(u) {
       const fbMp4 = /https?:\\?\/\\?\/[^"'\\\s<>]*?fbcdn[^"'\\\s<>]*?\.mp4[^"'\\\s<>]*/gi;
       let m2;
       while ((m2 = fbMp4.exec(text)) !== null) pushUrl(m2[0], null);
+    } catch (e) {}
+
+    // Watch/reel pages embed related videos' playable_url in GraphQL too.
+    // Drop only URLs that PROVE a different video id. Unattributable
+    // progressive URLs (no efg/path id) stay — they are usually THIS page's
+    // playable_url, and wiping them left the playing video with zero links.
+    try {
+      const pageId = facebookPageVideoId();
+      if (pageId && out.length) {
+        const scoped = out.filter((info) => {
+          const u = info && info.url;
+          if (!u) return false;
+          const vid = fbVideoIdOfUrl(u);
+          if (vid) return String(vid) === String(pageId);
+          if (fbUrlBelongsToVideoId(u, pageId)) return true;
+          try {
+            const path = new URL(u).pathname || '';
+            const m = /\/(\d{3,25})[_/.]/.exec(path);
+            if (m && /^\d+$/.test(String(pageId))) return m[1] === String(pageId);
+          } catch (e) {}
+          return true; // unattributable → keep (this page's video)
+        });
+        return scoped.length ? scoped : out;
+      }
     } catch (e) {}
     return out;
   }
@@ -1593,7 +1951,8 @@ function normalizeStreamUrl(u) {
 
     if (msg.action === 'get-videos') {
       if (!pageScanComplete) fullScan();
-      sendResponse({ videos: Array.from(detectedVideos.values()) });
+      // Facebook: playing video's links only — never related feed videos.
+      sendResponse({ videos: videosForDownloadList() });
       return true;
     }
 
@@ -1601,7 +1960,7 @@ function normalizeStreamUrl(u) {
       if (!pageScanComplete) fullScan();
       sendResponse({
         links: Array.from(detectedLinks),
-        videos: Array.from(detectedVideos.values()),
+        videos: videosForDownloadList(),
       });
       return true;
     }
@@ -1609,7 +1968,7 @@ function normalizeStreamUrl(u) {
     if (msg.action === 'scan-page') {
       const videos = fullScan();
       sendResponse({
-        videos: Array.from(detectedVideos.values()),
+        videos: videosForDownloadList(),
         links: Array.from(detectedLinks),
       });
       return true;
@@ -1628,7 +1987,7 @@ function normalizeStreamUrl(u) {
       }));
       sendResponse({
         url: location.href,
-        detectedVideos: Array.from(detectedVideos.values()),
+        detectedVideos: videosForDownloadList(),
         detectedLinks: Array.from(detectedLinks),
         videoElementCount: videoEls.length,
         videoElements: best,
@@ -1646,7 +2005,8 @@ function normalizeStreamUrl(u) {
       // Also grab from performance API and video elements again.
       scanNetworkResources();
       // Re-emit to background so the desktop popup gets fresh data.
-      const all = Array.from(detectedVideos.values());
+      // Facebook: playing video only — never related feed/watch neighbours.
+      const all = videosForDownloadList();
       if (all.length) {
         chrome.runtime.sendMessage({
           action: 'videos-with-quality',
@@ -2375,6 +2735,27 @@ function normalizeStreamUrl(u) {
       if (isTwitterPage()) {
         const scoped = scopedTwitterUrls(video) || globalTwitterMp4s();
         scoped.forEach(u => { if (!isTwitterPlaylistUrl(u)) push(u, video); });
+      } else if (isFacebookPage()) {
+        // Playing video's candidates. Fail-open: if attribution empties the
+        // list, fall back to Facebook playable URLs already extracted for
+        // this page (blob+MSE has no element src to match).
+        const pool = [
+          ...Array.from(interceptedMediaUrls).map(u => ({ url: u })),
+          ...Array.from(detectedVideos.values()),
+        ].filter(x => x && x.url && !isTwitterPlaylistUrl(x.url));
+        let scoped = filterFacebookPlayingOnly(pool, video);
+        if (!scoped.length) {
+          try {
+            scoped = filterFacebookPlayingOnly(extractFacebookVideos(), video);
+          } catch (e) {}
+        }
+        if (!scoped.length && (isPlayingVideo(video) || isActuallyPlaying(video))) {
+          scoped = pool.filter(v => {
+            try { return isFacebookVideoUrl(v.url) || /\.mp4(\?|#|$)/i.test(String(v.url)); }
+            catch (e) { return false; }
+          });
+        }
+        scoped.forEach(v => push(v.url, video));
       } else {
         interceptedMediaUrls.forEach(u => { if (!isTwitterPlaylistUrl(u)) push(u, video); });
         try {
@@ -3000,8 +3381,8 @@ function normalizeStreamUrl(u) {
     const fbScope = isFacebookPage() ? elementFilePaths(video) : null;
     // Generalised per-video attribution (any site): this element's own media
     // file paths (blob-resolved). Non-empty when the player exposes its file
-    // directly — rows from a DIFFERENT path family then rank under the
-    // divider instead of polluting this pill.
+    // directly — rows from a DIFFERENT path family are then dropped so only
+    // this video's links appear.
     const genScope = isFacebookPage() ? null : elementMediaKeys(video);
 
     const seen = new Set();
@@ -3109,28 +3490,16 @@ function normalizeStreamUrl(u) {
     // counterpart share an efg video_id. Attach the audio URL to its video
     // candidate as `audioUrl` so the desktop can mux them into one file; the
     // audio track is never offered as a row itself. Sourced from every URL
-    // the page exposed (sniffed player traffic, page JSON, webRequest streams).
+    // the page exposed (sniffed player traffic, page JSON, webRequest streams)
+    // plus the persistent fbAudioByVid registry.
     try {
       const fbAll = [];
       interceptedMediaUrls.forEach(u => fbAll.push(u));
       detectedVideos.forEach(v => { if (v && v.url) fbAll.push(v.url); });
       (pd.streams || []).forEach(u => fbAll.push(u));
-      const audioByVid = new Map();
-      for (const u of fbAll) {
-        if (fbTrackKindOfUrl(u) !== 'audio') continue;
-        const vid = fbVideoIdOfUrl(u);
-        if (!vid || audioByVid.has(vid)) continue;
-        audioByVid.set(vid, stripFbRange(u));
-      }
-      if (audioByVid.size) {
-        for (const v of cands) {
-          if (v.audioUrl) continue;
-          const vid = fbVideoIdOfUrl(v.url);
-          if (!vid) continue;
-          const a = audioByVid.get(vid);
-          if (a) v.audioUrl = a;
-        }
-      }
+      try { extractFacebookVideos().forEach(v => { if (v && v.url) fbAll.push(v.url); }); } catch (e) {}
+      for (const u of fbAll) rememberFbAudioUrl(u);
+      cands.forEach(v => attachFbAudioUrl(v));
     } catch (e) {}
 
     // Expand HLS masters into per-quality rows
@@ -3217,30 +3586,58 @@ function normalizeStreamUrl(u) {
     if (!capsuleState.get(video)) return;
     loading.remove();
 
-    // Ranked rendering: this video's rows first, other videos' rows (if any)
-    // under a divider. Attributed-or-not, every candidate stays downloadable.
-    const mineRows = rows.filter(v => v && v._fbScope !== 'other');
-    const otherRows = rows.filter(v => v && v._fbScope === 'other');
-    const ordered = otherRows.length ? [...mineRows, ...otherRows] : rows;
-    const splitAt = otherRows.length ? mineRows.length : -1;
+    // Per-video scoping for the capsule pill:
+    //  • Facebook/Instagram: PLAYING video links only. Related feed/watch
+    //    videos are never listed — hard filter via filterFacebookPlayingOnly.
+    //  • Every other site: when this element's file family is attributable,
+    //    only its links are shown; otherwise all rows stay so the user is
+    //    never stranded with an empty panel.
+    const isFbHost = isFacebookPage() || /facebook|instagram|fb\.watch/i.test(location.hostname || '');
+    let ordered;
+    if (isFbHost) {
+      ordered = filterFacebookPlayingOnly(rows, video);
+      if (!ordered.length) {
+        // Fail-open: this pill belongs to a playing <video>. Never leave it
+        // empty just because path/efg attribution could not prove the family.
+        ordered = rows.filter(v => v && v.playing);
+        if (!ordered.length && fbScope && fbScope.size) {
+          ordered = rows.filter(v => v && v._fbScope !== 'other');
+        }
+        if (!ordered.length) {
+          const playingNow = (() => {
+            try { return isPlayingVideo(video) || isActuallyPlaying(video); }
+            catch (e) { return true; }
+          })();
+          if (playingNow) {
+            ordered = rows.filter(v => {
+              try {
+                if (!v || !v.url) return false;
+                if (v.source === 'facebook' || v.source === 'video-element') return true;
+                return isFacebookVideoUrl(v.url) || /\.mp4(\?|#|$)/i.test(String(v.url));
+              } catch (e) { return false; }
+            });
+            if (!ordered.length) ordered = rows;
+          }
+        }
+      }
+    } else {
+      const hasScope = !!((fbScope && fbScope.size) || (genScope && genScope.size));
+      ordered = hasScope ? rows.filter(v => v && v._fbScope !== 'other') : rows;
+    }
+    const mineRows = ordered;
     // DASH signal for the honest empty state (set by the background when
     // segment traffic flows in this tab).
     const pdDashActive = !!(pd && pd.dashActive);
-    let mineCount = mineRows.length, otherCount = otherRows.length;
+    let mineCount = mineRows.length;
     const refreshSubCount = () => {
       try {
-        sub.textContent = otherCount > 0
-          ? `${location.hostname} · ${mineCount} this video · ${otherCount} others`
-          : location.hostname + ' · ' + mineCount + ' downloadable link' + (mineCount === 1 ? '' : 's');
+        sub.textContent = location.hostname + ' · ' + mineCount + ' downloadable link' + (mineCount === 1 ? '' : 's');
       } catch (e) {}
     };
     // Remove a row that probed as not-a-video and keep the counts truthful.
     const dropRow = (rowV, rowEl) => {
       try { if (rowEl.isConnected) rowEl.remove(); } catch (e) {}
-      try {
-        if (rowV && rowV._fbScope === 'other') otherCount = Math.max(0, otherCount - 1);
-        else mineCount = Math.max(0, mineCount - 1);
-      } catch (e) {}
+      mineCount = Math.max(0, mineCount - 1);
       refreshSubCount();
       ensureProtectedRow();
     };
@@ -3248,7 +3645,7 @@ function normalizeStreamUrl(u) {
     // direct file = protected stream. Says so instead of offering junk.
     const ensureProtectedRow = () => {
       try {
-        if (mineCount + otherCount > 0) return;
+        if (mineCount > 0) return;
         if (st.panel.querySelector('.aidm-cap-dashlock')) return;
         if (!pdDashActive || !hasBlobSource(video)) return;
         const drow = document.createElement('div');
@@ -3272,7 +3669,7 @@ function normalizeStreamUrl(u) {
     };
     refreshSubCount();
 
-    if (rows.length === 0) {
+    if (ordered.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'aidm-cap-empty';
       empty.textContent = 'Scanning video… play it for a few seconds, then reopen this panel.';
@@ -3283,12 +3680,6 @@ function normalizeStreamUrl(u) {
     // Metadata probes queued while rows build (bounded below).
     const metaProbeRuns = [];
     ordered.forEach((v, idx) => {
-      if (idx === splitAt) {
-        const sep = document.createElement('div');
-        sep.className = 'aidm-cap-sep';
-        sep.textContent = `Other videos on this page (${otherRows.length})`;
-        st.panel.appendChild(sep);
-      }
       const row = document.createElement('div');
       row.className = 'aidm-cap-row';
 
@@ -3593,17 +3984,14 @@ function normalizeStreamUrl(u) {
         // Scoped badge: this video's variants only (see getVideoVariants).
         getVideoVariants(video).forEach(v => { if (v && v.url) countUrl(v.url); });
       } else if (isFacebookPage()) {
-        // Scoped badge like the panel: this video's path family when
-        // attributable, otherwise the page-global path set.
-        const scope = elementFilePaths(video);
-        const inScope = (u) => {
-          if (!scope.size) return true;
-          const k = fbPathKey(u);
-          return !k || scope.has(k);
-        };
-        getVideoVariants(video).forEach(v => { if (v && v.url) countUrl(v.url); });
-        interceptedMediaUrls.forEach(u => { if (inScope(u)) countUrl(u); });
-        detectedVideos.forEach(v => { if (v && v.url && inScope(v.url)) countUrl(v.url); });
+        // Playing-only badge: this video's path family / page id, never the
+        // whole feed's registry.
+        const scoped = filterFacebookPlayingOnly([
+          ...Array.from(interceptedMediaUrls).map(u => ({ url: u })),
+          ...Array.from(detectedVideos.values()),
+          ...getVideoVariants(video),
+        ].filter(x => x && x.url), video);
+        scoped.forEach(v => { if (v && v.url) countUrl(v.url); });
       } else {
         getVideoVariants(video).forEach(v => { if (v && v.url) countUrl(v.url); });
         // Generalised scoping: when this element's own file family is known,
@@ -3770,6 +4158,7 @@ function normalizeStreamUrl(u) {
     metaProbeCache.clear();
     hlsExpandCache.clear();
     audioPlaylistPaths.clear();
+    try { resetFbAudioRegistry(); } catch (e) {}
     pageScanComplete = false;
     scheduleSyncCapsules();
   }

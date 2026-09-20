@@ -103,6 +103,50 @@ const FIXTURE = `
     variants.every(v => !/\.mpd/i.test(v.url)) && variants._mpdCount >= 1);
 }
 
+// ── 3b. playing/page-video only (related videos dropped) ───────────────────
+{
+  const other = 'https://video.xx.fbcdn.net/v/t42.9040-2/999999999_n.mp4?oh=x&oe=y';
+  const mixed = `
+    <script>{"playable_url":"https:\\/\\/video.xx.fbcdn.net\\/v\\/t42.9040-2\\/111_sd.mp4?oh=aaa",
+    "playable_url_quality_hd":"https:\\/\\/video.xx.fbcdn.net\\/v\\/t42.9040-2\\/111_hd.mp4?oh=aaa"}</script>
+    <script>{"playable_url":"${other}"}</script>`;
+  const scoped = fb.extractFacebookVariants(mixed, 'https://www.facebook.com/watch/?v=111');
+  check('page video variants kept',
+    scoped.some(v => /111_/.test(v.url)) && scoped.length >= 2,
+    scoped.map(v => v.url).join(' | '));
+  check('related not-playing video dropped',
+    !scoped.some(v => /999999999/.test(v.url)),
+    scoped.map(v => v.url).join(' | '));
+  check('filterVariantsToPageVideo keeps matching only',
+    (() => {
+      const all = [
+        { url: 'https://video.xx.fbcdn.net/v/t/111_n.mp4' },
+        { url: 'https://video.xx.fbcdn.net/v/t/999999999_n.mp4' },
+      ];
+      const out = fb.filterVariantsToPageVideo(all, '111', mixed);
+      return out.length === 1 && /111_/.test(out[0].url);
+    })());
+  check('unattributable list left intact (short reel tokens)',
+    fb.filterVariantsToPageVideo([{ url: 'https://video.xx.fbcdn.net/v/t/x_n.mp4' }], 'watch-AbC', '')
+      .length === 1);
+  // Fail-open: progressive URLs with no id in the path must survive when
+  // they cannot be proven to be another video.
+  check('fail-open keeps unattributable progressive siblings',
+    (() => {
+      const all = [
+        { url: 'https://video.xx.fbcdn.net/v/t42.9040-2/abcdef_n.mp4' },
+        { url: 'https://video.xx.fbcdn.net/v/t/999999999_n.mp4' },
+      ];
+      const out = fb.filterVariantsToPageVideo(all, '111', '');
+      return out.some(v => /abcdef/.test(v.url)) && !out.some(v => /999999999/.test(v.url));
+    })());
+  check('fail-open: nothing attributable → list unchanged',
+    fb.filterVariantsToPageVideo([
+      { url: 'https://video.xx.fbcdn.net/v/t42.9040-2/aaa_n.mp4' },
+      { url: 'https://video.xx.fbcdn.net/v/t42.9040-2/bbb_n.mp4' },
+    ], '111', '').length === 2);
+}
+
 {
   const audioUrl = `https://scontent.xx.fbcdn.net/v/t66.0-0/111_n.mp4?efg=${encodeURIComponent(AUDIO_EFG)}&oh=a&oe=b`;
   const videoUrl = `https://video.few1-1.fna.fbcdn.net/v/t42.9040-2/111_n.mp4?efg=${encodeURIComponent(VIDEO_EFG)}&oh=a&oe=b`;
@@ -115,6 +159,47 @@ const FIXTURE = `
     !urls.some(u => u.includes(AUDIO_EFG)));
   check('video efg rendition kept',
     urls.some(u => u.includes(VIDEO_EFG)));
+  check('split-AV audio is paired onto the video row as audioUrl',
+    variants.some(v => /111_n\.mp4/.test(v.url) && v.audioUrl && v.audioUrl.includes(AUDIO_EFG)),
+    variants.map(v => v.url + ' → ' + (v.audioUrl || 'none')).join(' | '));
+  check('toPickerVideos forwards audioUrl',
+    fb.toPickerVideos(variants).some(p => p.audioUrl && p.audioUrl.includes(AUDIO_EFG)));
+}
+
+// Silent-download regression: extensionless efg-audio renditions (no .mp4)
+// and audio under audio-specific keys must still be harvested and paired —
+// otherwise the video row ships with no audioUrl and downloads silent.
+{
+  const extAudio = `https://scontent.xx.fbcdn.net/v/t66.0-0/abcdef?efg=${encodeURIComponent(AUDIO_EFG)}&oh=a&oe=b`;
+  const videoUrl = `https://video.few1-1.fna.fbcdn.net/v/t42.9040-2/111_n.mp4?efg=${encodeURIComponent(VIDEO_EFG)}&oh=a&oe=b`;
+  const html = `<script>{"hd_src":"${videoUrl}"}</script><script>{"dash_audio":"${extAudio}"}</script>`;
+  const variants = fb.extractFacebookVariants(html, 'https://www.facebook.com/watch/?v=111');
+  check('extensionless efg-audio harvested + paired (not silent)',
+    variants.some(v => /111_n\.mp4/.test(v.url) && v.audioUrl && v.audioUrl.includes('scontent')),
+    variants.map(v => v.url + ' → ' + (v.audioUrl || 'none')).join(' | '));
+}
+
+{
+  const videoUrl = `https://video.xx.fbcdn.net/v/t42.9040-2/222_n.mp4?oh=a&oe=b`;
+  const audio222 = `https://scontent.xx.fbcdn.net/v/t66.0-0/abcdef?efg=${encodeURIComponent(b64url({ encode_tag: 'dash_audio_only', video_id: 222 }))}&oh=a`;
+  const html = `<script>{"playable_url":"${videoUrl}","audio_url":"${audio222}"}</script>`;
+  const variants = fb.extractFacebookVariants(html, 'https://www.facebook.com/watch/?v=222');
+  const v = variants.find(x => /222_n\.mp4/.test(x.url));
+  check('audio_url key harvested + paired onto same-video row',
+    !!(v && v.audioUrl && /222/.test(fb.videoIdFromFbUrl(v.audioUrl) || v.audioUrl)));
+}
+
+{
+  // Same audio surfacing under two paths (audio_url key + generic efg sweep)
+  // must dedupe — otherwise the sole-audio fallback dies and id-less videos
+  // download silent.
+  const soleAudio = `https://scontent.xx.fbcdn.net/v/t66.0-0/xyzabc?efg=${encodeURIComponent(b64url({ encode_tag: 'dash_audio_only', video_id: 999 }))}&oh=a`;
+  const videoUrl = `https://video.xx.fbcdn.net/v/t42.9040-2/hashprog.mp4?oh=a&oe=b`;
+  const html = `<script>{"playable_url":"${videoUrl}","audio_url":"${soleAudio}"}</script>`;
+  const variants = fb.extractFacebookVariants(html, 'https://www.facebook.com/watch/?v=444');
+  const v = variants.find(x => /hashprog/.test(x.url));
+  check('deduped single audio still pairs (not silent)',
+    !!(v && v.audioUrl));
 }
 
 {
