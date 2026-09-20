@@ -151,6 +151,27 @@ check('background.js skip-audio-and-pair post-pass is present',
   /v\.audioUrl = fbAudioByVid\.get\(vid\)/.test(bgSrc));
 check('background.js also pairs by path dir / sole audio track',
   /fbAudioByDir/.test(bgSrc) && /fbSoleAudio/.test(bgSrc));
+
+// v4.8.3 drift guard: the audio-codec fingerprint must ship IDENTICALLY in
+// every track classifier (desktop resolver + content + background + popup).
+// A prior pass fixed 3 of 4 copies and left popup.js on the old /audio/i-only
+// match with NO test failing — this assertion makes any copy desync fail.
+{
+  const AUDIO_FP = 'audio|heaac|aac[_-]|mp4a|opus|vorbis';
+  const inAll =
+    popSrc.includes(AUDIO_FP) &&
+    bgSrc.includes(AUDIO_FP) &&
+    ctSrc.includes(AUDIO_FP) &&
+    fbSrc.includes(AUDIO_FP);
+  check('audio-codec fingerprint ships in ALL 4 track classifiers (no drift)',
+    inAll,
+    ['popup:' + popSrc.includes(AUDIO_FP), 'bg:' + bgSrc.includes(AUDIO_FP),
+     'content:' + ctSrc.includes(AUDIO_FP), 'resolver:' + fbSrc.includes(AUDIO_FP)].join(' '));
+  // Each copy must also read vencode_tag, not just encode_tag.
+  check('all 4 classifiers read vencode_tag as well as encode_tag',
+    /vencode_tag/.test(popSrc) && /vencode_tag/.test(bgSrc) &&
+    /vencode_tag/.test(ctSrc) && /vencode_tag/.test(fbSrc));
+}
 check('audioUrl propagated to desktop single-download opts',
   /audioUrl:\s*v\.audioUrl/.test(ctSrc) &&
   /audioUrl:\s*item\.audioUrl/.test(popSrc) &&

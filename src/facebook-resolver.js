@@ -285,8 +285,15 @@ function extractFacebookDuration(html) {
   return null;
 }
 
-// `efg` carries the encode descriptor; an `audio` encode_tag means the URL is
+// `efg` carries the encode descriptor; an audio encode_tag means the URL is
 // the audio-only half of a split DASH rendition — never a playable download.
+// Facebook tags audio renditions with a codec fingerprint, often WITHOUT the
+// literal word "audio" (e.g. dash_ln_heaac_vbr3, dash_aac_lc, dash_mp4a.40.2,
+// dash_ln_heaacv3). Matching only /audio/i misclassified those as VIDEO rows —
+// the audio half was offered as a playable video and the real video shipped
+// silent. Match the codec fingerprints too; never the video codecs
+// (vp9/av1/avc/h264/hev). (Regex shape routed via Jev triage.)
+const FB_AUDIO_TAG_RE = /audio|heaac|aac[_-]|mp4a|opus|vorbis/i;
 function efgIsAudio(efg) {
   try {
     const s = String(efg || '');
@@ -299,7 +306,12 @@ function efgIsAudio(efg) {
       try { obj = JSON.parse(Buffer.from(b64, 'base64').toString('utf8')); } catch (e) { obj = null; }
     }
     if (!obj || typeof obj !== 'object') return false;
-    return /audio/i.test(String(obj.encode_tag || obj.vencode_tag || ''));
+    // encode_tag is the primary descriptor. Some renditions expose the codec
+    // under vencode_tag too, so test both for an audio fingerprint (an audio
+    // half still carries an audio codec in one of them).
+    const enc = String(obj.encode_tag || '');
+    const venc = String(obj.vencode_tag || '');
+    return FB_AUDIO_TAG_RE.test(enc) || FB_AUDIO_TAG_RE.test(venc);
   } catch (e) { return false; }
 }
 

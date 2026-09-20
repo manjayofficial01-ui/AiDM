@@ -653,9 +653,11 @@ function fbTrackKindOfUrl(u) {
     const efg = new URL(String(u || '')).searchParams.get('efg');
     const obj = fbEfgObj(efg);
     if (!obj) return null;
-    const tag = String(obj.encode_tag || '');
-    if (!tag) return null;
-    return /audio/i.test(tag) ? 'audio' : 'video';
+    const tag = String(obj.encode_tag || '') + ' ' + String(obj.vencode_tag || '');
+    if (!tag.trim()) return null;
+    // Audio renditions are tagged by codec, often without the word "audio"
+    // (dash_ln_heaac_vbr3, dash_aac_lc, dash_mp4a.40.2). Mirrors efgIsAudio.
+    return /audio|heaac|aac[_-]|mp4a|opus|vorbis/i.test(tag) ? 'audio' : 'video';
   } catch (e) { return null; }
 }
 

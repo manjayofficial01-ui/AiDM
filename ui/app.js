@@ -1,5 +1,5 @@
 /**
- * AiDM v4.8.2 - UI Controller
+ * AiDM v4.8.3 - UI Controller
  * Features: Video quality picker, per-category paths, ask-every-time, auto-detection
  */
 

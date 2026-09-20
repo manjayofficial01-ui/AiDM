@@ -1,6 +1,18 @@
-# ⚡ AiDM - AI-Powered Download Manager v4.8.2
+# ⚡ AiDM - AI-Powered Download Manager v4.8.3
 
 > Classic IDM-style download manager with next-generation modular download engine, dynamic in-flight segment splitting, positional random-access disk I/O, multi-mirror failover, atomic `.part.meta` crash recovery, Chrome browser integration, video quality detection, smart per-category file organization, ETA, dual-layer speed limiting, streaming multi-algorithm checksum verification, and a yt-dlp + FFmpeg extraction engine for YouTube.
+
+---
+
+## What's New in v4.8.3
+
+**Facebook videos still downloading silent — the remaining root cause.** v4.8.1 fixed four split-AV pairing gaps, but one detection bug survived: Facebook tags many audio-only DASH renditions with a **codec fingerprint instead of the word "audio"** (`dash_ln_heaac_vbr3`, `dash_aac_lc`, `dash_mp4a.40.2`, `dash_ln_heaacv3`). The track classifier only matched `/audio/i`, so those audio renditions were misclassified as **video** rows — the real video then shipped with no `audioUrl` and downloaded silent.
+
+### Fixed
+- **Audio-codec fingerprints are now recognized.** `efgIsAudio` (desktop resolver) and `fbTrackKindOfUrl` (extension content + background) match `audio` **or** an audio codec tag (`heaac`, `aac[_-]`, `mp4a`, `opus`, `vorbis`) — while never misclassifying video codecs (`vp9`/`av1`/`avc1`/`hev1`). Also reads `vencode_tag` as a secondary descriptor.
+- The audio codec-fingerprint regex shape was routed through **Jev triage** (TypeSafe System One) to pick the precise, non-over-broad pattern.
+
+**Tests:** `facebook-resolver` grew 54 → **58** checks — codec-tagged audio is detected as audio, video codecs never misclassified, and an end-to-end codec-tagged page still pairs audio onto the video row (never silent, audio never listed as a video).
 
 ---
 

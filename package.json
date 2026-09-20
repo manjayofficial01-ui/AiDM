@@ -1,7 +1,7 @@
 {
   "name": "aidm",
-  "version": "4.8.2",
-  "description": "AiDM v4.8.2 - AI-Powered Download Manager with keep-alive connection reuse, Jev link-triage fallback, Facebook silent-video fix, per-video link scoping, and a hardened engine",
+  "version": "4.8.3",
+  "description": "AiDM v4.8.3 - AI-Powered Download Manager with keep-alive connection reuse, Jev link-triage fallback, and a hardened Facebook split-AV audio pairing",
   "main": "main.js",
   "scripts": {
     "start": "electron .",

@@ -179,6 +179,38 @@ const FIXTURE = `
     variants.map(v => v.url + ' → ' + (v.audioUrl || 'none')).join(' | '));
 }
 
+// v4.8.3 silent-download regression: Facebook tags many audio renditions with
+// a CODEC fingerprint and NO literal "audio" word (dash_ln_heaac_vbr3,
+// dash_aac_lc, dash_mp4a.40.2). The old /audio/i-only match classified those
+// as VIDEO rows — the real video then downloaded silent. These must be
+// detected as audio (never offered as a video row) and paired as audioUrl.
+{
+  const efgAudio = (tag) => encodeURIComponent(b64url({ encode_tag: tag, video_id: 555 }));
+  const audioEfgs = ['dash_ln_heaac_vbr3', 'dash_aac_lc', 'dash_mp4a.40.2', 'dash_ln_heaacv3'];
+  const videoEfgs = ['dash_r2av1-r1gen2vp9_q20', 'dash_vp9_basic_gen2', 'dash_av1', 'dash_avc1.64001f'];
+  check('audio-codec tags (no "audio" word) detected as audio',
+    audioEfgs.every(t => fb.efgIsAudio(decodeURIComponent(efgAudio(t)))),
+    audioEfgs.map(t => t + '=' + fb.efgIsAudio(decodeURIComponent(efgAudio(t)))).join(','));
+  check('video-codec tags never misclassified as audio',
+    videoEfgs.every(t => !fb.efgIsAudio(decodeURIComponent(efgAudio(t)))),
+    videoEfgs.map(t => t + '=' + fb.efgIsAudio(decodeURIComponent(efgAudio(t)))).join(','));
+}
+
+{
+  // End-to-end: a page whose audio rendition carries ONLY a codec tag (no
+  // "audio" word) must still pair that audio onto the video row.
+  const videoUrl = `https://video.xx.fbcdn.net/v/t42.9040-2/555_n.mp4?efg=${encodeURIComponent(b64url({ encode_tag: 'dash_r2av1-r1gen2vp9_q20', video_id: 555 }))}&oh=a`;
+  const audioUrl = `https://scontent.xx.fbcdn.net/v/t66.0-0/aud555?efg=${encodeURIComponent(b64url({ encode_tag: 'dash_ln_heaac_vbr3', video_id: 555 }))}&oh=a`;
+  const html = `<script>{"playable_url":"${videoUrl}","audio_url":"${audioUrl}"}</script>`;
+  const variants = fb.extractFacebookVariants(html, 'https://www.facebook.com/watch/?v=555');
+  const v = variants.find(x => /555_n\.mp4/.test(x.url));
+  check('codec-tagged audio (no "audio" word) harvested + paired, not silent',
+    !!(v && v.audioUrl && v.audioUrl.includes('aud555')),
+    variants.map(x => x.url + ' → ' + (x.audioUrl || 'none')).join(' | '));
+  check('codec-tagged audio is NOT listed as a video row',
+    !variants.some(x => /aud555/.test(x.url)));
+}
+
 {
   const videoUrl = `https://video.xx.fbcdn.net/v/t42.9040-2/222_n.mp4?oh=a&oe=b`;
   const audio222 = `https://scontent.xx.fbcdn.net/v/t66.0-0/abcdef?efg=${encodeURIComponent(b64url({ encode_tag: 'dash_audio_only', video_id: 222 }))}&oh=a`;
