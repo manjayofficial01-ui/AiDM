@@ -94,5 +94,56 @@ check('settings loads the Jev assist toggle (default on)',
 check('settings saves the Jev assist toggle',
   /jevAssist: document\.getElementById\('setting-jev-assist'\)\.checked/.test(app));
 
+// ── 7. Quality picker must not reset the selection on a duplicate video-detected
+//      (auto-resolve + the googlevideo guard reroute both fire for one click)
+//      — otherwise the user's mid-pick selection snaps back to "highest quality".
+//      And AFTER the user already picked, a delayed emit must not flip the
+//      overlay back open behind the location dialog either.
+console.log('\nQuality picker: same-video dedupe');
+const pickerFn = /function showQualityPicker\(data\) \{([\s\S]*?)\n\}/.exec(app);
+check('showQualityPicker exists', !!pickerFn);
+if (pickerFn) {
+  // Two layers of dedupe. The "sticky" guard (pageUrl remembered for the
+  // session) closes the post-pick re-open bug. The "overlay visible" guard
+  // is the original fast path for back-to-back emits during one pick.
+  check('a sticky "shown for this pageUrl" guard exists',
+    /let qualityShownForPageUrl = null/.test(app));
+  check('the sticky guard bails before re-rendering',
+    /if \(qualityShownForPageUrl === incomingPageUrl\) return;/.test(pickerFn[1]));
+  check('bails when the overlay is already visible for the same pageUrl',
+    /quality-overlay[\s\S]{0,120}qualityContext\.pageUrl === /.test(pickerFn[1]) ||
+    /qualityContext[\s\S]{0,200}pageUrl === incomingPageUrl/.test(pickerFn[1]));
+  check('only dedupes when the pageUrl actually matches (new video → fresh render)',
+    /incomingPageUrl/.test(pickerFn[1]));
+  check('does NOT silently drop a different video while one is open',
+    /incomingPageUrl/.test(pickerFn[1]));
+}
+
+// ── 8. downloadSelectedQuality must not claim success when nothing was queued
+//      (resolveFailed / thrown IPC / duplicate all used to fall through to
+//      "Video download started" — the user waits for a row that never exists).
+console.log('\nQuality picker: honest result reporting');
+const dqFn = /async function downloadSelectedQuality\(\) \{([\s\S]*?)\n\}/.exec(app);
+check('downloadSelectedQuality exists', !!dqFn);
+if (dqFn) {
+  const body = dqFn[1];
+  check('captures the addDownload result instead of awaiting blindly',
+    /let result;\s*try\s*\{\s*result = await window\.aidm\.addDownload\(/.test(body) ||
+    /result = await window\.aidm\.addDownload\(/.test(body));
+  check('reports resolveFailed instead of "started"',
+    /result\s*&&\s*result\.resolveFailed/.test(body));
+  check('reports an in-band success:false response',
+    /result\.success === false/.test(body));
+  check('catches a thrown IPC (no unguarded await)',
+    /catch \(e\)[\s\S]{0,200}showNotification\([\s\S]{0,80}'error'\)/.test(body));
+  check('keeps the picker open on failure (returns before hideQualityPicker)',
+    /resolveFailed[\s\S]{0,400}return;/.test(body) &&
+    /showNotification\([^)]*'error'\);\s*\n\s*return;/.test(body));
+  check('does NOT unconditionally toast "Video download started"',
+    !/await window\.aidm\.addDownload\(\{[\s\S]*?\}\);\s*\n\s*hideQualityPicker\(\);/.test(body));
+  check('distinguishes a duplicate row from a fresh one',
+    /result\.duplicate/.test(body) && /Already in the download list/.test(body));
+}
+
 console.log(`\nui-layout: ${pass} passed, ${fail} failed`);
 process.exitCode = fail ? 1 : 0;

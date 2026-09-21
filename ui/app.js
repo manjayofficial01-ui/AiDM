@@ -999,12 +999,32 @@ async function startNewDownload() {
 let qualityVideos = [];
 let qualitySelectedIdx = -1;
 let qualityContext = null; // { pageUrl, pageTitle, cookies } from video-detected
+// Once we show the picker for a given pageUrl, do NOT re-open for that same
+// pageUrl — even after the user already picked and the picker was hidden.
+// A delayed video-detected emit (googlevideo reroute + auto-resolve race,
+// plus any re-fetch on tab focus) used to flip the overlay back open behind
+// the location dialog, which read as the "quality picker re-appears even
+// though I just picked" complaint. A genuinely NEW video (different
+// pageUrl) clears this and re-renders normally.
+let qualityShownForPageUrl = null;
 
 function showQualityPicker(data) {
+  const incomingPageUrl = data.pageUrl || data.url || '';
+  // Same-video dedupe, post-pick too: once shown for this pageUrl, every
+  // further event is a duplicate — rebuilding would either snap the
+  // mid-pick selection back to the first row, or re-open the popup behind
+  // the location dialog after the user already kicked the download off.
+  if (qualityShownForPageUrl === incomingPageUrl) return;
+  // Fast path for the brief window between showQualityPicker and the next
+  // render tick: if the overlay is visibly open for the same video, do not
+  // rebuild the list (the original "duplicate emit during picking" bug).
+  const overlayVisible = document.getElementById('quality-overlay').style.display === 'flex';
+  if (overlayVisible && qualityContext && qualityContext.pageUrl === incomingPageUrl) return;
+  qualityShownForPageUrl = incomingPageUrl;
   qualityVideos = data.videos || [];
   qualitySelectedIdx = -1;
   qualityContext = {
-    pageUrl: data.pageUrl || data.url || '',
+    pageUrl: incomingPageUrl,
     pageTitle: data.pageTitle || '',
     cookies: data.cookies || null,
   };
@@ -1251,26 +1271,56 @@ async function downloadSelectedQuality() {
     ? 'facebookexternalhit/1.1'
     : navigator.userAgent;
 
-  await window.aidm.addDownload({
-    url: video.url,
-    // Twitter's own filenames are opaque hashes; the resolver suggests a
-    // readable one (twitter_<author>_<id>_<720p>.mp4) when it has one.
-    filename: video.filename || undefined,
-    quality: {
-      label: video.quality?.toUpperCase() || 'Unknown',
-      resolution: video.resolution,
-      size: video.size,
-      format: video.format,
-    },
-    meta: { ...video, pageUrl, pageTitle: qualityContext?.pageTitle || '' },
-    headers,
-    cookies: qualityContext?.cookies || null,
-    // Facebook split-AV: paired audio-only track for post-download mux.
-    audioUrl: video.audioUrl || video.meta?.audioUrl || undefined,
-  });
+  let result;
+  try {
+    result = await window.aidm.addDownload({
+      url: video.url,
+      // Twitter's own filenames are opaque hashes; the resolver suggests a
+      // readable one (twitter_<author>_<id>_<720p>.mp4) when it has one.
+      filename: video.filename || undefined,
+      quality: {
+        label: video.quality?.toUpperCase() || 'Unknown',
+        resolution: video.resolution,
+        size: video.size,
+        format: video.format,
+      },
+      meta: { ...video, pageUrl, pageTitle: qualityContext?.pageTitle || '' },
+      headers,
+      cookies: qualityContext?.cookies || null,
+      // Facebook split-AV: paired audio-only track for post-download mux.
+      audioUrl: video.audioUrl || video.meta?.audioUrl || undefined,
+    });
+  } catch (e) {
+    // The IPC itself threw — nothing was queued. Say so instead of claiming
+    // success; the picker stays open so another quality can be tried.
+    showNotification(`Download failed: ${(e && e.message) || 'unknown error'}`, 'error');
+    return;
+  }
+
+  // The manager reports failure in-band. Honour it: an unconditional
+  // "Video download started" toast on a resolveFailed response is exactly the
+  // "it says started but nothing downloads" complaint — the user waits forever
+  // for a row that was never created.
+  if (result && result.resolveFailed) {
+    let msg = result.error || 'Could not resolve this video';
+    if (result.requiresCredentials) msg = 'Add this hoster’s account in Settings › File hosts — ' + msg;
+    else if (result.waitSeconds) msg += ` (hoster asks you to wait ${result.waitSeconds}s)`;
+    showNotification(msg, 'error');
+    return;                       // keep the picker open so another quality can be tried
+  }
+  if (result && result.success === false) {
+    showNotification(result.error || 'Download could not be started', 'error');
+    return;
+  }
 
   hideQualityPicker();
-  showNotification('Video download started');
+  if (result && result.duplicate) {
+    // Not a new row — the same URL+quality is already listed. Saying "started"
+    // here is what makes the list look like it silently ignored the click.
+    showNotification('Already in the download list', 'warn');
+  } else {
+    showNotification('Video download started');
+  }
 }
 
 // ── Download-location dialog (Ask Every Time) ─────────────────────────────────

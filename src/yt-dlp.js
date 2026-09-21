@@ -250,6 +250,12 @@ function classifyError(raw) {
   if (has(/Sign in to confirm you.?re not a bot|not a bot/i)) return { code: 'bot-check', message: 'YouTube asked for a sign-in check before playing this video. AiDM does not bypass that — open the video in your browser first.' };
   if (has(/age-restricted|age restricted|confirm your age/i)) return { code: 'age', message: 'This video is age-restricted. AiDM does not bypass age verification.' };
   if (has(/members-only|Join this channel|member-only/i)) return { code: 'members', message: 'This video is members-only. AiDM does not bypass paid access.' };
+  // ── Added after real failures: these four used to fall through to the
+  //    generic "Extraction failed" line, which tells the user nothing and is
+  //    the literal "it shows failed again" complaint. ──────────────────────
+  if (has(/nsig|Unable to extract .*(?:signature|player)|Signature extraction failed|throttling/i)) return { code: 'outdated', message: 'YouTube changed its player and this yt-dlp build can no longer read the stream. Update yt-dlp with: node tools/fetch-yt-dlp.js' };
+  if (has(/HTTP Error 403|403 Forbidden|Forbidden\b/i)) return { code: 'forbidden', message: 'YouTube refused the stream request (HTTP 403). Retry, or open the video in your browser first so AiDM can reuse that session.' };
+  if (has(/Sign in to confirm|sign in to|registered users|Sign in if you/i)) return { code: 'signin', message: 'YouTube wants a signed-in session for this video. Open it in your browser (or enable "Use browser cookies" in Settings › YouTube) and try again.' };
   if (has(/Video unavailable|unavailable|has been removed|deleted/i)) return { code: 'unavailable', message: 'This video is unavailable or has been removed.' };
   if (has(/Requested format is not available|No video formats|format is not available/i)) return { code: 'format', message: 'That quality is no longer offered for this video. Remove the row and add it again to re-read the available qualities.' };
   if (has(/is not a valid URL|Unsupported URL|Cannot find/i)) return { code: 'url', message: 'That link is not a video AiDM can extract.' };
@@ -416,6 +422,47 @@ function cookieArgs(o) {
   return out;
 }
 
+/**
+ * yt-dlp arguments for subtitle sidecars. Pure — no process is spawned.
+ *
+ * OFF unless a language list is given: most rows just want the video, and
+ * dropping extra .srt files into someone's save folder unasked is surprising.
+ *
+ * @param {object} o
+ * @param {string} [o.langs] e.g. 'en.*' or 'en.*,zh.*' (empty ⇒ no subtitles)
+ * @param {boolean} [o.auto]  also take auto-generated captions when no
+ *        human-made track exists for that language
+ * @param {boolean} [o.embed] mux the track into the container instead of
+ *        writing a sidecar next to the video
+ * @returns {string[]} ready to spread into argv (or into `extraArgs`)
+ */
+function buildSubtitleArgs(o) {
+  const out = [];
+  if (!o) return out;
+  const langs = String(o.langs || '').trim();
+  if (!langs) return out;                       // opt-in: empty means off
+
+  // A subtitle fetch that fails must not cost the user the VIDEO.
+  //
+  // YouTube rate-limits the caption endpoint independently of the media
+  // servers (HTTP 429), and yt-dlp treats that as fatal: verified live — the
+  // whole job aborted with "Unable to download video subtitles" and no media
+  // file was written at all. Subtitles are a nicety; the video is the point.
+  //
+  // Safe here because this function only runs when subtitles were asked for,
+  // and the caller still proves the produced file exists and carries audio —
+  // so a genuinely failed download is caught regardless of this flag.
+  out.push('--ignore-errors');
+
+  out.push('--write-subs');
+  if (o.auto) out.push('--write-auto-subs');
+  out.push('--sub-langs', langs);
+  // SRT is what players and editors actually open; YouTube serves VTT/JSON3.
+  out.push('--convert-subs', 'srt');
+  if (o.embed) out.push('--embed-subs');
+  return out;
+}
+
 // ── probe(): metadata + fresh formats, no download ───────────────────────────
 
 /**
@@ -495,7 +542,16 @@ function parseProgressLine(line) {
     const parts = s.slice(i + PROGRESS_PREFIX.length).split('|');
     const num = (v) => { const n = Number(v); return isFinite(n) && n >= 0 ? n : null; };
     const status = parts[0] || '';
-    if (status && status !== 'downloading') return { status };
+    if (status && status !== 'downloading') {
+      // 'finished' carries the track's REAL byte count. Returning only the
+      // status here used to throw that away, so split video+audio downloads
+      // could not add a completed track's size to the running total and the
+      // row jumped backwards to 0% when the audio track started.
+      if (status === 'finished') {
+        return { status, downloaded: num(parts[1]), total: num(parts[2]) };
+      }
+      return { status };
+    }
     return {
       status: 'downloading',
       downloaded: num(parts[1]),
@@ -600,7 +656,13 @@ function downloadWithRunner(o, runner, resolve, reject) {
       '--no-warnings',
       '--no-call-home',
       '--no-cache-dir',
-      '--no-progress',          // we emit our own newline-delimited lines
+      // NOTE: do NOT add --no-progress here. yt-dlp checks `noprogress`
+      // FIRST and swaps in a QuietMultilinePrinter, so --progress-template
+      // then prints nothing at all — verified against the shipped binary:
+      // with --no-progress a real download emits 0 AIDMPROGRESS lines, without
+      // it the same download emits 13. That silence is why YouTube rows used
+      // to sit at 0% for the whole transfer and look "stuck / failed".
+      // `--newline` is the flag that makes each update its own line.
       '--newline',
       '--no-colors',
       '--progress-template', PROGRESS_TEMPLATE,
@@ -617,6 +679,12 @@ function downloadWithRunner(o, runner, resolve, reject) {
     // Never leave the separate video track behind: a stray "…f137.mp4" is a
     // silent file waiting to be mistaken for the finished download.
     if (needsMerge) args.push('--no-keep-video');
+
+    // Choice-specific post-processing (MP3 re-encode, subtitle sidecars).
+    // Explicit argv entries only — a flag can never come from a pasted URL.
+    if (Array.isArray(o.extraArgs) && o.extraArgs.length) {
+      args.push(...o.extraArgs.map((a) => String(a)));
+    }
 
     // Honour AiDM's global/scheduled speed cap on this path too — otherwise
     // the scheduler's limit would simply not apply to YouTube downloads.
@@ -683,17 +751,35 @@ function downloadWithRunner(o, runner, resolve, reject) {
       }
     }, 400);
 
+    // yt-dlp reports progress PER TRACK. With split video+audio the counter
+    // restarts at 0 the moment the audio track begins, so a row used to jump
+    // from ~48% straight back to 0% in the middle of a download — which reads
+    // exactly like "it stalled / it started over". Bank the bytes of every
+    // track that already finished so the number only ever goes up.
+    let trackDone = 0;
+
     const handleLine = (line) => {
       const p = parseProgressLine(line);
-      if (!p || p.status !== 'downloading' || !onProgress) return;
+      if (!p || !onProgress) return;
+      if (p.status === 'finished') {
+        // A track completed — add its real size to the running total.
+        trackDone += (p.downloaded || p.total || 0);
+        sawProgress = true;
+        return;
+      }
+      if (p.status !== 'downloading') return;
       sawProgress = true;
       const now = Date.now();
       if (now - lastEmit < 200) return;   // ≥5 UI updates/s at most
       lastEmit = now;
-      const downloaded = p.downloaded || 0;
+      const downloaded = trackDone + (p.downloaded || 0);
       // With split video+audio the per-track total is only half the job, so
-      // prefer the known combined size when the resolver gave us one.
-      const total = expectedBytes > 0 ? expectedBytes : (p.total || 0);
+      // prefer the known combined size when the resolver gave us one — but
+      // once the real bytes overtake that estimate, trust the real numbers so
+      // 100% means 100% and not "the estimate was generous".
+      let total;
+      if (expectedBytes > 0 && downloaded <= expectedBytes) total = expectedBytes;
+      else total = (trackDone + (p.total || 0)) || expectedBytes || downloaded;
       const percent = total > 0 ? Math.min(100, (downloaded / total) * 100) : (p.percent || 0);
       onProgress({
         downloaded,
@@ -727,11 +813,32 @@ function downloadWithRunner(o, runner, resolve, reject) {
     child.on('error', (e) => finish(e));
     child.on('close', (code) => {
       if (code === 0) {
+        // yt-dlp exited clean — but "clean" is not proof that a file exists.
+        // `--ignore-errors` (added for subtitle jobs so a 429 caption
+        // endpoint cannot kill the download) makes yt-dlp exit 0 even when it
+        // downloaded nothing, and a merge that never ran leaves only .part
+        // files. Reporting success here is exactly the "it says completed but
+        // there is no file" complaint — so prove a file before celebrating.
+        const produced0 = producedFileFor(outputTemplate);
+        if (!produced0) {
+          const err = new Error(
+            'yt-dlp finished without producing a file, so nothing was saved. ' +
+            'Retry this download; if you asked for subtitles, try again with them off.');
+          err.code = 'no-output';
+          err.raw = redact(stderrTail).slice(-800);
+          err.logPath = writeDiagnosticLog(logPath, {
+            code: 'no-output', url, formatSpec,
+            runner: (runner && runner.version) || 'unknown',
+            tail: stderrTail + '\nAIDM: yt-dlp exited 0 but produced no file',
+          });
+          finish(err);
+          return;
+        }
         // yt-dlp exited clean — but "clean" is not proof that the merge
         // happened. Verify the finished file actually has an audio track
         // before the row is allowed to report success.
         if (needsMerge && o.verifyAudio !== false) {
-          verifyMergedAudio(producedFileFor(outputTemplate)).then((v) => {
+          verifyMergedAudio(produced0).then((v) => {
             if (settled) return;
             if (v.ok) { finish(null, { ok: true, sawProgress, verified: !v.unknown }); return; }
             cleanupPartialOutputs(outputTemplate);
@@ -795,6 +902,7 @@ module.exports = {
   // Cookie / Referer plumbing (pure helpers are regression-tested).
   BROWSERS,
   cookieArgs,
+  buildSubtitleArgs,
   cookieDomainFor,
   parseCookiePairs,
   netscapeCookieFile,

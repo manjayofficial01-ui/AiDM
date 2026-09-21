@@ -151,7 +151,11 @@ function withoutCookieHeader(h) {
 function findProducedFile(dir, stem) {
   try {
     const prefix = stem + '.yt';
-    const names = fs.readdirSync(dir).filter(n => n.startsWith(prefix) && !/\.part$|\.ytdl$/i.test(n));
+    // Subtitle sidecars (.srt/.vtt) share the stem — they must never be
+    // mistaken for the finished media, so they are excluded up front.
+    const names = fs.readdirSync(dir)
+      .filter(n => n.startsWith(prefix) && !/\.part$|\.ytdl$/i.test(n))
+      .filter(n => !/\.(srt|vtt)$/i.test(n));
     if (!names.length) return null;
     const scored = names.map((n) => {
       let size = 0, mtime = 0;
@@ -1338,6 +1342,17 @@ class DownloadManager extends EventEmitter {
         url: pageUrl,
         formatSpec: youtubeResolver.buildFormatSpec(choice),
         outputTemplate: template,
+        // Flags the CHOICE itself needs (an MP3 pick re-encodes) plus the
+        // user's subtitle preference. Subtitles are opt-in, so this is
+        // normally an empty list and changes nothing about the normal path.
+        extraArgs: [
+          ...youtubeResolver.buildExtraArgs(choice),
+          ...ytdlp.buildSubtitleArgs({
+            langs: String(this.settings.youtubeSubtitleLangs || '').trim(),
+            auto: this.settings.youtubeSubtitleAuto !== false,
+            embed: this.settings.youtubeSubtitleEmbed === true,
+          }),
+        ],
         limitRate: Number(this.engine && this.engine.globalSpeedLimit) || 0,
         logPath,
         // yt-dlp is a CHILD PROCESS and does not inherit the browser session.
@@ -1417,6 +1432,19 @@ class DownloadManager extends EventEmitter {
 
       let size = 0;
       try { size = fs.statSync(finalPath).size; } catch (e) { /* stay 0 */ }
+
+      // An empty or header-only file is never a finished download. Marking it
+      // `completed` is the "31 bytes and it says 100% done" bug: the row looks
+      // green, the file cannot be played, and the user has no idea why. Fail
+      // with the real reason and remove the useless file.
+      // 1 KiB is below the smallest possible valid media container (an mp4
+      // needs its ftyp+moov boxes alone), so anything under it is an error
+      // page or a stub, not a video.
+      if (size < 1024) {
+        try { if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath); } catch (e) { /* best effort */ }
+        fail('The download finished but the saved file is empty or incomplete, so it was not kept. Retry, or pick a different quality.', 'no-output', logPath);
+        return true;
+      }
 
       download.filepath = finalPath;
       download.filename = path.basename(finalPath);

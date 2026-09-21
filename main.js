@@ -447,8 +447,16 @@ ipcMain.handle('add-download', async (event, opts) => {
   // and the UI shows the normal quality picker instead. Provider support is
   // determined by the strict resolver registry (identifier-only parsing, so
   // media URLs with long digit ids are never mistaken for posts).
+  //
+  // Exception: when the caller already picked a quality from the picker
+  // (meta.ytFormat is set), fall straight through to addDownload with the
+  // chosen format ids. Otherwise the picker re-opens immediately after the
+  // user just confirmed it — the "Select Video Quality" popup returns for
+  // every video, even ones the user already chose.
+  const ytFormat = (opts && opts.meta && opts.meta.ytFormat && typeof opts.meta.ytFormat === 'object')
+    ? opts.meta.ytFormat : null;
   try {
-    if (opts && opts.url && resolvers.hasResolverFor(opts.url)) {
+    if (opts && opts.url && resolvers.hasResolverFor(opts.url) && !ytFormat) {
       // File hosters (Rapidgator …) need the account the user saved in
       // Settings › File hosts; every other provider ignores the option.
       // yt-dlp (YouTube) additionally gets the session the extension captured,

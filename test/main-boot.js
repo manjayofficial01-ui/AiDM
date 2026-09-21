@@ -121,6 +121,31 @@ console.log('── youtubeCookiesFromBrowser is defensive ──');
   }
 }
 
+// ── add-download IPC: ytFormat must skip the resolver round-trip ────────────
+// Regression: when the renderer confirms a quality from the picker it sends
+// { meta: { ytFormat: {...} } }. If main.js re-resolves the URL anyway, the
+// picker re-opens for every video the user just chose. The HTTP API in
+// /api/download respects ytFormat; the IPC must match.
+console.log('── add-download IPC respects meta.ytFormat ──');
+{
+  const mainSrc = fs.readFileSync(MAIN, 'utf8');
+  const m = /ipcMain\.handle\('add-download'[\s\S]*?\n\}\);/.exec(mainSrc);
+  check('add-download handler is captured', !!m);
+  if (m) {
+    check('skips resolver round-trip when meta.ytFormat is present',
+      /resolvers\.hasResolverFor\([^)]+\)\s*&&\s*!ytFormat/.test(m[0]) ||
+      /\!\s*ytFormat[\s\S]{0,40}resolvers\.hasResolverFor/.test(m[0]));
+    check('extracts ytFormat from opts.meta.ytFormat',
+      /opts\.meta\.ytFormat/.test(m[0]) ||
+      /opts\s*&&\s*opts\.meta\s*&&\s*opts\.meta\.ytFormat/.test(m[0]));
+    // And critically: the OLD behaviour (always resolve when the URL has a
+    // resolver) is gone — there must be no `if (... hasResolverFor(...))` path
+    // that runs when ytFormat is set.
+    check('no unguarded resolver path (the old infinite-picker loop)',
+      !/if \(\s*opts\s*&&\s*opts\.url\s*&&\s*resolvers\.hasResolverFor\(opts\.url\)\s*\)\s*\{[\s\S]{0,200}video-detected/.test(mainSrc));
+  }
+}
+
 // ── Cleanup ─────────────────────────────────────────────────────────────────
 Object.keys(savedEnv).forEach(k => { process.env[k] = savedEnv[k]; });
 try { fs.rmSync(scratch, { recursive: true, force: true }); } catch (e) {}

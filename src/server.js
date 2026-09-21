@@ -39,6 +39,9 @@ const RESOLVE_LIMITERS = {
   '/api/resolve-twitter': new RateLimiter(30, 60 * 1000),
   '/api/resolve-facebook': new RateLimiter(30, 60 * 1000),
   '/api/resolve-youtube': new RateLimiter(30, 60 * 1000),
+  // When /api/download routes a page URL through the resolver, this caps how
+  // often a runaway tab can force resolution.
+  '/api/download': new RateLimiter(30, 60 * 1000),
 };
 
 function sanitizeHeaders(input) {
@@ -50,6 +53,60 @@ function sanitizeHeaders(input) {
     }
   }
   return out;
+}
+
+// ── YouTube CDN guard ───────────────────────────────────────────────────────
+// YouTube serves picture and sound as SEPARATE signed DASH tracks from
+// googlevideo.com/videoplayback. They expire in minutes and need the player's
+// own context (Range + the right Referer + a live signature), so replaying one
+// through the native multi-segment engine yields ~30 bytes that the engine
+// honestly reports as "100% complete" — the "downloaded a video that is 31
+// bytes" bug.
+//
+// A googlevideo URL must therefore NEVER become a plain row. It is either
+// rerouted to /api/resolve-youtube (which uses yt-dlp on the WATCH PAGE and
+// offers real merged qualities), or refused outright.
+
+/** True for YouTube's own media CDN (never a page URL).
+ *
+ *  Anything served from googlevideo.com is a player-side streaming endpoint
+ *  — /videoplayback (the actual DASH tracks), /generate_204 (the player's
+ *  connectivity probe that returns 204 0 bytes when fetched naively),
+ *  /initplayback, /anything. They are NEVER files. Saving one to disk was
+ *  the original "31-byte completed" bug for /videoplayback and the
+ *  "HTTP 204 failed" bug for /generate_204. The host alone is the
+ *  meaningful criterion; the path never was.
+ */
+function isYouTubeMediaUrl(url) {
+  try {
+    const u = new URL(String(url));
+    return /(^|\.)googlevideo\.com$/i.test(String(u.hostname || ''));
+  } catch (e) {
+    return false; // not a URL at all → not a YouTube CDN url
+  }
+}
+
+/**
+ * The WATCH PAGE a YouTube CDN url belongs to, if the caller told us.
+ *
+ * The extension normally forwards it (`pageUrl`, `meta.pageUrl`, or the
+ * Referer it captured). A bare CDN origin ("https://www.youtube.com/") is not
+ * enough to resolve anything, so it is rejected.
+ */
+function youtubePageUrlFor(body, headers) {
+  const b = body || {};
+  const m = (b.meta && typeof b.meta === 'object') ? b.meta : {};
+  const candidates = [
+    b.pageUrl, b.url, m.pageUrl, m.ytUrl, b.referrer, b.referer,
+    headers && (headers.Referer || headers.referer),
+  ];
+  for (const c of candidates) {
+    if (!c || typeof c !== 'string') continue;
+    try {
+      if (resolvers.youtubeResolver.isYouTubeUrl(c)) return c;
+    } catch (e) { /* not a YouTube page */ }
+  }
+  return null;
 }
 
 /**
@@ -163,25 +220,12 @@ class IPCServer {
       // POST /api/download — submit a single download
       // Body: { url, filename?, savePath?, segments?, quality?, meta?, headers? }
       if (req.method === 'POST' && req.url === '/api/download') {
-        this._readBody(req).then((body) => {
+        this._readBody(req).then(async (body) => {
           try {
             const data = JSON.parse(body);
-            if (!data.url || typeof data.url !== 'string') {
-              throw new Error('Missing url');
-            }
-            const download = this.dm.addDownload({
-              url: data.url,
-              filename: data.filename,
-              savePath: data.savePath,
-              segments: data.segments,
-              quality: data.quality,
-              meta: data.meta,
-              headers: sanitizeHeaders(data.headers),
-              cookies: typeof data.cookies === 'string' && data.cookies.length < 32768 ? data.cookies : null,
-              audioUrl: typeof data.audioUrl === 'string' && data.audioUrl.length < 4096 ? data.audioUrl : null,
-            });
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ success: true, duplicate: !!download.duplicate, download }));
+            const r = await this._routeDownload(data);
+            res.writeHead(r.statusCode, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(r.body));
           } catch (err) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: err.message }));
@@ -199,10 +243,25 @@ class IPCServer {
         this._readBody(req).then((body) => {
           try {
             const data = JSON.parse(body);
+            // The extension's variant list can still carry the player's own
+            // googlevideo URLs (its filter only ever covered /videoplayback,
+            // and only for the capsule list). Showing one in the picker is a
+            // dead click: the row it creates is refused or produces the
+            // 31-byte / HTTP 204 failure. Drop them here too — same rule as
+            // the /api/download guard.
+            const videos = Array.isArray(data.videos)
+              ? data.videos.filter(v => !v || !isYouTubeMediaUrl(v.url))
+              : [];
+            if (!videos.length) {
+              // Nothing playable left — don't open an empty picker.
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: true, count: 0, filtered: (data.videos || []).length }));
+              return;
+            }
             // Forward to UI so it can show a quality picker
-            this.dm.emit('video-detected', data);
+            this.dm.emit('video-detected', { ...data, videos });
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ success: true, count: (data.videos || []).length }));
+            res.end(JSON.stringify({ success: true, count: videos.length }));
           } catch (err) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: err.message }));
@@ -419,9 +478,74 @@ class IPCServer {
         return;
       }
 
+      // POST /api/remove — drop a row by id. Symmetric with the IPC
+      // remove-download handler. Without this, an extension or automated
+      // harness cannot clean up rows it created — leaving stale rows that
+      // the user has no way to dismiss from outside the renderer.
+      if (req.method === 'POST' && req.url === '/api/remove') {
+        this._readBody(req).then((body) => {
+          try {
+            const { id } = JSON.parse(body);
+            if (!id || typeof id !== 'string') throw new Error('Missing id');
+            this.dm.removeDownload(id);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true }));
+          } catch (err) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: err.message }));
+          }
+        }).catch((err) => {
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        });
+        return;
+      }
+
+      // POST /api/cancel — cancel an in-flight row by id (keeps the row,
+      // status='cancelled'). Symmetric with IPC cancel-download.
+      if (req.method === 'POST' && req.url === '/api/cancel') {
+        this._readBody(req).then((body) => {
+          try {
+            const { id } = JSON.parse(body);
+            if (!id || typeof id !== 'string') throw new Error('Missing id');
+            const dl = this.dm.cancelDownload(id);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, download: dl }));
+          } catch (err) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: err.message }));
+          }
+        }).catch((err) => {
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        });
+        return;
+      }
+
+      // POST /api/reject — reject a pending download (drops the row).
+      // Symmetric with IPC reject-download.
+      if (req.method === 'POST' && req.url === '/api/reject') {
+        this._readBody(req).then((body) => {
+          try {
+            const { id } = JSON.parse(body);
+            if (!id || typeof id !== 'string') throw new Error('Missing id');
+            this.dm.rejectDownload(id);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true }));
+          } catch (err) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: err.message }));
+          }
+        }).catch((err) => {
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        });
+        return;
+      }
+
       // POST /api/batch — submit multiple URLs
       if (req.method === 'POST' && req.url === '/api/batch') {
-        this._readBody(req).then((body) => {
+        this._readBody(req).then(async (body) => {
           try {
             const parsed = JSON.parse(body);
             const { urls } = parsed;
@@ -429,13 +553,21 @@ class IPCServer {
               throw new Error('urls must be a non-empty array (max 200)');
             }
             const batchHeaders = sanitizeHeaders(parsed.headers);
-            const results = urls.map(url => {
+            // Same routing as /api/download per URL — otherwise a batch
+            // could turn a googlevideo URL or a YouTube page URL into a
+            // plain row, exactly the bug class the single endpoint already
+            // guards against.
+            const results = await Promise.all(urls.map(async (url) => {
               try {
-                return this.dm.addDownload({ url, headers: batchHeaders });
+                const r = await this._routeDownload({ url, headers: batchHeaders });
+                // Surface the URL alongside non-success results so the caller
+                // can tell which entry failed.
+                if (r.body && r.body.success === false) return { url, ...r.body };
+                return { url, ...r.body };
               } catch (err) {
-                return { error: err.message, url };
+                return { url, error: (err && err.message) || String(err) };
               }
-            });
+            }));
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: true, downloads: results }));
           } catch (err) {
@@ -472,6 +604,123 @@ class IPCServer {
       this.server = null;
     }
   }
+
+  /**
+   * Route ONE download request through the same guards /api/download uses.
+   *
+   * Returns `{ statusCode, body }`. HTTP callers (single + batch) write the
+   * body and the status; the routing logic lives here so both endpoints
+   * share it. Branches, in order:
+   *
+   *   1. googlevideo URL → refuse (no page URL) or reroute to picker (with
+   *      page URL). Never creates a plain row.
+   *   2. Page URL the resolver registry recognises → resolve and emit
+   *      video-detected. Exception: caller already picked a quality
+   *      (meta.ytFormat set) → fall through to addDownload.
+   *   3. Anything else → addDownload (a real file URL, a hoster reply, …).
+   *
+   * Errors thrown by the underlying machinery (resolver, addDownload)
+   * bubble; the caller decides how to render them.
+   */
+  async _routeDownload(data) {
+    if (!data || !data.url || typeof data.url !== 'string') {
+      return { statusCode: 400, body: { error: 'Missing url' } };
+    }
+    const headers = sanitizeHeaders(data.headers);
+
+    // ── googlevideo host: any path. Player-side endpoint, never a file. ──
+    if (isYouTubeMediaUrl(data.url)) {
+      const pageUrl = youtubePageUrlFor(data, headers);
+      const refuse = (msg) => ({ statusCode: 200, body: { success: false, youtubeCdn: true, error: msg } });
+      if (!pageUrl) {
+        return refuse('This is a YouTube media stream, not a downloadable ' +
+          'file — AiDM will not save it as a 31-byte video. Open the ' +
+          "video's page and download it from there (the page URL is " +
+          'what AiDM needs to build real qualities).');
+      }
+      if (!RESOLVE_LIMITERS['/api/resolve-youtube']?.allow()) {
+        return { statusCode: 429, body: { success: false, youtubeCdn: true, error: 'Too many resolve requests — try again in a minute' } };
+      }
+      const r = await resolvers.resolveMedia(pageUrl, {
+        cookies: typeof data.cookies === 'string' ? data.cookies : null,
+        referer: pageUrl,
+        cookiesFromBrowser: this._youtubeCookiesFromBrowser(),
+      });
+      const payload = {
+        url: r.canonicalUrl || pageUrl,
+        pageUrl: r.canonicalUrl || pageUrl,
+        pageTitle: (data.meta && data.meta.pageTitle) || r.title || 'YouTube video',
+        provider: 'youtube',
+        thumbnail: r.thumbnail || undefined,
+        duration: r.duration || undefined,
+        videos: r.pickerVideos || [],
+      };
+      this.dm.emit('video-detected', payload);
+      return { statusCode: 200, body: { success: true, rerouted: 'youtube', provider: 'youtube', id: r.id, videos: payload.videos } };
+    }
+
+    // ── Page URL routing (YouTube / Twitter / Facebook). ──
+    if (resolvers.hasResolverFor(data.url)) {
+      const ytFormat = (data.meta && data.meta.ytFormat && typeof data.meta.ytFormat === 'object')
+        ? data.meta.ytFormat : null;
+      if (!ytFormat) {
+        if (!RESOLVE_LIMITERS['/api/download']?.allow()) {
+          return { statusCode: 429, body: { success: false, resolveFailed: true, error: 'Too many resolve requests — try again in a minute' } };
+        }
+        try {
+          const resolved = await resolvers.resolveMedia(data.url, {
+            cookies: typeof data.cookies === 'string' ? data.cookies : null,
+            referer: (data.meta && data.meta.pageUrl) || data.url,
+            cookiesFromBrowser: this._youtubeCookiesFromBrowser(),
+          });
+          if (!resolved.pickerVideos || !resolved.pickerVideos.length) {
+            return { statusCode: 200, body: {
+              success: false, resolveFailed: true,
+              provider: resolved.provider,
+              waitSeconds: resolved.waitSeconds || 0,
+              requiresCredentials: !!resolved.requiresCredentials,
+              error: resolved.hint || resolved.error ||
+                `No downloadable file was found on this ${resolved.provider || 'page'}.`,
+            } };
+          }
+          const pageUrl = resolved.canonicalUrl || data.url;
+          this.dm.emit('video-detected', {
+            url: pageUrl,
+            pageUrl,
+            pageTitle: (data.meta && data.meta.pageTitle) || resolved.title || `${resolved.provider} video`,
+            provider: resolved.provider,
+            thumbnail: resolved.thumbnail || undefined,
+            duration: resolved.duration || undefined,
+            videos: resolved.pickerVideos,
+          });
+          return { statusCode: 200, body: { success: true, resolved: true, provider: resolved.provider, id: resolved.id, videos: resolved.pickerVideos } };
+        } catch (e) {
+          return { statusCode: 200, body: { success: false, resolveFailed: true, error: (e && e.message) || 'Could not resolve this page URL' } };
+        }
+      }
+      // ytFormat present → caller picked; fall through to addDownload.
+    }
+
+    const download = this.dm.addDownload({
+      url: data.url,
+      filename: data.filename,
+      savePath: data.savePath,
+      segments: data.segments,
+      quality: data.quality,
+      meta: data.meta,
+      headers,
+      cookies: typeof data.cookies === 'string' && data.cookies.length < 32768 ? data.cookies : null,
+      audioUrl: typeof data.audioUrl === 'string' && data.audioUrl.length < 4096 ? data.audioUrl : null,
+    });
+    return { statusCode: 200, body: { success: true, duplicate: !!download.duplicate, download } };
+  }
 }
 
-module.exports = { IPCServer };
+module.exports = {
+  IPCServer,
+  // Pure helpers — exported so the YouTube CDN guard is regression-tested
+  // without booting the HTTP server (see test/server-youtube-cdn-guard.js).
+  isYouTubeMediaUrl,
+  youtubePageUrlFor,
+  sanitizeHeaders,
+};

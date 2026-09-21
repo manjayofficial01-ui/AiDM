@@ -355,13 +355,18 @@ console.log('\n-- 7. cancel leaves no timers --');
     res.setHeader('Content-Length', String(end - start + 1));
     res.writeHead(r ? 206 : 200);
     let pos = start;
+    // Drip slowly and in small chunks: this test cancels mid-flight, so the
+    // transfer must still be running when the cancel lands. At the old
+    // 16 KB / 20 ms the whole 512 KB finished inside the 400 ms wait on a
+    // fast (or lightly loaded) machine and the "cancel" assertions below
+    // measured a completed download instead — a flaky suite, not a real bug.
     const timer = setInterval(() => {
       if (pos > end || res.destroyed) { clearInterval(timer); try { res.end(); } catch (e) {} return; }
-      const len = Math.min(16 * 1024, end - pos + 1);
+      const len = Math.min(8 * 1024, end - pos + 1);
       res.write(payload.subarray(pos, pos + len));
       pos += len;
       if (pos > end) { clearInterval(timer); res.end(); }
-    }, 20);
+    }, 60);
     req.on('close', () => clearInterval(timer));
   });
   try {
@@ -379,7 +384,9 @@ console.log('\n-- 7. cancel leaves no timers --');
     let completed = false;
     task.on('completed', () => { completed = true; });
     const started = task.start();
-    await sleep(400);
+    // Wait for the state instead of guessing a fixed delay — a slow CI box and
+    // a fast desktop must both see "still downloading" here.
+    for (let i = 0; i < 100 && task.state !== 'downloading'; i++) await sleep(20);
     check('download is running before cancel', task.state === 'downloading', task.state);
     await task.cancel({ deleteFiles: true });
     await started;

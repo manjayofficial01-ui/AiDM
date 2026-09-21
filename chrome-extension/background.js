@@ -301,7 +301,6 @@ try {
     // Per-tab state must go with the tab — these maps were never cleaned
     // and grew for the whole browser session.
     tabNavAt.delete(tabId);
-    tabYtPage.delete(tabId);
     pruneResolvedCaches();
   });
 } catch (e) {}
@@ -404,11 +403,15 @@ function maybeResolveFacebook(url) {
 //
 // No cookies are attached: AiDM does not bypass login walls or bot checks.
 // A video that needs sign-in is reported as an error, never worked around.
-const YT_PAGE_URL_RE = /^https?:\/\/(?:www\.|m\.|music\.)?(?:youtube\.com\/(?:watch\?(?:[^#]*[?&])?v=|shorts\/|embed\/|live\/|v\/)|youtube-nocookie\.com\/embed\/|youtu\.be\/)[A-Za-z0-9_-]{11}/i;
+// Any *.youtube.com host — www / m / music / gaming … — plus youtube-nocookie
+// embeds and youtu.be short links. The host must be followed by a path that
+// pins ONE video: watch?v=…, /shorts/, /embed/, /live/, /v/, /e/, or /clip/
+// (clip ids are long, hence their own branch). A lookalike such as
+// www.youtube.com.evil.com cannot match: after the optional single label the
+// literal "youtube.com" must be followed by "/".
+const YT_PAGE_URL_RE = /^https?:\/\/(?:(?:[\w-]+\.)?youtube\.com\/(?:watch\?(?:[^#]*[?&])?v=|shorts\/|embed\/|live\/|v\/|e\/)[A-Za-z0-9_-]{11}|(?:[\w-]+\.)?youtube\.com\/clip\/[A-Za-z0-9_-]{16,}|(?:www\.)?youtube-nocookie\.com\/embed\/[A-Za-z0-9_-]{11}|youtu\.be\/[A-Za-z0-9_-]{11})/i;
 const resolvedYtPages = new Map(); // pageUrl -> last attempt time
 const YT_RETRY_MS = 60 * 1000;
-const tabYtPage = new Map();       // tabId -> true while the tab shows YouTube
-// tabYtPage values are booleans, not timestamps — pruning uses a set copy.
 function pruneResolvedCaches() {
   const cutoff = Date.now() - RESOLVED_TTL_MS;
   const prune = (m) => {
@@ -463,11 +466,9 @@ try {
     // Referer), making AiDM appear broken on those sites.
     if (changeInfo.status === 'loading') {
       tabStreams.delete(tabId);
-      tabYtPage.delete(tabId);
       tabNavAt.set(tabId, Date.now());
     }
     if (changeInfo.status === 'complete' && tab && tab.url) {
-      if (isYouTubePageUrl(tab.url)) tabYtPage.set(tabId, true);
       maybeResolveTweet(tab.url);
       maybeResolveFacebook(tab.url);
       maybeResolveYouTube(tab.url);
@@ -485,10 +486,6 @@ try {
     chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
       try {
         if (!details || details.frameId !== 0 || !details.url) return;
-        // YouTube is an SPA: navigating to the next video never fires a load,
-        // so the "hide the player's own CDN urls" flag must follow pushState.
-        if (isYouTubePageUrl(details.url)) tabYtPage.set(details.tabId, true);
-        else tabYtPage.delete(details.tabId);
         // SPA navigations get no tabs.onUpdated 'loading' either, so the
         // tab's sniffed-stream history must be dropped here too — otherwise
         // the previous page's tokenized links keep resurfacing in the
@@ -515,19 +512,32 @@ function filterTabStreams(list, now, since, keepMs) {
     .map(e => e.url);
 }
 
-// Pure: on a YouTube page the desktop already offers real, MERGED qualities
-// (see maybeResolveYouTube), so the player's own CDN urls are hidden. They are
-// separate signed DASH tracks — picture-only or sound-only — that expire in
-// minutes, so clicking one in the capsule saves a silent or dead file.
-function dropYoutubeCdn(list, isYtPage) {
-  if (!isYtPage || !Array.isArray(list)) return list;
-  return list.filter(v => !v || !/googlevideo\.com\/videoplayback/i.test(v.url || ''));
+// Pure: anything served from googlevideo.com is dropped on EVERY page, not
+// only on a YouTube tab. These are player-side streaming endpoints —
+// /videoplayback (signed DASH tracks), /generate_204 (the connectivity probe
+// that returns 204 0 bytes), /initplayback, /anything. The desktop refuses
+// the same set unconditionally (guard in src/server.js) because saving one
+// produced 31-byte "completed" files for /videoplayback and "HTTP 204 failed"
+// rows for /generate_204. Offering one in the capsule can only ever be a
+// dead click; on a YouTube page the real, MERGED qualities come from
+// maybeResolveYouTube instead.
+//
+// It has to be unconditional: a YouTube player EMBEDDED in another site leaves
+// the tab url pointing at that site, so any per-tab "is this YouTube?" flag is
+// false exactly where the dead links are most tempting.
+function dropYoutubeCdn(list) {
+  if (!Array.isArray(list)) return list;
+  return list.filter(v => {
+    if (!v || !v.url) return true;
+    try {
+      return !/(^|\.)googlevideo\.com$/i.test(new URL(v.url).hostname || '');
+    } catch (e) { return true; }   // unparseable: keep rather than silently drop
+  });
 }
 
 function getTabStreams(tabId, since) {
   return dropYoutubeCdn(
-    filterTabStreams(tabStreams.get(tabId), Date.now(), since, STREAM_KEEP_MS),
-    !!tabYtPage.get(tabId)
+    filterTabStreams(tabStreams.get(tabId), Date.now(), since, STREAM_KEEP_MS)
   );
 }
 

@@ -126,6 +126,27 @@ function extractExpiry(url) {
 const BYTES = (f) => (f && (f.filesize || f.filesize_approx)) || 0;
 
 /**
+ * Size of a format, ESTIMATED when yt-dlp does not report one.
+ *
+ * Newer DASH itags (269, 230, 270 …) carry a real `tbr` but report
+ * `filesize: 0`. Reading the raw filesize alone collapsed every picker row to
+ * the audio track's size — 144p and 1080p showed the same number — and the
+ * same wrong value is what feeds `expectedBytes`, so the progress bar ran on
+ * a total that ignored the whole video track. `tbr x duration` is the same
+ * estimate yt-dlp itself uses to fill `filesize_approx`.
+ *
+ * Pure: no duration (or no bitrate) means "unknown", never a guess.
+ */
+function estimatedBytes(f, durationSec) {
+  const known = BYTES(f);
+  if (known > 0) return known;
+  const tbr = Number(f && f.tbr) || 0;      // kbit/s
+  const dur = Number(durationSec) || 0;     // seconds
+  if (tbr > 0 && dur > 0) return Math.round((tbr * 1000 * dur) / 8);
+  return 0;
+}
+
+/**
  * How well an audio-only format fits an MP4 merge.
  *
  * M4A/AAC is what the MP4 container wants: yt-dlp can copy it in with no
@@ -200,6 +221,8 @@ function ensureAudioChoice(choice) {
  */
 function buildChoices(info, { maxChoices = 10, includeAudio = true } = {}) {
   const formats = Array.isArray(info && info.formats) ? info.formats : [];
+  // Only used to estimate a size yt-dlp left at 0 — see estimatedBytes().
+  const durationSec = Number(info && info.duration) || 0;
   const usable = formats.filter(f => f && f.url);
   const videos = usable.filter(f => f.vcodec && f.vcodec !== 'none' && f.height);
   const audios = usable.filter(f => f.acodec && f.acodec !== 'none' && (!f.vcodec || f.vcodec === 'none'));
@@ -230,7 +253,9 @@ function buildChoices(info, { maxChoices = 10, includeAudio = true } = {}) {
       formatId: f.format_id,
       audioFormatId: progressive ? null : (audio ? audio.format_id : null),
       ext: f.ext || (progressive ? 'mp4' : 'mp4'),
-      size: progressive ? BYTES(f) : BYTES(f) + BYTES(audio),
+      size: progressive
+        ? estimatedBytes(f, durationSec)
+        : estimatedBytes(f, durationSec) + estimatedBytes(audio, durationSec),
       hasAudioSource: !progressive && !!audio,
       // Only a progressive URL is a usable FILE url. A DASH video track is
       // picture-only — exposing it would let the row (or a stale retry) save a
@@ -267,7 +292,29 @@ function buildChoices(info, { maxChoices = 10, includeAudio = true } = {}) {
       formatId: 'bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio',
       audioFormatId: null,
       ext: 'm4a',
-      size: BYTES(audio),
+      size: estimatedBytes(audio, durationSec),
+      hasAudioSource: true,
+      resolution: undefined,
+      url: null,
+      extractedAt: Date.now(),
+      expiresAt: null,
+    });
+
+    // MP3, offered as its own choice rather than replacing the M4A pick.
+    // YouTube's audio is AAC/Opus and plays fine almost everywhere, but MP3
+    // is what people mean by "a file that works anywhere" — car stereos, old
+    // phones, video editors. It costs one re-encode (FFmpeg, already
+    // bundled), so it is the user's call, never the default.
+    choices.push({
+      score: -2,
+      height: 0,
+      progressive: false,
+      audioOnly: true,
+      mp3: true,
+      formatId: 'bestaudio/best',
+      audioFormatId: null,
+      ext: 'mp3',
+      size: estimatedBytes(audio, durationSec),
       hasAudioSource: true,
       resolution: undefined,
       url: null,
@@ -331,9 +378,25 @@ function choiceExt(choice) {
   return 'mp4';
 }
 
+/**
+ * Extra yt-dlp arguments a choice needs BEYOND its `-f` spec.
+ *
+ * It lives next to buildFormatSpec on purpose: the picker and the downloader
+ * must never disagree about what a choice means. A choice that only sets `-f`
+ * returns [] and changes nothing.
+ *
+ * Only ever real argv entries — never a shell string, so a crafted title or
+ * URL can never inject a flag.
+ */
+function buildExtraArgs(choice) {
+  const c = choice || {};
+  if (c.mp3) return ['--extract-audio', '--audio-format', 'mp3'];
+  return [];
+}
+
 function choiceLabel(choice) {
   if (!choice) return 'Best';
-  if (choice.audioOnly) return 'Audio';
+  if (choice.audioOnly) return choice.mp3 ? 'Audio (MP3)' : 'Audio';
   // Only the REAL height of the winning format — never a defaulted or stale
   // one, and never a value derived from a guessed width.
   const h = Number(choice.height) || 0;
@@ -568,6 +631,7 @@ module.exports = {
   extractExpiry,
   buildChoices,
   buildFormatSpec,
+  buildExtraArgs,
   choiceExt,
   choiceLabel,
   isChoiceFresh,

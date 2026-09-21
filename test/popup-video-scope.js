@@ -159,8 +159,10 @@ check('interceptor clears sentUrls on pushState/replaceState',
 
 // ── 7. background per-tab map hygiene ───────────────────────────────────────
 const bgSrc = fs.readFileSync(path.join(ROOT, 'chrome-extension', 'background.js'), 'utf8');
-check('tab close clears tabNavAt + tabYtPage',
-  /tabNavAt\.delete\(tabId\);/.test(bgSrc) && /tabYtPage\.delete\(tabId\);/.test(bgSrc));
+check('tab close clears the per-tab maps',
+  /tabStreams\.delete\(tabId\);/.test(bgSrc) &&
+  /tabNavAt\.delete\(tabId\);/.test(bgSrc) &&
+  /tabDashActive\.delete\(tabId\);/.test(bgSrc));
 check('resolved caches are TTL-pruned', /pruneResolvedCaches\(\);/.test(bgSrc));
 
 console.log(`\npopup-video-scope: ${pass} passed, ${fail} failed`);

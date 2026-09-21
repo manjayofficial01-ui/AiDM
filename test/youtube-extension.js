@@ -62,6 +62,10 @@ if (!m) {
     ['nocookie embed', 'https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ'],
     ['youtu.be', 'https://youtu.be/dQw4w9WgXcQ'],
     ['youtu.be + si', 'https://youtu.be/dQw4w9WgXcQ?si=abc123'],
+    ['gaming subdomain', 'https://gaming.youtube.com/watch?v=dQw4w9WgXcQ'],
+    ['any youtube subdomain', 'https://m.youtube.com/shorts/dQw4w9WgXcQ'],
+    ['/e/ embed', 'https://www.youtube.com/e/dQw4w9WgXcQ'],
+    ['clip (long id)', 'https://www.youtube.com/clip/UgkxABCDEFGhijklmnop'],
   ]) {
     check('accepts ' + label, isYt(url));
   }
@@ -75,8 +79,11 @@ if (!m) {
     ['results', 'https://www.youtube.com/results?search_query=x'],
     ['sniffed DASH url', 'https://rr3---sn-abc.googlevideo.com/videoplayback?expire=1700000000&itag=137'],
     ['lookalike host', 'https://www.youtube.com.evil.com/watch?v=dQw4w9WgXcQ'],
+    ['lookalike suffix', 'https://youtube.com.evil.com/watch?v=dQw4w9WgXcQ'],
+    ['notyoutube.com', 'https://notyoutube.com/watch?v=dQw4w9WgXcQ'],
     ['facebook watch', 'https://www.facebook.com/watch/?v=1234567890'],
     ['short id', 'https://www.youtube.com/watch?v=dQw4w9Wg'],
+    ['clip with short id', 'https://www.youtube.com/clip/UgkxABC'],
     ['empty', ''],
   ]) {
     check('rejects ' + label, !isYt(url));
@@ -135,28 +142,40 @@ if (!m) {
 
   // ── 4. Hiding the player's own CDN urls on a YouTube page ─────────────────
 
-  console.log('\nCapsule: no silent DASH rows');
-  const db = /function dropYoutubeCdn\(list, isYtPage\) \{([\s\S]*?)\n\}/.exec(bg);
+  console.log('\nCapsule: no silent googlevideo rows');
+  const db = /function dropYoutubeCdn\(list\) \{([\s\S]*?)\n\}/.exec(bg);
   check('dropYoutubeCdn exists in shipped background.js', !!db);
   if (db) {
-    const drop = new Function('list', 'isYtPage', db[1]);
-    const dash = [
+    const drop = new Function('list', db[1]);
+    // The user's actual bug class: googlevideo.com hosts ALL player-side
+    // streaming endpoints — /videoplayback (DASH tracks), /generate_204
+    // (the connectivity probe the live screenshot hit, returns 204 0 bytes),
+    // /initplayback, /anything. They are NEVER files. Saving one was the
+    // 31-byte "completed" bug for /videoplayback and the HTTP 204 "failed"
+    // bug for /generate_204.
+    const all = [
       { url: 'https://rr3---sn-abc.googlevideo.com/videoplayback?itag=137' },
       { url: 'https://rr3---sn-abc.googlevideo.com/videoplayback?itag=140' },
+      { url: 'https://rr11---sn-fapo3ox25a-3uhy.googlevideo.com/generate_204?foo' },
+      { url: 'https://rr1---sn-abc.googlevideo.com/initplayback' },
+      { url: 'https://rr1---sn-abc.googlevideo.com/whatever/else' },
     ];
-    check('drops the player DASH urls on a YouTube page', drop(dash, true).length === 0);
-    check('keeps them elsewhere (non-YouTube page)', drop(dash, false).length === 2);
+    check('drops every googlevideo.com url (videoplayback, generate_204, initplayback, any path)', drop(all).length === 0);
+    // Unconditional: a player EMBEDDED in another site leaves the tab url on
+    // that site, so a per-tab "is this YouTube?" flag is false exactly where
+    // these dead links are most tempting.
+    check('drops them off YouTube too (embedded player)', drop(all).length === 0);
+    check('a googlevideo look-alike host is NOT dropped (would be a real bug to hide it)',
+      drop([{ url: 'https://googlevideo.com.evil.example/x' }]).length === 1);
     check('leaves unrelated urls alone',
-      drop([{ url: 'https://cdn.example.com/clip.mp4' }], true).length === 1);
-    check('tolerates null / non-array input', drop(null, true) === null && drop('x', true) === 'x');
+      drop([{ url: 'https://cdn.example.com/clip.mp4' }]).length === 1);
+    check('tolerates null / non-array input', drop(null) === null && drop('x') === 'x');
   }
-  check('getTabStreams applies the filter', /return dropYoutubeCdn\([\s\S]{0,160}tabYtPage\.get\(tabId\)/.test(bg));
-  check('per-tab flag declared', /const tabYtPage = new Map\(\)/.test(bg));
-  check('flag set on a completed YouTube navigation',
-    /if \(isYouTubePageUrl\(tab\.url\)\) tabYtPage\.set\(tabId, true\)/.test(bg));
-  check('flag cleared on navigation start', /tabStreams\.delete\(tabId\);\s*\n\s*tabYtPage\.delete\(tabId\);/.test(bg));
-  check('flag follows SPA navigation both ways',
-    /if \(isYouTubePageUrl\(details\.url\)\) tabYtPage\.set\(details\.tabId, true\);\s*\n\s*else tabYtPage\.delete\(details\.tabId\)/.test(bg));
+  check('getTabStreams applies the filter',
+    /return dropYoutubeCdn\(\s*\n?\s*filterTabStreams\(/.test(bg));
+  check('filter is unconditional — takes no page flag',
+    /function dropYoutubeCdn\(list\) \{/.test(bg) && !/dropYoutubeCdn\([^)]*isYtPage/.test(bg));
+  check('no dead per-tab YouTube flag left behind', !/tabYtPage/.test(bg));
 
   check('resolver registry supports the watch url it will be sent',
     require('../src/resolvers').findResolver('https://www.youtube.com/watch?v=dQw4w9WgXcQ') !== null);

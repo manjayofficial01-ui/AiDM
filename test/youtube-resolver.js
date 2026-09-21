@@ -130,12 +130,21 @@ const INFO = {
 
 const videoChoices = yt.buildChoices(INFO).filter(c => !c.audioOnly);
 const choices = yt.buildChoices(INFO);
-eq('one choice per height (+ audio)', choices.length, 4);
-eq('audio-only choice is last', choices[3].audioOnly, true);
+eq('one choice per height (+ m4a audio + mp3 audio)', choices.length, 5);
+eq('audio-only choice is last', choices[4].audioOnly, true);
 eq('audio spec prefers m4a', choices[3].formatId, 'bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio');
 eq('audio choice is named m4a', yt.choiceExt(choices[3]), 'm4a');
 eq('audio choice is labelled Audio', yt.choiceLabel(choices[3]), 'Audio');
 eq('audio choice is never "fresh" (needs yt-dlp)', yt.isChoiceFresh(choices[3]), false);
+
+// ── MP3 choice (the pick that needs post-processing, not just a -f spec) ──
+eq('MP3 choice comes after the m4a one', choices[4].mp3, true);
+eq('MP3 choice is labelled', yt.choiceLabel(choices[4]), 'Audio (MP3)');
+eq('MP3 choice is named .mp3', yt.choiceExt(choices[4]), 'mp3');
+eq('MP3 choice asks yt-dlp to re-encode',
+  yt.buildExtraArgs(choices[4]).join(' '), '--extract-audio --audio-format mp3');
+eq('a normal video choice needs no extra args', yt.buildExtraArgs(choices[0]).length, 0);
+eq('a missing choice needs no extra args', yt.buildExtraArgs(null).length, 0);
 eq('best first', videoChoices[0].height, 1080);
 eq('720p second', videoChoices[1].height, 720);
 eq('360p progressive single file', videoChoices[2].progressive, true);
@@ -143,6 +152,26 @@ eq('1080p is a DASH pair', choices[0].progressive, false);
 eq('1080p picks mp4 over webm at the same height', choices[0].formatId, '137');
 eq('1080p pairs the m4a audio (no re-encode)', choices[0].audioFormatId, '140');
 eq('DASH size = video + audio', choices[0].size, 94_000_000);
+
+// Newer DASH itags (269/230/270) carry a bitrate but report filesize 0.
+// Reading the raw filesize collapsed every row to the audio size alone —
+// 144p and 1080p showed the same number — and the same value feeds the
+// progress bar, so the estimate matters, not just the label.
+eq('size is estimated from bitrate when filesize is 0',
+  yt.buildChoices({
+    duration: 100,
+    formats: [
+      { format_id: '270', ext: 'mp4', vcodec: 'avc1.640033', acodec: 'none', height: 1080, width: 1920, filesize: 0, tbr: 800, url: 'https://x/v' },
+      { format_id: '140', ext: 'm4a', acodec: 'mp4a.40.2', vcodec: 'none', filesize: 4_000_000, abr: 128, url: 'https://x/a' },
+    ],
+  })[0].size, 4_000_000 + Math.round((800 * 1000 * 100) / 8));
+eq('no duration and no filesize → the size stays unknown, never invented',
+  yt.buildChoices({
+    formats: [
+      { format_id: '270', ext: 'mp4', vcodec: 'avc1', acodec: 'none', height: 1080, width: 1920, filesize: 0, tbr: 800, url: 'https://x/v' },
+      { format_id: '140', ext: 'm4a', acodec: 'mp4a.40.2', vcodec: 'none', filesize: 4_000_000, abr: 128, url: 'https://x/a' },
+    ],
+  })[0].size, 4_000_000);
 eq('progressive carries no audio id', choices[2].audioFormatId, null);
 eq('format spec: progressive is one id', yt.buildFormatSpec(choices[2]), '18');
 eq('format spec: DASH is video+audio', yt.buildFormatSpec(choices[0]), '137+140');
@@ -187,8 +216,10 @@ async function fallbackTests() {
 
 console.log('\nPicker payload');
 const picker = yt.toPickerVideos(INFO, { canonicalUrl: CANON, id: 'dQw4w9WgXcQ', title: INFO.title });
-eq('one row per choice (incl. audio)', picker.length, 4);
-eq('audio row is last and labelled', picker[3].quality, 'Audio');
+eq('one row per choice (incl. both audio picks)', picker.length, 5);
+eq('audio row is labelled', picker[3].quality, 'Audio');
+eq('MP3 row is last and labelled', picker[4].quality, 'Audio (MP3)');
+eq('MP3 row is named .mp3', picker[4].filename, 'Never Gonna Give You Up.mp3');
 eq('audio row is named .m4a', picker[3].filename, 'Never Gonna Give You Up.m4a');
 eq('audio row carries no resolution', picker[3].resolution, undefined);
 eq('quality label', picker[0].quality, '1080p');
@@ -243,6 +274,24 @@ eq('stale quality', ytdlp.classifyError('Requested format is not available').cod
 eq('ffmpeg merge', ytdlp.classifyError('ERROR: Postprocessing: ffmpeg exited').code, 'merge');
 eq('timeout', ytdlp.classifyError('timed out').code, 'timeout');
 eq('unknown → generic extract failure', ytdlp.classifyError('something odd').code, 'extract');
+
+// ── 6b. The failures users actually hit must NOT fall through to the generic
+//        "Extraction failed" line — that message names no cause and is the
+//        literal "it shows failed again" complaint.
+eq('nsig / player change → outdated (was: generic extract)',
+  ytdlp.classifyError('ERROR: nsig extraction failed: Some formats may be missing').code, 'outdated');
+eq('signature extraction → outdated',
+  ytdlp.classifyError('Signature extraction failed: Unable to extract player').code, 'outdated');
+eq('HTTP 403 → forbidden (was: generic extract)',
+  ytdlp.classifyError('ERROR: unable to download video data: HTTP Error 403: Forbidden').code, 'forbidden');
+eq('sign-in required → signin (was: generic extract)',
+  ytdlp.classifyError('ERROR: This video is only available for registered users. Sign in if you').code, 'signin');
+check('outdated error names the update command',
+  /fetch-yt-dlp/.test(ytdlp.classifyError('nsig extraction failed').message));
+check('403 error tells the user to retry / open in browser',
+  /403/.test(ytdlp.classifyError('HTTP Error 403: Forbidden').message));
+// The generic branch must still catch genuinely unclassifiable output.
+eq('still generic when nothing matches', ytdlp.classifyError('something odd').code, 'extract');
 
 // ── 7. Registry wiring ───────────────────────────────────────────────────────
 
@@ -477,12 +526,42 @@ try {
   ytdlp.detectRunner = async () => ({ argv: ['stub'], source: 'stub', version: 'stub' });
   const rowM = stubRow(HANDOFF_TMP);   // wants "Clip [1080p].mp4"
   ytdlp.download = async (o) => {
-    fs.writeFileSync(o.outputTemplate.replace('%(ext)s', 'mkv'), Buffer.alloc(256, 'v'));
+    fs.writeFileSync(o.outputTemplate.replace('%(ext)s', 'mkv'), Buffer.alloc(4096, 'v'));
     return { ok: true };
   };
   await DownloadManager.prototype._startYoutubeDownload.call(stubContext(rowM), rowM);
   eq('row keeps its name but takes the real container', path.basename(rowM.filepath), 'Clip [1080p].mkv');
   check('renamed file exists', fs.existsSync(rowM.filepath));
+
+  // 9e2b. An empty / stub output must NEVER be reported as completed.
+  //       This is the "31 bytes and it says 100% done" bug: a green row whose
+  //       file cannot be played. The row must say error and the junk removed.
+  const rowEmpty = stubRow(HANDOFF_TMP);
+  let emptyProduced = null;
+  ytdlp.download = async (o) => {
+    emptyProduced = o.outputTemplate.replace('%(ext)s', 'mp4');
+    fs.writeFileSync(emptyProduced, Buffer.alloc(0));
+    return { ok: true };
+  };
+  await DownloadManager.prototype._startYoutubeDownload.call(stubContext(rowEmpty), rowEmpty);
+  eq('a zero-byte output is an error, not "completed"', rowEmpty.status, 'error');
+  // The file THIS job produced must be gone. (A same-named file from an
+  // earlier case may still exist, so assert on the captured path, not the name.)
+  check('the empty file is removed instead of being kept as junk',
+    !!emptyProduced && !fs.existsSync(emptyProduced),
+    emptyProduced);
+  check('the reason is stated (not a bare "failed")',
+    /empty or incomplete/i.test(String(rowEmpty.error || '')), rowEmpty.error);
+  eq('empty output carries a no-output code', rowEmpty.ytErrorCode, 'no-output');
+
+  // A tiny stub (a 400-byte error page saved as .mp4) is caught the same way.
+  const rowTiny = stubRow(HANDOFF_TMP);
+  ytdlp.download = async (o) => {
+    fs.writeFileSync(o.outputTemplate.replace('%(ext)s', 'mp4'), Buffer.alloc(400, 'x'));
+    return { ok: true };
+  };
+  await DownloadManager.prototype._startYoutubeDownload.call(stubContext(rowTiny), rowTiny);
+  eq('a 400-byte stub is an error, not "completed"', rowTiny.status, 'error');
 
   // 9e3. Diagnostics: a redacted log for failures, and only for failures
   const LOGDIR = fs.mkdtempSync(path.join(os.tmpdir(), 'aidm-yt-logs-'));
@@ -522,7 +601,7 @@ try {
   ytdlp.download = async (o) => {
     ctxA._lastYtProgressPersist = Date.now() - 60000;   // force the 5s window open
     o.onProgress({ downloaded: 1000, total: 94_000_000, speed: 500_000, percent: 1, eta: 180 });
-    fs.writeFileSync(o.outputTemplate.replace('%(ext)s', 'mp4') + '.mp4', Buffer.alloc(512, 'v'));
+    fs.writeFileSync(o.outputTemplate.replace('%(ext)s', 'mp4') + '.mp4', Buffer.alloc(4096, 'v'));
     return { ok: true };
   };
   await DownloadManager.prototype._startYoutubeDownload.call(ctxA, rowA);
@@ -531,7 +610,7 @@ try {
   const rowB = stubRow(HANDOFF_TMP);
   const ctxB = stubContext(rowB);
   ytdlp.download = async (o) => {
-    fs.writeFileSync(o.outputTemplate.replace('%(ext)s', 'mp4') + '.mp4', Buffer.alloc(512, 'v'));
+    fs.writeFileSync(o.outputTemplate.replace('%(ext)s', 'mp4') + '.mp4', Buffer.alloc(4096, 'v'));
     return { ok: true };
   };
   await DownloadManager.prototype._startYoutubeDownload.call(ctxB, rowB);
