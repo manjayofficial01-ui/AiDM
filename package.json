@@ -1,7 +1,7 @@
 {
   "name": "aidm",
-  "version": "4.8.3",
-  "description": "AiDM v4.8.3 - AI-Powered Download Manager with keep-alive connection reuse, Jev link-triage fallback, and a hardened Facebook split-AV audio pairing",
+  "version": "4.9.0",
+  "description": "AiDM v4.9.0 - AI-Powered Download Manager with dark glass UI, DASH via yt-dlp, AI categorize/explain, export/import, and hardened resume + HLS probing",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -44,12 +44,14 @@
     "test:ui-dimensions": "node test/ui-dimensions.js",
     "test:playing-now": "node test/playing-now.js",
     "test:popup-video-scope": "node test/popup-video-scope.js",
-    "test": "node test/smoke.js && node test/integration.js && node test/engine-v4.js && node test/fb-dedup.js && node test/panel-freshness.js && node test/dead-link-guard.js && node test/mydaddy-title.js && node test/range-blocked.js && node test/embed-resolver.js && node test/scheduler.js && node test/interception.js && node test/grabber.js && node test/browser-engine.js && node test/capsule.js && node test/ui-layout.js && node test/facebook-panel.js && node test/row-accuracy.js && node test/facebook-junk.js && node test/av-tracks.js && node test/facebook-resolver.js && node test/twitter-resolver.js && node test/youtube-resolver.js && node test/youtube-extension.js && node test/media-probe.js && node test/filehost-resolver.js && node test/youtube-audio.js && node test/youtube-subtitles.js && node test/youtube-progress.js && node test/server-youtube-cdn-guard.js && node test/engine-reliability.js && node test/row-media.js && node test/ui-dimensions.js && node test/extension-dimensions.js && node test/playing-now.js && node test/popup-video-scope.js && node test/yt-dlp-cookies.js && node test/main-boot.js && node test/jev-classify.js && node test/engine-agents.js",
+    "test": "node test/smoke.js && node test/integration.js && node test/engine-v4.js && node test/fb-dedup.js && node test/panel-freshness.js && node test/dead-link-guard.js && node test/mydaddy-title.js && node test/range-blocked.js && node test/embed-resolver.js && node test/scheduler.js && node test/interception.js && node test/grabber.js && node test/browser-engine.js && node test/capsule.js && node test/ui-layout.js && node test/facebook-panel.js && node test/row-accuracy.js && node test/facebook-junk.js && node test/av-tracks.js && node test/facebook-resolver.js && node test/twitter-resolver.js && node test/youtube-resolver.js && node test/youtube-extension.js && node test/media-probe.js && node test/filehost-resolver.js && node test/youtube-audio.js && node test/youtube-subtitles.js && node test/youtube-progress.js && node test/server-youtube-cdn-guard.js && node test/engine-reliability.js && node test/row-media.js && node test/ui-dimensions.js && node test/extension-dimensions.js && node test/playing-now.js && node test/popup-video-scope.js && node test/yt-dlp-cookies.js && node test/main-boot.js && node test/jev-classify.js && node test/engine-agents.js && node test/ai-assist.js && node test/nl-vault.js",
     "test:extension-dimensions": "node test/extension-dimensions.js",
     "test:yt-dlp-cookies": "node test/yt-dlp-cookies.js",
     "test:main-boot": "node test/main-boot.js",
     "test:jev-classify": "node test/jev-classify.js",
-    "test:engine-agents": "node test/engine-agents.js"
+    "test:engine-agents": "node test/engine-agents.js",
+    "test:ai-assist": "node test/ai-assist.js",
+    "test:nl-vault": "node test/nl-vault.js"
   },
   "keywords": [
     "download-manager",

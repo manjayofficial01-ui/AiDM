@@ -179,13 +179,19 @@ function robustFetch(url, init = {}) {
         agent: agentFor(parsed, { insecure }),
       }, (res) => {
         responded = true;
-        // Follow redirects manually so we can re-apply DoH/TLS on the next hop
+        // Follow redirects manually so we can re-apply DoH/TLS on the next hop.
+        // Hop-capped: a redirect loop used to recurse forever and hang workers.
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && init.redirect !== 'manual') {
           jarNote(jar, res.headers);
           res.resume();
+          const hops = Number(init._redirectCount || 0) + 1;
+          if (hops > 10) {
+            settle(reject, new Error('Too many redirects'));
+            return;
+          }
           try {
             const next = new URL(res.headers.location, url).href;
-            robustFetch(next, { ...init, redirect: 'follow', _jar: jar }).then(
+            robustFetch(next, { ...init, redirect: 'follow', _jar: jar, _redirectCount: hops }).then(
               (v) => settle(resolve, v),
               (e) => settle(reject, e),
             );
@@ -675,6 +681,12 @@ class DownloadEngine extends EventEmitter {
       let onDisk = -1;
       try { onDisk = fs.statSync(outPath).size; } catch (e) { onDisk = -1; }
       if (knownTotal && ((info.bytes && info.bytes < knownTotal) || (onDisk >= 0 && onDisk < knownTotal))) {
+        // Incomplete bytes must not sit under the FINAL name as if complete.
+        // Park them as `.part` so the user sees a partial, not a corrupt file.
+        try {
+          const partial = outPath.endsWith('.part') ? outPath : outPath + '.part';
+          if (outPath !== partial && fs.existsSync(outPath)) fs.renameSync(outPath, partial);
+        } catch (e) { /* leave as-is if rename fails */ }
         this.emit('download-error', {
           id,
           error: `Download is incomplete: ${Math.min(info.bytes || onDisk, onDisk < 0 ? (info.bytes || 0) : onDisk)} of ${knownTotal} bytes written`,
@@ -1029,12 +1041,22 @@ class DownloadEngine extends EventEmitter {
     return this._probeFile(url, headers);
   }
 
+  /**
+   * Probe an HLS playlist for size / liveness / output container.
+   * Contract (read by download-manager `_resolveFilename`):
+   *   { totalSize, size, estimated, count, duration, isLive, container }
+   * `totalSize` and `size` are the same value (both names kept so older
+   * call sites and the manager's `hlsSize.totalSize` reads agree).
+   * `container` is 'mp4' when `#EXT-X-MAP` (fMP4) is present, else 'ts'.
+   * `isLive` is true when the media playlist has no `#EXT-X-ENDLIST`.
+   */
   async probeHlsSize(url, headers = {}) {
+    const empty = { size: 0, totalSize: 0, estimated: false, count: 0, duration: 0, isLive: false, container: 'ts' };
     try {
       const fetched = await this._fetchUrl(url, { headers });
       let text = fetched.text;
       let mediaUrl = fetched.finalUrl;
-      if (!/#EXTM3U/i.test(text)) return { size: 0, estimated: false, count: 0, duration: 0 };
+      if (!/#EXTM3U/i.test(text)) return empty;
 
       if (/#EXT-X-STREAM-INF/i.test(text)) {
         const variants = parseHlsMaster(text, mediaUrl);
@@ -1051,6 +1073,17 @@ class DownloadEngine extends EventEmitter {
       const parsed = parseHlsMedia(text, mediaUrl);
       const segCount = parsed.segs.length;
       const duration = sumHlsDuration(text);
+      const isLive = !/#EXT-X-ENDLIST/i.test(text);
+      const container = parsed.mapUri ? 'mp4' : 'ts';
+      const pack = (size, estimated) => ({
+        size,
+        totalSize: size,
+        estimated,
+        count: segCount,
+        duration,
+        isLive,
+        container,
+      });
       let totalRangeBytes = 0;
       let hasRanges = false;
       for (const s of parsed.segs) {
@@ -1060,7 +1093,7 @@ class DownloadEngine extends EventEmitter {
         }
       }
       if (hasRanges && totalRangeBytes > 0) {
-        return { size: totalRangeBytes, estimated: false, count: segCount, duration };
+        return pack(totalRangeBytes, false);
       }
 
       if (segCount > 0) {
@@ -1077,16 +1110,16 @@ class DownloadEngine extends EventEmitter {
         }
         if (samplesRead > 0) {
           const avg = sampleTotal / samplesRead;
-          return { size: Math.round(avg * segCount), estimated: true, count: segCount, duration };
+          return pack(Math.round(avg * segCount), true);
         }
       }
 
       if (duration > 0) {
-        return { size: Math.round(duration * 300 * 1024), estimated: true, count: segCount, duration };
+        return pack(Math.round(duration * 300 * 1024), true);
       }
-      return { size: 0, estimated: false, count: segCount, duration: 0 };
+      return pack(0, false);
     } catch (e) {
-      return { size: 0, estimated: false, count: 0, duration: 0 };
+      return empty;
     }
   }
 
@@ -1390,7 +1423,9 @@ class DownloadEngine extends EventEmitter {
       const parsed = parseHlsMedia(text, mediaUrl);
       const mediaSeq = parseHlsMediaSequence(text);
       if (!parsed.segs.length) return fail('Stream playlist contains no segments');
-      if (!isLive && parsed.segs.length > 20000) return fail('Stream too long (>20000 segments)');
+      // VOD playlists can legitimately exceed 20k segments (long DVR archives).
+      // Cap only pathological cases; live is bounded separately by maxSeconds.
+      if (!isLive && parsed.segs.length > 200000) return fail('Stream too long (>200000 segments)');
 
       const queue = [];
       const pushSegs = (segs, baseSeq) => {

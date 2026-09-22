@@ -1,5 +1,5 @@
 /**
- * AiDM v4.8.3 - UI Controller
+ * AiDM v4.9.0 - UI Controller
  * Features: Video quality picker, per-category paths, ask-every-time, auto-detection
  */
 
@@ -21,6 +21,7 @@ const searchInput = document.getElementById('search-input');
 document.addEventListener('DOMContentLoaded', async () => {
   downloads = await window.aidm.getDownloads();
   settings = await window.aidm.getSettings();
+  initTheme();
   setupEventListeners();
   setupIPCListeners();
   renderDownloads();
@@ -64,6 +65,33 @@ async function updateExtensionStatus() {
   }
 }
 
+// ── Theme (dark default; light via data-theme="light") ────────────────────────
+
+function initTheme() {
+  try {
+    const saved = localStorage.getItem('aidm-theme');
+    applyTheme(saved === 'light' ? 'light' : 'dark');
+  } catch (e) { /* stub / private mode */ }
+}
+
+function applyTheme(mode) {
+  const root = document.documentElement;
+  if (!root || !root.setAttribute) return;
+  if (mode === 'light') root.setAttribute('data-theme', 'light');
+  else root.setAttribute('data-theme', 'dark');
+  try { localStorage.setItem('aidm-theme', mode); } catch (e) {}
+}
+
+function toggleTheme() {
+  const root = document.documentElement;
+  let next = 'dark';
+  try {
+    next = (root && root.getAttribute && root.getAttribute('data-theme') === 'light') ? 'dark' : 'light';
+  } catch (e) { next = 'light'; }
+  applyTheme(next);
+  showNotification(next === 'light' ? 'Light theme' : 'Dark theme', 'info');
+}
+
 // ── Render Downloads ──────────────────────────────────────────────────────────
 
 // Progress events arrive up to ~5x/sec per active download (throttled in the
@@ -81,12 +109,59 @@ function scheduleProgressRender() {
   }, 250);
 }
 
+// ── Sortable columns (name / size / progress / speed / status) ────────────────
+
+let sortState = { col: null, dir: 1 }; // dir: 1 = ascending, -1 = descending
+
+const SORT_ACCESSORS = {
+  name: (d) => String(d.filename || '').toLowerCase(),
+  size: (d) => Number(d.totalSize) || 0,
+  progress: (d) => Number(d.percent) || 0,
+  speed: (d) => Number(d.speed) || 0,
+  status: (d) => String(d.status || ''),
+};
+
+function sortDownloads(list) {
+  const col = sortState.col;
+  if (!col || !SORT_ACCESSORS[col]) return list;
+  const get = SORT_ACCESSORS[col];
+  const dir = sortState.dir;
+  return [...list].sort((a, b) => {
+    const va = get(a), vb = get(b);
+    if (va < vb) return -dir;
+    if (va > vb) return dir;
+    return 0;
+  });
+}
+
+function updateSortHeaders() {
+  document.querySelectorAll('#download-table th[data-col]').forEach((th) => {
+    const ind = th.querySelector('[data-sort-ind]');
+    const active = sortState.col && th.dataset.col === sortState.col;
+    th.classList.toggle('sort-active', !!active);
+    if (ind) ind.textContent = active ? (sortState.dir === 1 ? '▲' : '▼') : '';
+  });
+}
+
+function toggleSort(col) {
+  if (!SORT_ACCESSORS[col]) return;
+  if (sortState.col === col) {
+    if (sortState.dir === 1) sortState.dir = -1;
+    else sortState = { col: null, dir: 1 };
+  } else {
+    sortState = { col, dir: 1 };
+  }
+  updateSortHeaders();
+  renderDownloads();
+}
+
 function renderDownloads() {
-  const filtered = filterDownloads(downloads);
+  const filtered = sortDownloads(filterDownloads(downloads));
   downloadList.innerHTML = '';
 
   if (filtered.length === 0) {
     emptyState.style.display = 'flex';
+    updateSelectionBar();
     return;
   }
   emptyState.style.display = 'none';
@@ -98,6 +173,16 @@ function renderDownloads() {
       console.error('Failed to render download row, skipping:', dl && dl.id, err);
     }
   });
+  updateSelectionBar();
+}
+
+function updateSelectionBar() {
+  const bar = document.getElementById('selection-bar');
+  if (!bar) return;
+  const n = selectedIds.size;
+  bar.style.display = n > 0 ? 'flex' : 'none';
+  const label = document.getElementById('selection-count');
+  if (label) label.textContent = n + ' selected';
 }
 
 // ── True media geometry on a row (v4.5) ──────────────────────────────────────
@@ -232,6 +317,9 @@ function renderDownloadRow(dl) {
     const qualityBadge = qualityBadgeHtml(dl);
     // True dimensions + silent-audio badge (see dimensionInfo/formatRowMeta)
     const mediaMeta = formatRowMeta(dl);
+    const isActive = dl.status === 'downloading' || dl.status === 'connecting';
+    const isDone = dl.status === 'completed';
+    const fillClass = isDone ? 'is-done' : (isActive ? 'is-active' : '');
 
     tr.innerHTML = `
       <td class="col-check"><input type="checkbox" ${selectedIds.has(dl.id) ? 'checked' : ''} /></td>
@@ -252,7 +340,7 @@ function renderDownloadRow(dl) {
       <td class="col-progress">
         <div class="progress-cell">
           <div class="progress-bar">
-            <div class="progress-fill" style="width:${percent}%"></div>
+            <div class="progress-fill ${fillClass}" style="width:${percent}%"></div>
           </div>
           <span class="progress-text">${percent}%</span>
         </div>
@@ -267,13 +355,14 @@ function renderDownloadRow(dl) {
       </td>
       <td class="col-actions">
         <div class="action-btns">
-          ${dl.status === 'downloading' ? `<button class="action-btn" data-action="pause" title="Pause">⏸</button>` : ''}
-          ${dl.status === 'paused' || dl.status === 'error' ? `<button class="action-btn" data-action="resume" title="Resume">▶</button>` : ''}
-          ${dl.status === 'pending-approval' ? `<button class="action-btn" data-action="approve" title="Choose folder">📁</button>` : ''}
-          ${dl.status === 'completed' ? `<button class="action-btn" data-action="open-file" title="Open">📂</button>` : ''}
-          ${dl.status === 'completed' ? `<button class="action-btn" data-action="open-folder" title="Open Folder">📁</button>` : ''}
-          ${dl.status === 'error' && dl.ytLogPath ? `<button class="action-btn" data-action="open-log" title="Open error log">📋</button>` : ''}
-          <button class="action-btn danger" data-action="remove" title="Remove">🗑</button>
+          ${dl.status === 'downloading' ? `<button class="action-btn" data-action="pause" title="Pause"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><use href="#i-pause"></use></svg></button>` : ''}
+          ${dl.status === 'paused' || dl.status === 'error' ? `<button class="action-btn" data-action="resume" title="Resume"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><use href="#i-play"></use></svg></button>` : ''}
+          ${dl.status === 'pending-approval' ? `<button class="action-btn" data-action="approve" title="Choose folder"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-folder"></use></svg></button>` : ''}
+          ${dl.status === 'completed' ? `<button class="action-btn" data-action="open-file" title="Open"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-external"></use></svg></button>` : ''}
+          ${dl.status === 'completed' ? `<button class="action-btn" data-action="open-folder" title="Open Folder"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-folder"></use></svg></button>` : ''}
+          ${dl.status === 'error' && dl.aiHint ? `<button class="action-btn" data-action="ai-hint" title="${escapeAttr(dl.aiHint)}"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><use href="#i-sparkles"></use></svg></button>` : ''}
+          ${dl.status === 'error' && dl.ytLogPath ? `<button class="action-btn" data-action="open-log" title="Open error log"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-clipboard"></use></svg></button>` : ''}
+          <button class="action-btn danger" data-action="remove" title="Remove from list (file stays on disk)"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-list-x"></use></svg></button>
         </div>
       </td>
     `;
@@ -299,6 +388,7 @@ function renderDownloadRow(dl) {
     tr.querySelector('input[type="checkbox"]').addEventListener('change', (e) => {
       if (Date.now() - marqueeEndTime < 350) { e.target.checked = !e.target.checked; return; }
       e.target.checked ? selectedIds.add(dl.id) : selectedIds.delete(dl.id);
+      updateSelectionBar();
     });
 
     tr.querySelectorAll('.action-btn').forEach(btn => {
@@ -338,24 +428,27 @@ function formatStatus(status) {
   return labels[status] || status;
 }
 
-function filterDownloads(list) {
-  let filtered = [...list];
-  switch (activeCategory) {
-    case 'all': break; // show everything: downloading, completed, queued, pending, errors
-    case 'downloading': filtered = filtered.filter(d => d.status === 'downloading' || d.status === 'connecting'); break;
-    case 'completed': filtered = filtered.filter(d => d.status === 'completed'); break;
-    case 'queued': filtered = filtered.filter(d => d.status === 'queued' || d.status === 'queued-paused'); break;
-    case 'pending': filtered = filtered.filter(d => d.status === 'pending-approval'); break;
-    case 'error': filtered = filtered.filter(d => d.status === 'error'); break;
-    case 'video': filtered = filtered.filter(d => d.category === 'video' || /\.(mp4|mkv|avi|mov|wmv|webm|flv|m4v)/i.test(d.filename || '')); break;
-    case 'audio': filtered = filtered.filter(d => d.category === 'audio' || /\.(mp3|wav|flac|aac|ogg|wma|m4a)/i.test(d.filename || '')); break;
-    case 'document': filtered = filtered.filter(d => d.category === 'document' || /\.(pdf|doc|docx|xls|xlsx|ppt|pptx|txt|csv)/i.test(d.filename || '')); break;
-    case 'archive': filtered = filtered.filter(d => d.category === 'archive' || /\.(zip|rar|7z|tar|gz|bz2)/i.test(d.filename || '')); break;
-    case 'software': filtered = filtered.filter(d => d.category === 'software' || /\.(exe|msi|dmg|deb|rpm|apk)/i.test(d.filename || '')); break;
-    case 'image': filtered = filtered.filter(d => d.category === 'image' || /\.(jpg|jpeg|png|gif|bmp|svg|webp|psd|ico)/i.test(d.filename || '')); break;
-    case 'other': filtered = filtered.filter(d => (d.category || 'other') === 'other'); break;
-    default: break; // unknown category → show all rather than nothing
+function matchCategory(d, category) {
+  switch (category) {
+    case 'all': return true;
+    case 'downloading': return d.status === 'downloading' || d.status === 'connecting';
+    case 'completed': return d.status === 'completed';
+    case 'queued': return d.status === 'queued' || d.status === 'queued-paused';
+    case 'pending': return d.status === 'pending-approval';
+    case 'error': return d.status === 'error';
+    case 'video': return d.category === 'video' || /\.(mp4|mkv|avi|mov|wmv|webm|flv|m4v)/i.test(d.filename || '');
+    case 'audio': return d.category === 'audio' || /\.(mp3|wav|flac|aac|ogg|wma|m4a)/i.test(d.filename || '');
+    case 'document': return d.category === 'document' || /\.(pdf|doc|docx|xls|xlsx|ppt|pptx|txt|csv)/i.test(d.filename || '');
+    case 'archive': return d.category === 'archive' || /\.(zip|rar|7z|tar|gz|bz2)/i.test(d.filename || '');
+    case 'software': return d.category === 'software' || /\.(exe|msi|dmg|deb|rpm|apk)/i.test(d.filename || '');
+    case 'image': return d.category === 'image' || /\.(jpg|jpeg|png|gif|bmp|svg|webp|psd|ico)/i.test(d.filename || '');
+    case 'other': return (d.category || 'other') === 'other';
+    default: return true;
   }
+}
+
+function filterDownloads(list) {
+  let filtered = list.filter(d => matchCategory(d, activeCategory));
   const query = searchInput.value.toLowerCase().trim();
   if (query) filtered = filtered.filter(d => (d.filename || '').toLowerCase().includes(query) || (d.url || '').toLowerCase().includes(query));
   return filtered;
@@ -394,6 +487,10 @@ async function handleAction(action, id) {
       const dl = downloads.find(d => d.id === id);
       if (dl) window.aidm.openFolder(dl.savePath);
       break;
+    }
+    case 'ai-hint': {
+      showNotification(dl.aiHint || 'No AI hint', 'info');
+      return;
     }
     case 'open-log': {
       // Redacted yt-dlp log for a failed YouTube download.
@@ -655,9 +752,10 @@ function toggleSidebar() {
   const collapsed = document.body.classList.toggle('sidebar-collapsed');
   const btn = document.getElementById('btn-sidebar-collapse');
   if (btn) {
-    btn.textContent = collapsed ? '▶' : '◀';
     btn.title = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
     btn.setAttribute('aria-label', collapsed ? 'Expand sidebar' : 'Collapse sidebar');
+    const svg = btn.querySelector('svg');
+    if (svg) svg.style.transform = collapsed ? 'rotate(0deg)' : 'rotate(180deg)';
   }
 }
 
@@ -817,6 +915,8 @@ function setupEventListeners() {
   document.getElementById('btn-minimize').addEventListener('click', () => window.aidm.minimize());
   document.getElementById('btn-maximize').addEventListener('click', () => window.aidm.maximize());
   document.getElementById('btn-close').addEventListener('click', () => window.aidm.close());
+  const themeBtn = document.getElementById('btn-theme');
+  if (themeBtn) themeBtn.addEventListener('click', toggleTheme);
 
   // Toolbar
   document.getElementById('btn-add-url').addEventListener('click', showAddModal);
@@ -829,6 +929,30 @@ function setupEventListeners() {
   document.getElementById('btn-scheduler').addEventListener('click', showSchedulerModal);
   document.getElementById('btn-sidebar-collapse').addEventListener('click', toggleSidebar);
   document.getElementById('btn-ai-assistant').addEventListener('click', showAiModal);
+
+  // Empty-state CTA
+  const emptyAdd = document.getElementById('btn-empty-add');
+  if (emptyAdd) emptyAdd.addEventListener('click', showAddModal);
+
+  // Selection action bar
+  const bindSel = (id, fn) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('click', fn);
+  };
+  bindSel('btn-sel-pause', async () => {
+    for (const id of selectedIds) await window.aidm.pauseDownload(id);
+  });
+  bindSel('btn-sel-resume', async () => {
+    for (const id of selectedIds) await window.aidm.resumeDownload(id);
+  });
+  bindSel('btn-sel-remove', removeSelectedFromList);
+  bindSel('btn-sel-delete', () => {
+    if (selectedIds.size > 0) showDeleteModal([...selectedIds]);
+  });
+  bindSel('btn-sel-clear', () => {
+    selectedIds.clear();
+    renderDownloads();
+  });
 
   // Sidebar
   document.querySelectorAll('.sidebar-item').forEach(item => {
@@ -845,6 +969,14 @@ function setupEventListeners() {
   document.getElementById('select-all').addEventListener('change', (e) => {
     e.target.checked ? downloads.forEach(d => selectedIds.add(d.id)) : selectedIds.clear();
     renderDownloads();
+  });
+
+  // Sortable column headers (skip resize handles)
+  document.querySelectorAll('#download-table th[data-sortable="1"]').forEach(th => {
+    th.addEventListener('click', (e) => {
+      if (e.target.closest('.col-resizer')) return;
+      toggleSort(th.dataset.col);
+    });
   });
 
   // Context menu
@@ -887,10 +1019,25 @@ function setupEventListeners() {
   document.getElementById('btn-sched-clear').addEventListener('click', clearSchedulerForm);
   document.getElementById('sched-type').addEventListener('change', updateSchedulerFormVisibility);
   document.getElementById('btn-save-settings').addEventListener('click', saveSettings);
+  const expBtn = document.getElementById('btn-export-downloads');
+  if (expBtn) expBtn.addEventListener('click', exportDownloadsJson);
+  const impBtn = document.getElementById('btn-import-downloads');
+  if (impBtn) impBtn.addEventListener('click', importDownloadsJson);
   document.getElementById('btn-ai-test').addEventListener('click', testAiConnection);
   document.getElementById('btn-browse-settings').addEventListener('click', async () => {
     const f = await window.aidm.selectFolder();
     if (f) document.getElementById('setting-savepath').value = f;
+  });
+
+  // Settings left-nav tabs
+  document.querySelectorAll('[data-settings-tab]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.settingsTab;
+      document.querySelectorAll('[data-settings-tab]').forEach(b => b.classList.toggle('active', b === btn));
+      document.querySelectorAll('[data-settings-pane]').forEach(p => {
+        p.classList.toggle('active', p.dataset.settingsPane === id);
+      });
+    });
   });
 
   // Category path browse buttons
@@ -970,9 +1117,23 @@ function hideAddModal() {
 }
 
 async function startNewDownload() {
-  const url = document.getElementById('input-url').value.trim();
-  if (!url) return;
+  const raw = document.getElementById('input-url').value.trim();
+  if (!raw) return;
 
+  // Multi-URL paste (one per line / whitespace): batch-add them all.
+  const urls = raw.split(/[\r\n]+/).map((s) => s.trim()).filter((s) => /^https?:\/\//i.test(s));
+  if (urls.length > 1) {
+    try {
+      const res = await window.aidm.batchUrls(urls);
+      showNotification(`Queued ${res.added} link(s)${res.skipped ? `, skipped ${res.skipped}` : ''}`, 'success');
+      hideAddModal();
+    } catch (e) {
+      showNotification(`Batch add failed: ${(e && e.message) || e}`, 'error');
+    }
+    return;
+  }
+
+  const url = urls[0] || raw;
   const filename = document.getElementById('input-filename').value.trim() || undefined;
   const savePath = document.getElementById('input-savepath').value.trim() || undefined;
   const segments = parseInt(document.getElementById('input-segments').value) || 8;
@@ -992,6 +1153,44 @@ async function startNewDownload() {
     return;
   }
   hideAddModal();
+}
+
+async function exportDownloadsJson() {
+  try {
+    const rows = await window.aidm.exportDownloads();
+    const blob = new Blob([JSON.stringify(rows, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `aidm-downloads-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    showNotification(`Exported ${rows.length} download(s)`, 'success');
+  } catch (e) {
+    showNotification(`Export failed: ${(e && e.message) || e}`, 'error');
+  }
+}
+
+async function importDownloadsJson() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.json,.txt,application/json,text/plain';
+  input.onchange = async () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      let items = JSON.parse(text);
+      if (!Array.isArray(items)) {
+        // Plain URL list file
+        items = text.split(/[\r\n]+/).map((s) => s.trim()).filter(Boolean);
+      }
+      const res = await window.aidm.importDownloads(items);
+      showNotification(`Imported ${res.added} · skipped ${res.skipped}`, res.errors && res.errors.length ? 'warn' : 'success');
+    } catch (e) {
+      showNotification(`Import failed: ${(e && e.message) || e}`, 'error');
+    }
+  };
+  input.click();
 }
 
 // ── Quality Picker Modal ──────────────────────────────────────────────────────
@@ -1155,11 +1354,6 @@ function showQualityPicker(data) {
     opt.className = 'quality-option';
     opt.dataset.idx = i;
 
-    const qualityIcon = video.quality === '2160p' ? '🎬' :
-                        video.quality === '1080p' ? '📺' :
-                        video.quality === '720p' ? '🖥️' :
-                        video.quality === '480p' ? '📱' : '📼';
-
     const sizeText = video.size ? formatBytes(video.size) : '';
     const formatText = video.format ? video.format.toUpperCase() : '';
     // Proven geometry (width/height) reads solid; anything the site merely
@@ -1215,15 +1409,17 @@ function showQualityPicker(data) {
       })() ||
       `${_realTitle || 'video'} [${video.quality || 'auto'}].${(video.format || 'mp4').toLowerCase()}`;
 
+    // Ranked card: #1 is best (proven geometry ranks above claimed labels).
+    const rank = i + 1;
     opt.innerHTML = `
-      <div class="quality-icon">${qualityIcon}</div>
+      <div class="quality-icon">#${rank}</div>
       <div class="quality-info">
         <div class="quality-label">${video.quality?.toUpperCase() || 'Unknown'}</div>
-        <div class="quality-filename" title="${escapeHtml(video.url)}">📄 ${escapeHtml(fileName)}</div>
-        <div class="quality-resolution ${resInfo.proven ? 'proven' : 'guessed'}" title="${escapeAttr(resInfo.proven ? 'Measured from the file' : 'Claimed by the site — not measured')}">${escapeHtml(resInfo.text)}${resInfo.proven ? '' : ' <span class="quality-res-flag">unverified</span>'}</div>
+        <div class="quality-filename" title="${escapeHtml(video.url)}">${escapeHtml(fileName)}</div>
+        <div class="quality-resolution ${resInfo.proven ? 'proven' : 'guessed'}" title="${escapeAttr(resInfo.proven ? 'Measured from the file' : 'Claimed by the site — not measured')}">${escapeHtml(resInfo.text)}${resInfo.proven ? ' · proven' : ' <span class="quality-res-flag">unverified · site-claimed</span>'}</div>
         <div class="quality-meta">
-          ${sizeText ? `<span class="quality-size">📦 ${sizeText}</span>` : ''}
-          ${formatText ? `<span class="quality-format">🎞️ ${formatText}</span>` : ''}
+          ${sizeText ? `<span class="quality-size">${sizeText}</span>` : ''}
+          ${formatText ? `<span class="quality-format">${formatText}</span>` : ''}
         </div>
       </div>
       <div class="quality-radio"></div>
@@ -1521,9 +1717,9 @@ function renderSchedulerList() {
         <div class="sched-detail">${escapeHtml(schedSummary(s))}</div>
       </div>
       <div class="sched-actions">
-        <button class="tool-btn small" data-act="toggle" title="${s.enabled === false ? 'Enable' : 'Disable'}">${s.enabled === false ? '▶' : '⏸'}</button>
-        <button class="tool-btn small" data-act="edit" title="Edit">✏️</button>
-        <button class="tool-btn small" data-act="del" title="Delete">🗑</button>
+        <button class="tool-btn small" data-act="toggle" title="${s.enabled === false ? 'Enable' : 'Disable'}"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="${s.enabled === false ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2"><use href="${s.enabled === false ? '#i-play' : '#i-pause'}"></use></svg></button>
+        <button class="tool-btn small" data-act="edit" title="Edit"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-edit"></use></svg></button>
+        <button class="tool-btn small" data-act="del" title="Delete"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-trash"></use></svg></button>
       </div>`;
     opt.querySelector('[data-act="toggle"]').addEventListener('click', async () => {
       s.enabled = s.enabled === false ? true : false;
@@ -1638,8 +1834,8 @@ function appendAiMessage(role, text) {
   const box = document.getElementById('ai-history');
   const div = document.createElement('div');
   div.style.cssText = role === 'user'
-    ? 'align-self:flex-end;background:#1c6fce;color:#fff;padding:8px 12px;border-radius:10px;max-width:85%;font-size:13px;'
-    : 'align-self:flex-start;background:#ffffff;border:1px solid #a9c2e2;color:#1a2b4a;padding:8px 12px;border-radius:10px;max-width:85%;font-size:13px;white-space:pre-wrap;';
+    ? 'align-self:flex-end;background:var(--accent);color:#fff;padding:8px 12px;border-radius:12px 12px 4px 12px;max-width:85%;font-size:13px;'
+    : 'align-self:flex-start;background:var(--bg-elevated);border:1px solid var(--border);color:var(--text-primary);padding:8px 12px;border-radius:12px 12px 12px 4px;max-width:85%;font-size:13px;white-space:pre-wrap;';
   div.textContent = (role === 'user' ? '🧑 ' : '✨ ') + text;
   box.appendChild(div);
   box.scrollTop = box.scrollHeight;
@@ -1652,16 +1848,27 @@ async function sendAiMessage() {
   input.value = '';
   appendAiMessage('user', text);
   aiHistory.push({ role: 'user', content: text });
-  // Keep context window small
   if (aiHistory.length > 20) aiHistory = aiHistory.slice(-20);
   appendAiMessage('assistant', '…thinking…');
   try {
+    // Natural-language queue commands first (download / speed / schedule /
+    // pause-all / resume-all) — no model round-trip needed for operators.
+    let nl = null;
+    try { nl = await window.aidm.nlCommand(text); } catch (e) { nl = null; }
+    if (nl && nl.action && nl.action !== 'unknown') {
+      const box = document.getElementById('ai-history');
+      if (box.lastChild) box.lastChild.remove();
+      const msg = nl.note || `Done (${nl.action})`;
+      appendAiMessage('assistant', `⚡ ${msg}${nl.result ? ` — added ${nl.result.added}, skipped ${nl.result.skipped}` : ''}`);
+      aiHistory.push({ role: 'assistant', content: msg });
+      showNotification(msg);
+      return;
+    }
     const context = [
       { role: 'system', content: 'You are the AiDM download-manager assistant. Help with downloads, filenames, categories, and error troubleshooting. Be concise.' },
       ...aiHistory,
     ];
     const res = await window.aidm.aiChat(context, { max_tokens: 600, temperature: 0.4 });
-    // replace "thinking" bubble
     const box = document.getElementById('ai-history');
     box.lastChild.remove();
     appendAiMessage('assistant', res.content || '(empty response)');
@@ -1669,17 +1876,19 @@ async function sendAiMessage() {
     if (res.fallbackUsed) showNotification(`AI fallback used (${res.model})`);
   } catch (err) {
     const box = document.getElementById('ai-history');
-    box.lastChild.remove();
+    if (box.lastChild) box.lastChild.remove();
     appendAiMessage('assistant', `⚠️ AI error: ${err.message || err}`);
   }
 }
+
+const AI_FILENAME_ICON = '<span class="btn-icon"><svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><use href="#i-sparkles"></use></svg></span>';
 
 async function suggestAiFilename() {
   const url = document.getElementById('input-url').value.trim();
   if (!url) { showNotification('Paste a URL first'); return; }
   const btn = document.getElementById('btn-ai-filename');
   btn.disabled = true;
-  btn.textContent = '…';
+  btn.innerHTML = '<span class="btn-icon">…</span>';
   try {
     const { filename } = await window.aidm.aiSmartFilename(url);
     if (filename) document.getElementById('input-filename').value = filename;
@@ -1688,7 +1897,7 @@ async function suggestAiFilename() {
     showNotification(`AI filename failed: ${err.message || err}`);
   } finally {
     btn.disabled = false;
-    btn.textContent = '✨';
+    btn.innerHTML = AI_FILENAME_ICON;
   }
 }
 
@@ -1785,16 +1994,64 @@ function updateStats() {
   document.getElementById('count-pending').textContent = pending;
   document.getElementById('count-error').textContent = errors;
 
+  // Type-filter counts (video / audio / document / archive / software)
+  const typeCount = (cat) => {
+    const el = document.getElementById('count-' + cat);
+    if (!el) return;
+    el.textContent = downloads.filter(d => matchCategory(d, cat)).length;
+  };
+  ['video', 'audio', 'document', 'archive', 'software'].forEach(typeCount);
+
   activeCount.textContent = active;
   document.getElementById('status-total').textContent = `Total: ${all} files`;
   document.getElementById('status-downloaded').textContent = `Completed: ${completed}`;
   updateSpeedDisplay();
 }
 
+// ── Live speed sparkline ──────────────────────────────────────────────────────
+
+let speedHistory = [];
+
+function drawSparkline() {
+  const c = document.getElementById('speed-sparkline');
+  if (!c || typeof c.getContext !== 'function') return;
+  let ctx;
+  try { ctx = c.getContext('2d'); } catch (e) { return; }
+  if (!ctx) return;
+  const w = c.width || 72, h = c.height || 22;
+  ctx.clearRect(0, 0, w, h);
+  if (speedHistory.length < 2) return;
+  const max = Math.max(...speedHistory, 1);
+  const step = w / Math.max(speedHistory.length - 1, 1);
+  // filled area
+  const css = getComputedStyle(document.documentElement);
+  const accent = (css && css.getPropertyValue && css.getPropertyValue('--accent').trim()) || '#3B82F6';
+  const success = (css && css.getPropertyValue && css.getPropertyValue('--success').trim()) || '#34D399';
+  ctx.beginPath();
+  speedHistory.forEach((v, i) => {
+    const x = i * step;
+    const y = h - (v / max) * (h - 3) - 1.5;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.strokeStyle = speedHistory[speedHistory.length - 1] > 0 ? success : accent;
+  ctx.lineWidth = 1.5;
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+  // soft fill under the line
+  ctx.lineTo(w, h);
+  ctx.lineTo(0, h);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(59, 130, 246, .15)';
+  ctx.fill();
+}
+
 function updateSpeedDisplay() {
   let total = 0;
   downloads.forEach(d => { if (d.status === 'downloading') total += d.speed || 0; });
   totalSpeed.textContent = formatSpeed(total);
+  speedHistory.push(total);
+  if (speedHistory.length > 48) speedHistory.shift();
+  drawSparkline();
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
@@ -1816,17 +2073,21 @@ function formatEta(sec) {
   return Math.floor(sec / 3600) + 'h ' + String(Math.floor((sec % 3600) / 60)).padStart(2, '0') + 'm';
 }
 
+function iconUse(id) {
+  return `<svg class="icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#${id}"></use></svg>`;
+}
+
 function getFileIcon(filename) {
-  if (/\.(mp4|mkv|avi|mov|wmv|webm|flv|m4v)/i.test(filename)) return '🎬';
-  if (/\.(mp3|wav|flac|aac|ogg|wma|m4a)/i.test(filename)) return '🎵';
-  if (/\.(jpg|jpeg|png|gif|bmp|svg|webp|psd)/i.test(filename)) return '🖼️';
-  if (/\.(pdf)/i.test(filename)) return '📕';
-  if (/\.(doc|docx|txt|rtf)/i.test(filename)) return '📄';
-  if (/\.(xls|xlsx|csv)/i.test(filename)) return '📊';
-  if (/\.(zip|rar|7z|tar|gz)/i.test(filename)) return '📦';
-  if (/\.(exe|msi)/i.test(filename)) return '💿';
-  if (/\.(iso|img|dmg)/i.test(filename)) return '💽';
-  return '📄';
+  if (/\.(mp4|mkv|avi|mov|wmv|webm|flv|m4v)/i.test(filename)) return iconUse('i-film');
+  if (/\.(mp3|wav|flac|aac|ogg|wma|m4a)/i.test(filename)) return iconUse('i-music');
+  if (/\.(jpg|jpeg|png|gif|bmp|svg|webp|psd)/i.test(filename)) return iconUse('i-image');
+  if (/\.(pdf)/i.test(filename)) return iconUse('i-doc');
+  if (/\.(doc|docx|txt|rtf)/i.test(filename)) return iconUse('i-doc');
+  if (/\.(xls|xlsx|csv)/i.test(filename)) return iconUse('i-doc');
+  if (/\.(zip|rar|7z|tar|gz)/i.test(filename)) return iconUse('i-archive');
+  if (/\.(exe|msi)/i.test(filename)) return iconUse('i-disc');
+  if (/\.(iso|img|dmg)/i.test(filename)) return iconUse('i-disc');
+  return iconUse('i-file');
 }
 
 function truncateUrl(url) {
@@ -1845,13 +2106,46 @@ if (typeof window !== 'undefined') {
   };
 }
 
+/**
+ * In-app toast stack (top-right). These are UI feedback and are intentionally
+ * NOT gated on the "Desktop Notifications" setting — that toggle only controls
+ * OS Notification objects created by the main process.
+ */
 function showNotification(text, type) {
-  // Honor the "Desktop Notifications" toggle — when off, suppress toasts.
-  if (settings && settings.notifications === false) return;
+  let stack = document.getElementById('toast-stack');
+  if (!stack) {
+    stack = document.createElement('div');
+    stack.id = 'toast-stack';
+    stack.className = 'toast-stack';
+    document.body.appendChild(stack);
+  }
+  const kind = type === 'error' ? 'error' : type === 'warn' ? 'warn' : type === 'info' ? 'info' : 'success';
   const t = document.createElement('div');
-  const isError = type === 'error' || type === 'warn';
-  t.style.cssText = `position:fixed;bottom:40px;right:20px;padding:12px 20px;background:var(--bg-surface);border:1px solid ${isError ? 'var(--error)' : 'var(--success)'};border-radius:8px;color:var(--text-primary);font-size:13px;box-shadow:0 4px 20px rgba(0,0,0,.4);z-index:9999;`;
-  t.textContent = (isError ? '⚠️ ' : '✅ ') + text;
-  document.body.appendChild(t);
-  setTimeout(() => t.remove(), 4000);
+  t.className = 'toast toast-' + kind;
+  const title = kind === 'error' ? 'Error' : kind === 'warn' ? 'Notice' : kind === 'info' ? 'Info' : 'Done';
+  t.innerHTML = `<div class="toast-title">${title}</div><div class="toast-body"></div>`;
+  const body = t.querySelector('.toast-body');
+  if (body) body.textContent = text;
+  else t.textContent = text;
+
+  let timer = null;
+  const dismiss = () => {
+    if (timer) { clearTimeout(timer); timer = null; }
+    t.classList.add('leaving');
+    setTimeout(() => { try { t.remove(); } catch (e) {} }, 180);
+  };
+  const arm = () => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(dismiss, 4200);
+  };
+  t.addEventListener('mouseenter', () => { if (timer) { clearTimeout(timer); timer = null; } });
+  t.addEventListener('mouseleave', arm);
+  t.addEventListener('click', dismiss);
+
+  stack.appendChild(t);
+  arm();
+  // Cap stack size so a noisy session cannot cover the UI
+  while (stack.children.length > 5) {
+    try { stack.removeChild(stack.firstChild); } catch (e) { break; }
+  }
 }

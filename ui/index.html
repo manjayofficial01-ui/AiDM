@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7,6 +7,45 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+  <!-- Inline SVG sprite (tool chrome — no emoji) -->
+  <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5l12 7-12 7V5z"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M8 7l1 12h6l1-12M10 11v4M14 11v4"/></symbol>
+    <symbol id="i-list-x" viewBox="0 0 24 24"><path d="M4 7h10M4 12h8M4 17h6M16 9l5 5M21 9l-5 5"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.6M20 4v5h-5"/></symbol>
+    <symbol id="i-sparkles" viewBox="0 0 24 24"><path d="M12 3l1.2 4.2L17 9l-3.8 1.2L12 15l-1.2-4.8L7 9l3.8-1.8L12 3zM19 14l.7 2.3L22 17l-2.3.7L19 20l-.7-2.3L16 17l2.3-.7L19 14zM5 14l.6 1.8L7.5 16.5 5.6 17 5 19l-.6-2-1.9-.5 1.9-.7L5 14z"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><path d="M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.4 1a7 7 0 0 0-2-1.2L14 3h-4l-.5 2.7a7 7 0 0 0-2 1.2l-2.4-1-2 3.4 2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.4-1a7 7 0 0 0 2 1.2L10 21h4l.5-2.7a7 7 0 0 0 2-1.2l2.4 1 2-3.4-2-1.5c.1-.4.1-.8.1-1.2z"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/></symbol>
+    <symbol id="i-min" viewBox="0 0 24 24"><path d="M6 18h12"/></symbol>
+    <symbol id="i-max" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17"/></symbol>
+    <symbol id="i-theme" viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9c0-5-4-9-9-9z"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7 11l5 5 5-5M5 20h14"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12l5 5L19 7"/></symbol>
+    <symbol id="i-queue" viewBox="0 0 24 24"><path d="M5 7h14M5 12h14M5 17h8"/></symbol>
+    <symbol id="i-hourglass" viewBox="0 0 24 24"><path d="M7 4h10M7 20h10M8 4c0 4 8 4 8 8s-8 4-8 8"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 8v5M12 16h.01"/><circle cx="12" cy="12" r="9"/></symbol>
+    <symbol id="i-film" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 5v14M17 5v14M3 9h4M17 9h4M3 15h4M17 15h4"/></symbol>
+    <symbol id="i-music" viewBox="0 0 24 24"><path d="M9 18V6l12-2v12"/><circle cx="7" cy="18" r="2"/><circle cx="19" cy="16" r="2"/></symbol>
+    <symbol id="i-doc" viewBox="0 0 24 24"><path d="M7 3h7l5 5v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M14 3v5h5"/></symbol>
+    <symbol id="i-archive" viewBox="0 0 24 24"><path d="M4 7h16v4H4zM5 11h14v9H5zM10 14h4"/></symbol>
+    <symbol id="i-disc" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M7 3h7l5 5v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/></symbol>
+    <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M3 16l5-4 4 3 4-5 5 6"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="M16 16l4 4"/></symbol>
+    <symbol id="i-clipboard" viewBox="0 0 24 24"><rect x="6" y="4" width="12" height="16" rx="1"/><path d="M9 4h6v2H9zM9 12h6M9 16h4"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a4 4 0 0 0 6 0l2-2a4 4 0 1 0-6-6l-1 1"/><path d="M14 11a4 4 0 0 0-6 0l-2 2a4 4 0 1 0 6 6l1-1"/></symbol>
+    <symbol id="i-hash" viewBox="0 0 24 24"><path d="M9 7h11M8 17h11M10 7l-1 10M18 7l-1 10M6 12h12"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16v4zM14 6l4 4"/></symbol>
+    <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 5h5v5M19 5l-8 8M10 6H6a1 1 0 0 0-1 1v11a1 1 0 0 0 1 1h11a1 1 0 0 0 1-1v-4"/></symbol>
+    <symbol id="i-open" viewBox="0 0 24 24"><path d="M4 7h6l2 2h8v10H4V7z"/><path d="M12 13v4M9 15h6"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="11" height="11" rx="1"/><path d="M5 15V5h10"/></symbol>
+  </svg>
+
   <!-- Title Bar -->
   <div class="titlebar" id="titlebar">
     <div class="titlebar-left">
@@ -14,38 +53,28 @@
       <span class="app-title">AiDM <span class="app-subtitle">Download Manager</span><span class="app-version" id="app-version"></span></span>
     </div>
     <div class="titlebar-controls">
-      <button class="title-btn" id="btn-minimize" title="Minimize">─</button>
-      <button class="title-btn" id="btn-maximize" title="Maximize">□</button>
-      <button class="title-btn btn-close" id="btn-close" title="Close">✕</button>
+      <button class="title-btn" id="btn-theme" title="Toggle light / dark theme" aria-label="Toggle theme"><span class="btn-icon"><svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-theme"></use></svg></span></button>
+      <button class="title-btn" id="btn-minimize" title="Minimize" aria-label="Minimize"><span class="btn-icon"><svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-min"></use></svg></span></button>
+      <button class="title-btn" id="btn-maximize" title="Maximize" aria-label="Maximize"><span class="btn-icon"><svg class="icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><use href="#i-max"></use></svg></span></button>
+      <button class="title-btn btn-close" id="btn-close" title="Close" aria-label="Close"><span class="btn-icon"><svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-close"></use></svg></span></button>
     </div>
   </div>
 
   <!-- Toolbar (icon-only; names live in tooltips) -->
   <div class="toolbar">
     <div class="toolbar-group">
-      <button class="tool-btn primary" id="btn-add-url" title="Add URL (Ctrl+N)" aria-label="Add URL (Ctrl+N)">
-        <span class="btn-icon">＋</span>
-      </button>
-      <button class="tool-btn" id="btn-pause-all" title="Pause All" aria-label="Pause All">
-        <span class="btn-icon">⏸</span>
-      </button>
-      <button class="tool-btn" id="btn-resume-all" title="Resume All" aria-label="Resume All">
-        <span class="btn-icon">▶</span>
-      </button>
-      <button class="tool-btn" id="btn-delete" title="Remove selected from list (Del)" aria-label="Remove selected from list (Del)">
-        <span class="btn-icon">📋</span>
-      </button>
-      <button class="tool-btn" id="btn-delete-all" title="Delete selected / all — optionally remove files from disk" aria-label="Delete selected / all">
-        <span class="btn-icon">🗑</span>
-      </button>
-      <button class="tool-btn" id="btn-refresh" title="Refresh list (F5)" aria-label="Refresh list (F5)">
-        <span class="btn-icon">🔄</span>
-      </button>
+      <button class="tool-btn primary" id="btn-add-url" title="Add URL (Ctrl+N)" aria-label="Add URL (Ctrl+N)"><span class="btn-icon"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-plus"></use></svg></span></button>
+      <button class="tool-btn" id="btn-pause-all" title="Pause All" aria-label="Pause All"><span class="btn-icon"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-pause"></use></svg></span></button>
+      <button class="tool-btn" id="btn-resume-all" title="Resume All" aria-label="Resume All"><span class="btn-icon"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none"><use href="#i-play"></use></svg></span></button>
+      <button class="tool-btn" id="btn-delete" title="Remove from list (files stay on disk)" aria-label="Remove from list"><span class="btn-icon"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-list-x"></use></svg></span></button>
+      <button class="tool-btn" id="btn-delete-all" title="Delete from disk (optional file removal)" aria-label="Delete from disk"><span class="btn-icon"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-trash"></use></svg></span></button>
+      <button class="tool-btn" id="btn-refresh" title="Refresh list (F5)" aria-label="Refresh list (F5)"><span class="btn-icon"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-refresh"></use></svg></span></button>
     </div>
     <div class="toolbar-group">
       <div class="speed-display">
         <span class="speed-label">Speed:</span>
         <span class="speed-value" id="total-speed">0 B/s</span>
+        <canvas id="speed-sparkline" class="speed-sparkline" width="72" height="22" title="Live total speed"></canvas>
       </div>
       <div class="status-display">
         <span class="status-label">Active:</span>
@@ -53,15 +82,9 @@
       </div>
     </div>
     <div class="toolbar-group">
-      <button class="tool-btn" id="btn-ai-assistant" title="AI Assistant (TokenHarbor)" aria-label="AI Assistant (TokenHarbor)">
-        <span class="btn-icon">✨</span>
-      </button>
-      <button class="tool-btn" id="btn-settings" title="Settings" aria-label="Settings">
-        <span class="btn-icon">⚙</span>
-      </button>
-      <button class="tool-btn" id="btn-scheduler" title="Download scheduler — run the queue on a timetable" aria-label="Download scheduler">
-        <span class="btn-icon">⏰</span>
-      </button>
+      <button class="tool-btn" id="btn-ai-assistant" title="AI Assistant (TokenHarbor)" aria-label="AI Assistant (TokenHarbor)"><span class="btn-icon"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><use href="#i-sparkles"></use></svg></span></button>
+      <button class="tool-btn" id="btn-settings" title="Settings" aria-label="Settings"><span class="btn-icon"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><use href="#i-gear"></use></svg></span></button>
+      <button class="tool-btn" id="btn-scheduler" title="Download scheduler — run the queue on a timetable" aria-label="Download scheduler"><span class="btn-icon"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-clock"></use></svg></span></button>
     </div>
   </div>
 
@@ -69,50 +92,55 @@
   <div class="main-content">
     <!-- Category Sidebar -->
     <div class="sidebar" id="sidebar">
-      <button class="sidebar-collapse" id="btn-sidebar-collapse" title="Collapse sidebar" aria-label="Collapse sidebar">◀</button>
+      <button class="sidebar-collapse" id="btn-sidebar-collapse" title="Collapse sidebar" aria-label="Collapse sidebar"><span class="btn-icon"><svg class="icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-chevron"></use></svg></span></button>
       <div class="sidebar-section">
-        <div class="sidebar-title">CATEGORIES</div>
+        <div class="sidebar-title">Categories</div>
         <div class="sidebar-item active" data-category="all" title="All Downloads">
-          <span class="cat-icon">📁</span><span class="cat-label">All Downloads</span>
+          <span class="cat-icon"><svg class="icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-folder"></use></svg></span><span class="cat-label">All Downloads</span>
           <span class="cat-count" id="count-all">0</span>
         </div>
         <div class="sidebar-item" data-category="downloading" title="Downloading">
-          <span class="cat-icon">⬇️</span><span class="cat-label">Downloading</span>
+          <span class="cat-icon"><svg class="icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-download"></use></svg></span><span class="cat-label">Downloading</span>
           <span class="cat-count" id="count-active">0</span>
         </div>
         <div class="sidebar-item" data-category="completed" title="Completed">
-          <span class="cat-icon">✅</span><span class="cat-label">Completed</span>
+          <span class="cat-icon"><svg class="icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-check"></use></svg></span><span class="cat-label">Completed</span>
           <span class="cat-count" id="count-completed">0</span>
         </div>
         <div class="sidebar-item" data-category="queued" title="Queued">
-          <span class="cat-icon">📋</span><span class="cat-label">Queued</span>
+          <span class="cat-icon"><svg class="icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-queue"></use></svg></span><span class="cat-label">Queued</span>
           <span class="cat-count" id="count-queued">0</span>
         </div>
         <div class="sidebar-item" data-category="pending" title="Pending">
-          <span class="cat-icon">⏳</span><span class="cat-label">Pending</span>
+          <span class="cat-icon"><svg class="icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-hourglass"></use></svg></span><span class="cat-label">Pending</span>
           <span class="cat-count" id="count-pending">0</span>
         </div>
         <div class="sidebar-item" data-category="error" title="Errors">
-          <span class="cat-icon">❌</span><span class="cat-label">Errors</span>
+          <span class="cat-icon"><svg class="icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-alert"></use></svg></span><span class="cat-label">Errors</span>
           <span class="cat-count" id="count-error">0</span>
         </div>
       </div>
       <div class="sidebar-section">
-        <div class="sidebar-title">FILE TYPES</div>
+        <div class="sidebar-title">File Types</div>
         <div class="sidebar-item" data-category="video" title="Videos">
-          <span class="cat-icon">🎬</span><span class="cat-label">Videos</span>
+          <span class="cat-icon"><svg class="icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-film"></use></svg></span><span class="cat-label">Videos</span>
+          <span class="cat-count" id="count-video">0</span>
         </div>
         <div class="sidebar-item" data-category="audio" title="Music">
-          <span class="cat-icon">🎵</span><span class="cat-label">Music</span>
+          <span class="cat-icon"><svg class="icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-music"></use></svg></span><span class="cat-label">Music</span>
+          <span class="cat-count" id="count-audio">0</span>
         </div>
         <div class="sidebar-item" data-category="document" title="Documents">
-          <span class="cat-icon">📄</span><span class="cat-label">Documents</span>
+          <span class="cat-icon"><svg class="icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-doc"></use></svg></span><span class="cat-label">Documents</span>
+          <span class="cat-count" id="count-document">0</span>
         </div>
         <div class="sidebar-item" data-category="archive" title="Archives">
-          <span class="cat-icon">📦</span><span class="cat-label">Archives</span>
+          <span class="cat-icon"><svg class="icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-archive"></use></svg></span><span class="cat-label">Archives</span>
+          <span class="cat-count" id="count-archive">0</span>
         </div>
         <div class="sidebar-item" data-category="software" title="Software">
-          <span class="cat-icon">💿</span><span class="cat-label">Software</span>
+          <span class="cat-icon"><svg class="icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-disc"></use></svg></span><span class="cat-label">Software</span>
+          <span class="cat-count" id="count-software">0</span>
         </div>
       </div>
     </div>
@@ -120,7 +148,18 @@
     <!-- Download List -->
     <div class="download-area">
       <div class="search-bar">
-        <input type="text" id="search-input" placeholder="🔍 Search downloads..." />
+        <span class="search-icon"><svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-search"></use></svg></span>
+        <input type="text" id="search-input" placeholder="Search downloads by name or URL…" />
+      </div>
+
+      <!-- Selection action bar (pause / resume / remove / delete selected) -->
+      <div class="selection-bar" id="selection-bar" style="display:none;">
+        <span class="selection-count" id="selection-count">0 selected</span>
+        <button class="tool-btn small" id="btn-sel-pause" title="Pause selected"><span class="btn-icon"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><use href="#i-pause"></use></svg></span></button>
+        <button class="tool-btn small" id="btn-sel-resume" title="Resume selected"><span class="btn-icon"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><use href="#i-play"></use></svg></span></button>
+        <button class="tool-btn small" id="btn-sel-remove" title="Remove from list (files stay on disk)">Remove from list</button>
+        <button class="tool-btn small danger-ghost" id="btn-sel-delete" title="Delete from disk (with confirmation)">Delete from disk…</button>
+        <button class="tool-btn small ghost" id="btn-sel-clear" title="Clear selection">Clear</button>
       </div>
 
       <div class="download-table-container">
@@ -128,21 +167,25 @@
           <thead>
             <tr>
               <th class="col-check"><input type="checkbox" id="select-all" /></th>
-              <th class="col-name" data-col="name">File Name<span class="col-resizer" title="Drag to resize • Double-click to reset"></span></th>
-              <th class="col-size" data-col="size">Size<span class="col-resizer" title="Drag to resize • Double-click to reset"></span></th>
+              <th class="col-name" data-col="name" data-sortable="1">File Name<span class="sort-ind" data-sort-ind></span><span class="col-resizer" title="Drag to resize • Double-click to reset"></span></th>
+              <th class="col-size" data-col="size" data-sortable="1">Size<span class="sort-ind" data-sort-ind></span><span class="col-resizer" title="Drag to resize • Double-click to reset"></span></th>
               <th class="col-dims" data-col="dims" title="Real width × height measured from the finished file">Dimensions<span class="col-resizer" title="Drag to resize • Double-click to reset"></span></th>
-              <th class="col-progress" data-col="progress">Progress<span class="col-resizer" title="Drag to resize • Double-click to reset"></span></th>
-              <th class="col-speed" data-col="speed">Speed<span class="col-resizer" title="Drag to resize • Double-click to reset"></span></th>
-              <th class="col-status" data-col="status">Status<span class="col-resizer" title="Drag to resize • Double-click to reset"></span></th>
+              <th class="col-progress" data-col="progress" data-sortable="1">Progress<span class="sort-ind" data-sort-ind></span><span class="col-resizer" title="Drag to resize • Double-click to reset"></span></th>
+              <th class="col-speed" data-col="speed" data-sortable="1">Speed<span class="sort-ind" data-sort-ind></span><span class="col-resizer" title="Drag to resize • Double-click to reset"></span></th>
+              <th class="col-status" data-col="status" data-sortable="1">Status<span class="sort-ind" data-sort-ind></span><span class="col-resizer" title="Drag to resize • Double-click to reset"></span></th>
               <th class="col-actions" data-col="actions">Actions<span class="col-resizer" title="Drag to resize • Double-click to reset"></span></th>
             </tr>
           </thead>
           <tbody id="download-list"></tbody>
         </table>
         <div class="empty-state" id="empty-state">
-          <div class="empty-icon">⬇️</div>
+          <div class="empty-icon"><svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-download"></use></svg></div>
           <div class="empty-text">No downloads yet</div>
-          <div class="empty-hint">Click "Add URL", paste a link, or browse the web — AiDM will intercept downloads automatically</div>
+          <div class="empty-hint">Add a URL, paste a link, or browse the web — AiDM intercepts downloads automatically.</div>
+          <div class="empty-actions">
+            <button class="tool-btn primary" id="btn-empty-add">Add URL</button>
+            <span class="empty-kbd-hint">or press <kbd>Ctrl</kbd>+<kbd>N</kbd> · drop a link anywhere</span>
+          </div>
         </div>
       </div>
     </div>
@@ -156,9 +199,10 @@
     </div>
     <div class="status-right">
       <span class="status-item clipboard-indicator" id="clipboard-status">
-        📋 Clipboard: <span class="indicator-dot active" id="clipboard-dot"></span>
+        <svg class="icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-clipboard"></use></svg>
+        Clipboard: <span class="indicator-dot active" id="clipboard-dot"></span>
       </span>
-      <span class="status-item" id="status-connection">🔌 Extension: Connected</span>
+      <span class="status-item" id="status-connection">Extension: Connected</span>
     </div>
   </div>
 
@@ -168,20 +212,20 @@
   <div class="modal-overlay" id="modal-overlay" style="display:none;">
     <div class="modal" id="add-url-modal">
       <div class="modal-header">
-        <h3>⬇️ Add New Download</h3>
-        <button class="modal-close" id="modal-close">✕</button>
+        <h3><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-download"></use></svg> Add New Download</h3>
+        <button class="modal-close" id="modal-close" aria-label="Close"><svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-close"></use></svg></button>
       </div>
       <div class="modal-body">
         <div class="form-group">
           <label>Download URL</label>
-          <input type="text" id="input-url" placeholder="https://example.com/file.zip" />
+          <input type="text" id="input-url" placeholder="https://example.com/file.zip  ·  paste multiple URLs (one per line) for batch" spellcheck="false" autocomplete="off" />
         </div>
         <div class="form-row">
         <div class="form-group">
           <label>File Name</label>
           <div class="path-input">
-            <input type="text" id="input-filename" placeholder="Auto-detect" />
-            <button class="tool-btn small" id="btn-ai-filename" title="Suggest clean filename with AI">✨</button>
+            <input type="text" id="input-filename" placeholder="Auto-detect" spellcheck="false" />
+            <button class="tool-btn small ai-filename-btn" id="btn-ai-filename" title="Suggest clean filename with AI"><span class="btn-icon"><svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><use href="#i-sparkles"></use></svg></span></button>
           </div>
         </div>
           <div class="form-group">
@@ -200,13 +244,13 @@
           <label>Category</label>
           <select id="input-category">
             <option value="auto">Auto-detect</option>
-            <option value="video">🎬 Video</option>
-            <option value="audio">🎵 Music</option>
-            <option value="document">📄 Document</option>
-            <option value="archive">📦 Archive</option>
-            <option value="software">💿 Software</option>
-            <option value="image">🖼️ Image</option>
-            <option value="other">📁 Other</option>
+            <option value="video">Video</option>
+            <option value="audio">Music</option>
+            <option value="document">Document</option>
+            <option value="archive">Archive</option>
+            <option value="software">Software</option>
+            <option value="image">Image</option>
+            <option value="other">Other</option>
           </select>
         </div>
         <div class="form-group">
@@ -219,7 +263,7 @@
       </div>
       <div class="modal-footer">
         <button class="tool-btn" id="btn-cancel-add">Cancel</button>
-        <button class="tool-btn primary" id="btn-start-download">⬇️ Start Download</button>
+        <button class="tool-btn primary" id="btn-start-download"><svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-download"></use></svg> Start Download</button>
       </div>
     </div>
   </div>
@@ -228,8 +272,8 @@
   <div class="modal-overlay" id="quality-overlay" style="display:none;">
     <div class="modal quality-modal">
       <div class="modal-header">
-        <h3>🎬 Select Video Quality</h3>
-        <button class="modal-close" id="quality-close">✕</button>
+        <h3><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-film"></use></svg> Select Video Quality</h3>
+        <button class="modal-close" id="quality-close" aria-label="Close"><svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-close"></use></svg></button>
       </div>
       <div class="modal-body">
         <div class="quality-page-info">
@@ -242,252 +286,264 @@
       </div>
       <div class="modal-footer">
         <button class="tool-btn" id="btn-cancel-quality">Cancel</button>
-        <button class="tool-btn primary" id="btn-download-quality" disabled>⬇️ Download Selected</button>
+        <button class="tool-btn primary" id="btn-download-quality" disabled>Download Selected</button>
       </div>
     </div>
   </div>
 
-  <!-- Folder Approval Modal (for ask-every-time) -->
   <!-- Settings Modal -->
   <div class="modal-overlay" id="settings-overlay" style="display:none;">
     <div class="modal settings-modal">
       <div class="modal-header">
-        <h3>⚙ Settings</h3>
-        <button class="modal-close" id="settings-close">✕</button>
+        <h3><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><use href="#i-gear"></use></svg> Settings</h3>
+        <button class="modal-close" id="settings-close" aria-label="Close"><svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-close"></use></svg></button>
       </div>
-      <div class="modal-body">
-        <div class="settings-section">
-          <h4>Download Settings</h4>
-          <div class="form-group">
-            <label>Max Concurrent Downloads</label>
-            <input type="number" id="setting-concurrent" min="1" max="10" value="3" />
-          </div>
-          <div class="form-group">
-            <label>Default Segments per File</label>
-            <select id="setting-segments">
-              <option value="4">4</option>
-              <option value="8" selected>8</option>
-              <option value="16">16</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label>Default Save Path (fallback)</label>
-            <div class="path-input">
-              <input type="text" id="setting-savepath" />
-              <button class="tool-btn small" id="btn-browse-settings">Browse</button>
+      <div class="modal-body settings-layout">
+        <aside class="settings-nav" role="tablist" aria-label="Settings sections">
+          <button type="button" class="settings-tab active" data-settings-tab="general">General</button>
+          <button type="button" class="settings-tab" data-settings-tab="downloads">Downloads</button>
+          <button type="button" class="settings-tab" data-settings-tab="paths">Paths</button>
+          <button type="button" class="settings-tab" data-settings-tab="youtube">YouTube</button>
+          <button type="button" class="settings-tab" data-settings-tab="ai">AI</button>
+          <button type="button" class="settings-tab" data-settings-tab="features">Features</button>
+          <button type="button" class="settings-tab" data-settings-tab="browser">Browser</button>
+        </aside>
+        <div class="settings-panes">
+          <section class="settings-pane active" data-settings-pane="general">
+            <h4>General</h4>
+            <div class="form-group toggle">
+              <label>Ask download location every time</label>
+              <input type="checkbox" id="setting-ask-location" />
             </div>
-          </div>
-          <div class="form-group">
-            <label>Speed Limit (KB/s, 0 = unlimited)</label>
-            <input type="number" id="setting-speed-limit" min="0" max="1000000" value="0" />
-          </div>
-          <div class="form-group">
-            <label>Speed Timetable (one rule per line: HH:MM-HH:MM=KBPS)</label>
-            <textarea id="setting-speed-rules" rows="2" placeholder="22:00-07:00=1024&#10;09:00-18:00=256"></textarea>
-            <p class="settings-hint" style="margin-top:4px;">Overnight wraps allowed. Blank = always use the limit above.</p>
-          </div>
-          <div class="form-group toggle">
-            <label>Ask download location every time</label>
-            <input type="checkbox" id="setting-ask-location" />
-          </div>
-        </div>
-
-        <div class="settings-section">
-          <h4>Category Save Paths</h4>
-          <p class="settings-hint">Files are automatically saved to these folders based on type. Leave empty to use the default path above.</p>
-
-          <div class="category-path-row">
-            <span class="category-path-label">🎬 Videos</span>
-            <div class="path-input category-path-input">
-              <input type="text" id="cat-path-video" placeholder="Default" />
-              <button class="tool-btn small btn-browse-cat" data-cat="video">Browse</button>
+            <div class="form-group toggle">
+              <label>Desktop Notifications</label>
+              <input type="checkbox" id="setting-notifications" checked />
             </div>
-          </div>
-
-          <div class="category-path-row">
-            <span class="category-path-label">🎵 Music</span>
-            <div class="path-input category-path-input">
-              <input type="text" id="cat-path-audio" placeholder="Default" />
-              <button class="tool-btn small btn-browse-cat" data-cat="audio">Browse</button>
+            <p class="settings-hint">In-app toasts always show. This toggle only controls system desktop notifications.</p>
+            <div class="form-group toggle">
+              <label>Auto-Resume on Restart</label>
+              <input type="checkbox" id="setting-autoresume" checked />
             </div>
-          </div>
-
-          <div class="category-path-row">
-            <span class="category-path-label">📄 Documents</span>
-            <div class="path-input category-path-input">
-              <input type="text" id="cat-path-document" placeholder="Default" />
-              <button class="tool-btn small btn-browse-cat" data-cat="document">Browse</button>
+            <div class="form-group toggle">
+              <label>Start AiDM when Windows starts</label>
+              <input type="checkbox" id="setting-launch-startup" checked />
             </div>
-          </div>
-
-          <div class="category-path-row">
-            <span class="category-path-label">📦 Archives</span>
-            <div class="path-input category-path-input">
-              <input type="text" id="cat-path-archive" placeholder="Default" />
-              <button class="tool-btn small btn-browse-cat" data-cat="archive">Browse</button>
+            <div class="form-group toggle">
+              <label>Keep running in tray when window is closed</label>
+              <input type="checkbox" id="setting-minimize-tray" checked />
             </div>
-          </div>
-
-          <div class="category-path-row">
-            <span class="category-path-label">💿 Software</span>
-            <div class="path-input category-path-input">
-              <input type="text" id="cat-path-software" placeholder="Default" />
-              <button class="tool-btn small btn-browse-cat" data-cat="software">Browse</button>
+            <div class="settings-section">
+              <h4>Backup</h4>
+              <p class="settings-hint">Export / import the download list (cookies are never included). Import also accepts a plain .txt of URLs.</p>
+              <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                <button type="button" class="tool-btn" id="btn-export-downloads">Export list</button>
+                <button type="button" class="tool-btn" id="btn-import-downloads">Import list</button>
+              </div>
             </div>
-          </div>
+          </section>
 
-          <div class="category-path-row">
-            <span class="category-path-label">🖼️ Images</span>
-            <div class="path-input category-path-input">
-              <input type="text" id="cat-path-image" placeholder="Default" />
-              <button class="tool-btn small btn-browse-cat" data-cat="image">Browse</button>
-            </div>
-          </div>
-        </div>
-
-        <div class="settings-section">
-          <h4>File hosts — Rapidgator</h4>
-          <p class="settings-hint">Free hoster accounts are forced through a wait timer and a captcha, which AiDM does not bypass. Add a <strong>premium</strong> account (or paste a logged-in session cookie) and Rapidgator links download immediately.</p>
-          <div class="form-group">
-            <label>Username or email</label>
-            <input type="text" id="setting-rg-user" placeholder="your rapidgator login" />
-          </div>
-          <div class="form-group">
-            <label>Password</label>
-            <div class="path-input">
-              <input type="password" id="setting-rg-pass" placeholder="stored only in the local settings file" />
-            </div>
-          </div>
-          <div class="form-group">
-            <label>…or session cookie (optional)</label>
-            <input type="password" id="setting-rg-cookie" placeholder="PHPSESSID=… ; user__=…" />
-          </div>
-          <div class="settings-hint" id="rg-status-hint">Leave both empty to use the free flow (wait required).</div>
-        </div>
-
-        <div class="settings-section">
-          <h4>YouTube — signed-in access</h4>
-          <p class="settings-hint">yt-dlp runs as a separate process and cannot see your browser's login, so videos you <em>can</em> watch while signed in (private, members-only, age-confirmed) used to fail as “Sign in to confirm you’re not a bot”. Let yt-dlp read that browser's cookie store to fix it. Off by default — nothing is read until you choose a browser.</p>
-          <div class="form-group">
-            <label>Read cookies from browser</label>
-            <select id="setting-yt-cookies-browser">
-              <option value="">Off (don't use browser cookies)</option>
-              <option value="chrome">Chrome</option>
-              <option value="edge">Edge</option>
-              <option value="firefox">Firefox</option>
-              <option value="brave">Brave</option>
-              <option value="opera">Opera</option>
-              <option value="vivaldi">Vivaldi</option>
-            </select>
-          </div>
-          <div class="settings-hint">Cookies the browser extension captures are always forwarded, whatever you pick here.</div>
-        </div>
-
-        <div class="settings-section">
-          <h4>Post-download actions</h4>
-          <p class="settings-hint">Run a command on every finished download (IDM-style antivirus hook). Use <code>{file}</code> where the file path goes. Example (Windows Defender): <code>"C:\Program Files\Windows Defender\MpCmdRun.exe" -Scan -ScanType 3 -File "{file}"</code>. Empty = off.</p>
-          <div class="form-group">
-            <label>Command to run on completion</label>
-            <input type="text" id="setting-post-download-cmd" placeholder='&quot;C:\Program Files\Windows Defender\MpCmdRun.exe&quot; -Scan -ScanType 3 -File &quot;{file}&quot;' />
-            <div class="settings-hint">Result is recorded on the download row. Runs once, after any audio-mux step, with a 2-minute timeout.</div>
-          </div>
-        </div>
-
-        <div class="settings-section">
-          <h4>AI Assistant — TokenHarbor</h4>
-          <p class="settings-hint">OpenAI-compatible gateway at <code>https://tokenharbor.ai/v1</code>. Primary: <code>mimo-v2.5:free</code>, fallback: <code>deepseek-v4-flash:free</code>. Prefer the <code>TOKENHARBOR_API_KEY</code> env var — the field below is only a local fallback.</p>
-          <div class="form-group toggle">
-            <label>Enable AI features</label>
-            <input type="checkbox" id="setting-ai-enabled" checked />
-          </div>
-          <div class="form-group">
-            <label>Base URL</label>
-            <input type="text" id="setting-ai-baseurl" placeholder="https://tokenharbor.ai/v1" />
-          </div>
-          <div class="form-group">
-            <label>API Key (stored only in local settings file)</label>
-            <div class="path-input">
-              <input type="password" id="setting-ai-key" placeholder="thk_live_… or set TOKENHARBOR_API_KEY env var" />
-              <button class="tool-btn small" id="btn-ai-test" title="Test AI connection">Test</button>
-            </div>
-            <div class="settings-hint" id="ai-status-hint">Not tested yet.</div>
-          </div>
-          <div class="form-row">
+          <section class="settings-pane" data-settings-pane="downloads">
+            <h4>Download Settings</h4>
             <div class="form-group">
-              <label>Primary model</label>
-              <select id="setting-ai-primary">
-                <option value="mimo-v2.5:free">mimo-v2.5:free (reasoning)</option>
-                <option value="deepseek-v4-flash:free">deepseek-v4-flash:free (fast)</option>
+              <label>Max Concurrent Downloads</label>
+              <input type="number" id="setting-concurrent" min="1" max="10" value="3" />
+            </div>
+            <div class="form-group">
+              <label>Default Segments per File</label>
+              <select id="setting-segments">
+                <option value="4">4</option>
+                <option value="8" selected>8</option>
+                <option value="16">16</option>
               </select>
             </div>
             <div class="form-group">
-              <label>Fallback model</label>
-              <select id="setting-ai-fallback">
-                <option value="deepseek-v4-flash:free">deepseek-v4-flash:free (fast)</option>
-                <option value="mimo-v2.5:free">mimo-v2.5:free (reasoning)</option>
+              <label>Speed Limit (KB/s, 0 = unlimited)</label>
+              <input type="number" id="setting-speed-limit" min="0" max="1000000" value="0" />
+            </div>
+            <div class="form-group">
+              <label>Speed Timetable (one rule per line: HH:MM-HH:MM=KBPS)</label>
+              <textarea id="setting-speed-rules" rows="2" placeholder="22:00-07:00=1024&#10;09:00-18:00=256"></textarea>
+              <p class="settings-hint" style="margin-top:4px;">Overnight wraps allowed. Blank = always use the limit above.</p>
+            </div>
+            <h4>Post-download actions</h4>
+            <p class="settings-hint">Run a command on every finished download (IDM-style antivirus hook). Use <code>{file}</code> where the file path goes. Empty = off.</p>
+            <div class="form-group">
+              <label>Command to run on completion</label>
+              <input type="text" id="setting-post-download-cmd" placeholder='&quot;C:\Program Files\Windows Defender\MpCmdRun.exe&quot; -Scan -ScanType 3 -File &quot;{file}&quot;' />
+              <div class="settings-hint">Result is recorded on the download row. Runs once, after any audio-mux step, with a 2-minute timeout.</div>
+            </div>
+          </section>
+
+          <section class="settings-pane" data-settings-pane="paths">
+            <h4>Default &amp; Category Paths</h4>
+            <div class="form-group">
+              <label>Default Save Path (fallback)</label>
+              <div class="path-input">
+                <input type="text" id="setting-savepath" />
+                <button class="tool-btn small" id="btn-browse-settings">Browse</button>
+              </div>
+            </div>
+            <p class="settings-hint">Files are automatically saved to these folders based on type. Leave empty to use the default path above.</p>
+
+            <div class="category-path-row">
+              <span class="category-path-label">Videos</span>
+              <div class="path-input category-path-input">
+                <input type="text" id="cat-path-video" placeholder="Default" />
+                <button class="tool-btn small btn-browse-cat" data-cat="video">Browse</button>
+              </div>
+            </div>
+            <div class="category-path-row">
+              <span class="category-path-label">Music</span>
+              <div class="path-input category-path-input">
+                <input type="text" id="cat-path-audio" placeholder="Default" />
+                <button class="tool-btn small btn-browse-cat" data-cat="audio">Browse</button>
+              </div>
+            </div>
+            <div class="category-path-row">
+              <span class="category-path-label">Documents</span>
+              <div class="path-input category-path-input">
+                <input type="text" id="cat-path-document" placeholder="Default" />
+                <button class="tool-btn small btn-browse-cat" data-cat="document">Browse</button>
+              </div>
+            </div>
+            <div class="category-path-row">
+              <span class="category-path-label">Archives</span>
+              <div class="path-input category-path-input">
+                <input type="text" id="cat-path-archive" placeholder="Default" />
+                <button class="tool-btn small btn-browse-cat" data-cat="archive">Browse</button>
+              </div>
+            </div>
+            <div class="category-path-row">
+              <span class="category-path-label">Software</span>
+              <div class="path-input category-path-input">
+                <input type="text" id="cat-path-software" placeholder="Default" />
+                <button class="tool-btn small btn-browse-cat" data-cat="software">Browse</button>
+              </div>
+            </div>
+            <div class="category-path-row">
+              <span class="category-path-label">Images</span>
+              <div class="path-input category-path-input">
+                <input type="text" id="cat-path-image" placeholder="Default" />
+                <button class="tool-btn small btn-browse-cat" data-cat="image">Browse</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="settings-pane" data-settings-pane="youtube">
+            <h4>YouTube — signed-in access</h4>
+            <p class="settings-hint">yt-dlp runs as a separate process and cannot see your browser's login, so videos you <em>can</em> watch while signed in (private, members-only, age-confirmed) used to fail as “Sign in to confirm you’re not a bot”. Let yt-dlp read that browser's cookie store to fix it. Off by default — nothing is read until you choose a browser.</p>
+            <div class="form-group">
+              <label>Read cookies from browser</label>
+              <select id="setting-yt-cookies-browser">
+                <option value="">Off (don't use browser cookies)</option>
+                <option value="chrome">Chrome</option>
+                <option value="edge">Edge</option>
+                <option value="firefox">Firefox</option>
+                <option value="brave">Brave</option>
+                <option value="opera">Opera</option>
+                <option value="vivaldi">Vivaldi</option>
               </select>
             </div>
-          </div>
-        </div>
+            <div class="settings-hint">Cookies the browser extension captures are always forwarded, whatever you pick here.</div>
+          </section>
 
-        <div class="settings-section">
-          <h4>Browser Takeover</h4>
-          <p class="settings-hint">Which native browser downloads AiDM takes over automatically. Explicit clicks (video pill, popup, right-click menu) always work regardless of these.</p>
-          <div class="form-group toggle">
-            <label>Take over all downloads</label>
-            <input type="checkbox" id="setting-intercept-all" checked />
-          </div>
-          <div class="form-group">
-            <label>Auto-capture file types (when the toggle above is off)</label>
-            <textarea id="setting-intercept-types" rows="2" placeholder="exe, zip, mp3, mp4, pdf"></textarea>
-          </div>
-          <div class="form-group">
-            <label>Never take over from these sites (comma-separated)</label>
-            <textarea id="setting-excluded-sites" rows="2" placeholder="example.com, intranet.local"></textarea>
-          </div>
-          <div class="form-group">
-            <label>Force-takeover key (hold while clicking a link)</label>
-            <input type="text" id="setting-force-key" maxlength="12" placeholder="Shift" />
-            <p class="settings-hint" style="margin-top:4px;">Holding <b>Alt</b> while clicking always lets the browser handle the download.</p>
-          </div>
-        </div>
+          <section class="settings-pane" data-settings-pane="ai">
+            <h4>AI Assistant — TokenHarbor</h4>
+            <p class="settings-hint">OpenAI-compatible gateway at <code>https://tokenharbor.ai/v1</code>. Primary: <code>mimo-v2.5:free</code>, fallback: <code>deepseek-v4-flash:free</code>. Prefer the <code>TOKENHARBOR_API_KEY</code> env var — the field below is only a local fallback.</p>
+            <div class="form-group toggle">
+              <label>Enable AI features</label>
+              <input type="checkbox" id="setting-ai-enabled" checked />
+            </div>
+            <div class="form-group">
+              <label>Base URL</label>
+              <input type="text" id="setting-ai-baseurl" placeholder="https://tokenharbor.ai/v1" />
+            </div>
+            <div class="form-group">
+              <label>API Key (stored only in local settings file)</label>
+              <div class="path-input">
+                <input type="password" id="setting-ai-key" placeholder="thk_live_… or set TOKENHARBOR_API_KEY env var" />
+                <button class="tool-btn small" id="btn-ai-test" title="Test AI connection">Test</button>
+              </div>
+              <div class="settings-hint" id="ai-status-hint">Not tested yet.</div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label>Primary model</label>
+                <select id="setting-ai-primary">
+                  <option value="mimo-v2.5:free">mimo-v2.5:free (reasoning)</option>
+                  <option value="deepseek-v4-flash:free">deepseek-v4-flash:free (fast)</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Fallback model</label>
+                <select id="setting-ai-fallback">
+                  <option value="deepseek-v4-flash:free">deepseek-v4-flash:free (fast)</option>
+                  <option value="mimo-v2.5:free">mimo-v2.5:free (reasoning)</option>
+                </select>
+              </div>
+            </div>
+          </section>
 
-        <div class="settings-section">
-          <h4>Features</h4>
-          <div class="form-group toggle">
-            <label>Clipboard Monitoring</label>
-            <input type="checkbox" id="setting-clipboard" checked />
-          </div>
-          <div class="form-group toggle">
-            <label>AI link triage (Jev) for unrecognized copied URLs</label>
-            <input type="checkbox" id="setting-jev-assist" checked />
-          </div>
-          <p class="settings-hint">When a copied URL matches no known pattern, Jev (TypeSafe System One) classifies it — confident downloadable links are captured, pages ignored. Fail-open: off or unreachable means old behavior. Key via <code>TYPESAFE_API_KEY</code> env only.</p>
-          <div class="form-group toggle">
-            <label>Browser Integration (intercept all downloads)</label>
-            <input type="checkbox" id="setting-browser" checked />
-          </div>
-          <div class="form-group toggle">
-            <label>Desktop Notifications</label>
-            <input type="checkbox" id="setting-notifications" checked />
-          </div>
-          <div class="form-group toggle">
-            <label>Auto-Resume on Restart</label>
-            <input type="checkbox" id="setting-autoresume" checked />
-          </div>
-          <div class="form-group toggle">
-            <label>Start AiDM when Windows starts</label>
-            <input type="checkbox" id="setting-launch-startup" checked />
-          </div>
-          <div class="form-group toggle">
-            <label>Keep running in tray when window is closed</label>
-            <input type="checkbox" id="setting-minimize-tray" checked />
-          </div>
+          <section class="settings-pane" data-settings-pane="features">
+            <h4>Features</h4>
+            <div class="form-group toggle">
+              <label>Clipboard Monitoring</label>
+              <input type="checkbox" id="setting-clipboard" checked />
+            </div>
+            <div class="form-group toggle">
+              <label>AI link triage (Jev) for unrecognized copied URLs</label>
+              <input type="checkbox" id="setting-jev-assist" checked />
+            </div>
+            <p class="settings-hint">When a copied URL matches no known pattern, Jev (TypeSafe System One) classifies it — confident downloadable links are captured, pages ignored. Fail-open: off or unreachable means old behavior. Key via <code>TYPESAFE_API_KEY</code> env only.</p>
+            <div class="form-group toggle">
+              <label>Browser Integration (intercept all downloads)</label>
+              <input type="checkbox" id="setting-browser" checked />
+            </div>
+            <h4>File hosts — Rapidgator</h4>
+            <p class="settings-hint">Free hoster accounts are forced through a wait timer and a captcha, which AiDM does not bypass. Add a <strong>premium</strong> account (or paste a logged-in session cookie) and Rapidgator links download immediately.</p>
+            <div class="form-group">
+              <label>Username or email</label>
+              <input type="text" id="setting-rg-user" placeholder="your rapidgator login" />
+            </div>
+            <div class="form-group">
+              <label>Password</label>
+              <div class="path-input">
+                <input type="password" id="setting-rg-pass" placeholder="stored only in the local settings file" />
+              </div>
+            </div>
+            <div class="form-group">
+              <label>…or session cookie (optional)</label>
+              <input type="password" id="setting-rg-cookie" placeholder="PHPSESSID=… ; user__=…" />
+            </div>
+            <div class="settings-hint" id="rg-status-hint">Leave both empty to use the free flow (wait required).</div>
+          </section>
+
+          <section class="settings-pane" data-settings-pane="browser">
+            <h4>Browser Takeover</h4>
+            <p class="settings-hint">Which native browser downloads AiDM takes over automatically. Explicit clicks (video pill, popup, right-click menu) always work regardless of these.</p>
+            <div class="form-group toggle">
+              <label>Take over all downloads</label>
+              <input type="checkbox" id="setting-intercept-all" checked />
+            </div>
+            <div class="form-group">
+              <label>Auto-capture file types (when the toggle above is off)</label>
+              <textarea id="setting-intercept-types" rows="2" placeholder="exe, zip, mp3, mp4, pdf"></textarea>
+            </div>
+            <div class="form-group">
+              <label>Never take over from these sites (comma-separated)</label>
+              <textarea id="setting-excluded-sites" rows="2" placeholder="example.com, intranet.local"></textarea>
+            </div>
+            <div class="form-group">
+              <label>Force-takeover key (hold while clicking a link)</label>
+              <input type="text" id="setting-force-key" maxlength="12" placeholder="Shift" />
+              <p class="settings-hint" style="margin-top:4px;">Holding <b>Alt</b> while clicking always lets the browser handle the download.</p>
+            </div>
+          </section>
         </div>
       </div>
       <div class="modal-footer">
         <button class="tool-btn" id="btn-cancel-settings">Cancel</button>
-        <button class="tool-btn primary" id="btn-save-settings">💾 Save Settings</button>
+        <button class="tool-btn primary" id="btn-save-settings">Save Settings</button>
       </div>
     </div>
   </div>
@@ -496,8 +552,8 @@
   <div class="modal-overlay" id="scheduler-overlay" style="display:none;">
     <div class="modal settings-modal">
       <div class="modal-header">
-        <h3>⏰ Download Scheduler</h3>
-        <button class="modal-close" id="scheduler-close">✕</button>
+        <h3><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><use href="#i-clock"></use></svg> Download Scheduler</h3>
+        <button class="modal-close" id="scheduler-close" aria-label="Close"><svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-close"></use></svg></button>
       </div>
       <div class="modal-body">
         <p class="settings-hint">Run the download queue on a timetable — overnight downloads, off-peak syncing. Missed runs (app was closed) do not fire retroactively.</p>
@@ -576,7 +632,7 @@
       <div class="modal-footer">
         <button class="tool-btn" id="btn-sched-clear">Clear form</button>
         <button class="tool-btn" id="btn-sched-cancel">Close</button>
-        <button class="tool-btn primary" id="btn-sched-save">💾 Save Schedule</button>
+        <button class="tool-btn primary" id="btn-sched-save">Save Schedule</button>
       </div>
     </div>
   </div>
@@ -585,8 +641,8 @@
   <div class="modal-overlay" id="ai-overlay" style="display:none;">
     <div class="modal settings-modal">
       <div class="modal-header">
-        <h3>✨ AI Assistant (TokenHarbor)</h3>
-        <button class="modal-close" id="ai-close">✕</button>
+        <h3><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><use href="#i-sparkles"></use></svg> AI Assistant (TokenHarbor)</h3>
+        <span id="btn-ai-close"><button class="modal-close" id="ai-close" aria-label="Close"><svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-close"></use></svg></button></span>
       </div>
       <div class="modal-body">
         <div class="settings-hint" id="ai-model-hint">Primary mimo-v2.5:free → fallback deepseek-v4-flash:free</div>
@@ -607,25 +663,25 @@
 
   <!-- Context Menu -->
   <div class="context-menu" id="context-menu" style="display:none;">
-    <div class="ctx-item" data-action="pause">⏸ Pause</div>
-    <div class="ctx-item" data-action="resume">▶ Resume</div>
-    <div class="ctx-item" data-action="cancel">❌ Cancel</div>
+    <div class="ctx-item" data-action="pause"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><use href="#i-pause"></use></svg> Pause</div>
+    <div class="ctx-item" data-action="resume"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><use href="#i-play"></use></svg> Resume</div>
+    <div class="ctx-item" data-action="cancel"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-close"></use></svg> Cancel</div>
     <div class="ctx-divider"></div>
-    <div class="ctx-item" data-action="open-file">📂 Open File</div>
-    <div class="ctx-item" data-action="open-folder">📁 Open Containing Folder</div>
-    <div class="ctx-item" data-action="copy-url">🔗 Copy URL</div>
-    <div class="ctx-item" data-action="copy-hash">🔐 Copy SHA-256</div>
+    <div class="ctx-item" data-action="open-file"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-external"></use></svg> Open File</div>
+    <div class="ctx-item" data-action="open-folder"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-folder"></use></svg> Open Containing Folder</div>
+    <div class="ctx-item" data-action="copy-url"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-link"></use></svg> Copy URL</div>
+    <div class="ctx-item" data-action="copy-hash"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-hash"></use></svg> Copy SHA-256</div>
     <div class="ctx-divider"></div>
-    <div class="ctx-item" data-action="remove">📋 Remove from list</div>
-    <div class="ctx-item danger" data-action="delete-file">🗑 Delete file…</div>
+    <div class="ctx-item" data-action="remove"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-list-x"></use></svg> Remove from list</div>
+    <div class="ctx-item danger" data-action="delete-file"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-trash"></use></svg> Delete from disk…</div>
   </div>
 
   <!-- Delete Files Confirmation Modal (IDM-style) -->
   <div class="modal-overlay" id="delete-overlay" style="display:none;">
     <div class="modal delete-modal">
       <div class="modal-header">
-        <h3>🗑 Confirm Delete</h3>
-        <button class="modal-close" id="delete-close">✕</button>
+        <h3><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><use href="#i-trash"></use></svg> Confirm Delete</h3>
+        <button class="modal-close" id="delete-close" aria-label="Close"><svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-close"></use></svg></button>
       </div>
       <div class="modal-body">
         <div class="delete-msg" id="delete-msg"></div>
@@ -639,10 +695,12 @@
       </div>
       <div class="modal-footer">
         <button class="tool-btn" id="btn-cancel-delete">Cancel</button>
-        <button class="tool-btn danger-btn" id="btn-confirm-delete">🗑 Delete</button>
+        <button class="tool-btn danger-btn" id="btn-confirm-delete">Delete from disk</button>
       </div>
     </div>
   </div>
+
+  <div class="toast-stack" id="toast-stack"></div>
 
   <script src="app.js"></script>
 </body>

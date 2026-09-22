@@ -167,6 +167,17 @@ class AiService {
     return (content || '').trim();
   }
 
+  /** Summarize media text (transcript / subtitles) into a short brief. */
+  async summarize(text, opts = {}) {
+    const clipped = String(text || '').slice(0, 12000);
+    if (!clipped.trim()) return null;
+    const { content } = await this.chat([
+      { role: 'system', content: 'You summarize downloaded media transcripts for a download manager. Output 3-6 short bullet points plus a one-line title. No preamble.' },
+      { role: 'user', content: opts.title ? `Title: ${opts.title}\n\n${clipped}` : clipped },
+    ], { max_tokens: 400, temperature: 0.3 });
+    return (content || '').trim() || null;
+  }
+
   async listModels() {
     if (!this.isConfigured()) throw new Error('AI not configured');
     const res = await fetch(`${this.baseURL}/models`, {

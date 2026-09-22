@@ -156,6 +156,12 @@ function createWindow() {
   mainWindow.loadFile(path.join(__dirname, 'ui', 'index.html'));
 
   downloadManager = new DownloadManager();
+  downloadManager.setAiService(getAiService());
+  try {
+    const { safeStorage } = require('electron');
+    const { createSessionVault } = require('./src/session-vault');
+    downloadManager.setSessionVault(createSessionVault(safeStorage));
+  } catch (e) { /* safeStorage unavailable — cookies stay in-memory only */ }
   clipboardMonitor = new ClipboardMonitor({
     // Gate the Jev link-triage fallback on the settings toggle (live).
     jevAssist: () => downloadManager.getSettings().jevAssist !== false,
@@ -475,6 +481,44 @@ ipcMain.handle('add-download', async (event, opts) => {
       // A hoster that answered with a wait (free-user timer) instead of a file
       // must say so, not open an empty quality picker.
       if (!resolved.pickerVideos || !resolved.pickerVideos.length) {
+        // Free-host WAIT (timer) auto-retry — NEVER captcha (anti-abuse).
+        const waitSec = Number(resolved.waitSeconds) || 0;
+        const blocked = String(resolved.blocked || resolved.kind || '').toLowerCase();
+        const isCaptcha = blocked.includes('captcha') || /captcha/i.test(String(resolved.hint || resolved.error || ''));
+        const autoWait = downloadManager.getSettings().filehostAutoWait !== false;
+        if (waitSec > 0 && !isCaptcha && autoWait) {
+          const delayMs = Math.min(waitSec + 5, 300) * 1000;
+          setTimeout(async () => {
+            try {
+              const again = await resolvers.resolveMedia(opts.url, {
+                credentials: fileHostCredentials(),
+                cookies: (opts && opts.cookies) || null,
+                referer: (opts && opts.pageUrl) || null,
+                cookiesFromBrowser: youtubeCookiesFromBrowser(),
+              });
+              if (again && again.pickerVideos && again.pickerVideos.length) {
+                const pageUrl2 = again.canonicalUrl || opts.url;
+                downloadManager.emit('video-detected', {
+                  pageUrl: pageUrl2,
+                  pageTitle: again.title || `${again.provider} ${again.id}`,
+                  provider: again.provider,
+                  thumbnail: again.thumbnail || null,
+                  duration: again.duration || null,
+                  videos: again.pickerVideos || [],
+                  autoWaited: true,
+                });
+              }
+            } catch (e) { /* user can retry manually */ }
+          }, delayMs);
+          return {
+            resolveFailed: true,
+            provider: resolved.provider,
+            waitSeconds: waitSec,
+            autoRetryIn: waitSec + 5,
+            requiresCredentials: !!resolved.requiresCredentials,
+            error: `Waiting ${waitSec}s for the free-host timer… AiDM will retry automatically.`,
+          };
+        }
         return {
           resolveFailed: true,
           provider: resolved.provider,
@@ -828,6 +872,93 @@ ipcMain.handle('ai-health', async () => {
 ipcMain.handle('ai-models', async () => {
   syncAiConfig();
   return { models: await getAiService().listModels() };
+});
+
+ipcMain.handle('ai-summarize', async (event, { text, title }) => {
+  syncAiConfig();
+  return { summary: await getAiService().summarize(text, { title }) };
+});
+
+// ── Export / Import / Batch ───────────────────────────────────────────────────
+
+ipcMain.handle('export-downloads', async () => {
+  return downloadManager.exportDownloads();
+});
+
+ipcMain.handle('import-downloads', async (event, items) => {
+  return downloadManager.importDownloads(items);
+});
+
+ipcMain.handle('export-settings', async () => {
+  return downloadManager.getSettings();
+});
+
+ipcMain.handle('import-settings', async (event, settings) => {
+  if (!settings || typeof settings !== 'object') throw new Error('settings must be an object');
+  downloadManager.saveSettings(settings);
+  syncAiConfig();
+  return downloadManager.getSettings();
+});
+
+ipcMain.handle('batch-urls', async (event, { urls }) => {
+  if (!Array.isArray(urls)) throw new Error('urls must be an array');
+  return downloadManager.importDownloads(urls.filter((u) => typeof u === 'string'));
+});
+
+// ── Natural-language queue commands ──────────────────────────────────────────
+
+ipcMain.handle('nl-command', async (event, { text }) => {
+  const { parseNlCommand } = require('./src/nl-command');
+  const cmd = parseNlCommand(text);
+  if (cmd.action === 'download' && cmd.urls && cmd.urls.length) {
+    const res = downloadManager.importDownloads(cmd.urls);
+    return { ...cmd, result: res };
+  }
+  if (cmd.action === 'speed') {
+    const s = downloadManager.getSettings();
+    downloadManager.saveSettings({ ...s, speedLimit: cmd.speedBps || 0 });
+    try {
+      const { destroyAgents } = require('./src/engine/agents');
+      // engine speed limit is applied via download-engine coordinator
+      if (downloadManager.engine && downloadManager.engine.setGlobalSpeedLimit) {
+        downloadManager.engine.setGlobalSpeedLimit(cmd.speedBps || 0);
+      }
+    } catch (e) {}
+    return { ...cmd, applied: true };
+  }
+  if (cmd.action === 'pause-all') {
+    for (const d of downloadManager.downloads.values()) {
+      if (d.status === 'downloading' || d.status === 'queued' || d.status === 'connecting') {
+        downloadManager.pauseDownload(d.id);
+      }
+    }
+    return { ...cmd, applied: true };
+  }
+  if (cmd.action === 'resume-all') {
+    for (const d of [...downloadManager.downloads.values()]) {
+      if (d.status === 'paused' || d.status === 'error') {
+        try { downloadManager.resumeDownload(d.id); } catch (e) {}
+      }
+    }
+    return { ...cmd, applied: true };
+  }
+  if (cmd.action === 'schedule') {
+    const [hh, mm] = String(cmd.when || '22:00').split(':');
+    const schedules = (downloadManager.getSettings().schedules || []).slice();
+    schedules.push({
+      id: 'nl-' + Date.now().toString(36),
+      name: `NL ${cmd.repeat} @ ${cmd.when}`,
+      type: cmd.repeat || 'once',
+      hour: parseInt(hh, 10) || 22,
+      minute: parseInt(mm, 10) || 0,
+      enabled: true,
+      speedLimitKBs: null,
+    });
+    downloadManager.saveSettings({ schedules });
+    if (scheduler) scheduler.configure(downloadManager.getSettings());
+    return { ...cmd, applied: true, schedules };
+  }
+  return { ...cmd, applied: false };
 });
 
 // ── App Lifecycle ─────────────────────────────────────────────────────────────

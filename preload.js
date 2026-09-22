@@ -37,8 +37,15 @@ contextBridge.exposeInMainWorld('aidm', {
   aiSmartFilename: (url, hint) => ipcRenderer.invoke('ai-smart-filename', { url, hint }),
   aiCategorize: (url, filename) => ipcRenderer.invoke('ai-categorize', { url, filename }),
   aiExplainError: (error, url) => ipcRenderer.invoke('ai-explain-error', { error, url }),
+  aiSummarize: (text, title) => ipcRenderer.invoke('ai-summarize', { text, title }),
   aiHealth: () => ipcRenderer.invoke('ai-health'),
   aiModels: () => ipcRenderer.invoke('ai-models'),
+  exportDownloads: () => ipcRenderer.invoke('export-downloads'),
+  importDownloads: (items) => ipcRenderer.invoke('import-downloads', items),
+  exportSettings: () => ipcRenderer.invoke('export-settings'),
+  importSettings: (settings) => ipcRenderer.invoke('import-settings', settings),
+  batchUrls: (urls) => ipcRenderer.invoke('batch-urls', { urls }),
+  nlCommand: (text) => ipcRenderer.invoke('nl-command', { text }),
 
   // Window controls
   minimize: () => ipcRenderer.invoke('window-minimize'),

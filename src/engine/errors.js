@@ -29,7 +29,9 @@ class DownloadError extends Error {
 }
 
 const RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
-const PERMANENT_STATUSES = new Set([400, 401, 403, 404, 405, 410, 451]);
+// 501 is "method not implemented" — Range/HEAD from non-browser clients.
+// Retrying burns the whole budget and never succeeds.
+const PERMANENT_STATUSES = new Set([400, 401, 403, 404, 405, 410, 451, 501]);
 
 /**
  * @param {number} status
@@ -86,7 +88,10 @@ function toDownloadError(err) {
   if (err instanceof TypeError && /fetch failed/i.test(message)) {
     return new DownloadError('NETWORK', 'Network error: fetch failed', { retryable: true, cause: err });
   }
-  return new DownloadError('NETWORK', message || 'Unknown error', { retryable: true, cause: err });
+  // Plain logic / JSON / disk errors must not masquerade as retryable network
+  // failures — that caused full retry storms on deterministic faults.
+  if (err instanceof DownloadError) return err;
+  return new DownloadError('UNKNOWN', message || 'Unknown error', { retryable: false, cause: err });
 }
 
 module.exports = {

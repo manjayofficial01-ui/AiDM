@@ -392,7 +392,7 @@ class DownloadTask extends EventEmitter {
       }
     }
 
-    if (!restored && canResume && this.config.resumeOffsets && info.size > 0) {
+    if (!restored && canResume && this.config.resumeOffsets && (info.size > 0 || info.size == null)) {
       const existingPath = (await fileExists(partPath)) ? partPath : ((await fileExists(finalPath)) ? finalPath : null);
       if (existingPath) {
         if (existingPath === finalPath && finalPath !== partPath) {
@@ -685,6 +685,7 @@ class DownloadTask extends EventEmitter {
    * @param {DownloadError} err
    */
   onWorkerError(segment, mirror, err) {
+    // Cancel/pause already returned above via stopping / CANCELLED / PAUSED.
     if (this.stopping || err.code === 'CANCELLED' || err.code === 'PAUSED') return;
 
     if (err.code === 'RESOURCE_CHANGED') {
@@ -710,14 +711,6 @@ class DownloadTask extends EventEmitter {
       this.log('debug', err.message);
       segment.retryAt = Date.now();
       this.mirrors.reportFailure(mirror, err);
-      return;
-    }
-
-    if (err.code === 'CANCELLED' || err.code === 'PAUSED') {
-      // Aborted without the task asking to stop (e.g. a sibling connection
-      // tripped fail()). Back off slightly or fill() re-claims the segment in
-      // a hot loop.
-      segment.retryAt = Date.now() + 250;
       return;
     }
 

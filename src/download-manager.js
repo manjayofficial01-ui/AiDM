@@ -202,6 +202,48 @@ function pruneYoutubeLogs(dir, { keep = 20, maxAgeMs = 24 * 3600 * 1000 } = {}) 
   } catch (e) { /* never let housekeeping break a download */ }
 }
 
+/** True when a tiny file's leading bytes look like HTML/JSON text, not media. */
+function looksLikeErrorPage(filePath) {
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    const buf = Buffer.alloc(256);
+    const n = fs.readSync(fd, buf, 0, 256, 0);
+    fs.closeSync(fd);
+    const head = buf.slice(0, n).toString('utf8').replace(/^﻿/, '').trimStart().toLowerCase();
+    if (!head) return true;
+    return head.startsWith('<!doctype') || head.startsWith('<html') ||
+      head.startsWith('<?xml') || head.startsWith('{"') || head.startsWith('{"error');
+  } catch (e) {
+    return true;
+  }
+}
+
+/**
+ * True when leading bytes look like a real media container (ftyp/matroska/
+ * ID3/OggS/RIFF/FLAC) so a tiny legitimate clip is not discarded.
+ */
+function looksLikeMediaContainer(filePath) {
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    const buf = Buffer.alloc(16);
+    const n = fs.readSync(fd, buf, 0, 16, 0);
+    fs.closeSync(fd);
+    if (n < 8) return false;
+    // ISO BMFF: ....ftyp
+    if (buf.slice(4, 8).toString('ascii') === 'ftyp') return true;
+    // Matroska/WebM EBML header 0x1A45DFA3
+    if (buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3) return true;
+    // ID3 / MP3 sync
+    if (buf.slice(0, 3).toString('ascii') === 'ID3') return true;
+    if (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0) return true;
+    // OggS / RIFF / fLaC
+    const tag = buf.slice(0, 4).toString('ascii');
+    return tag === 'OggS' || tag === 'RIFF' || tag === 'fLaC';
+  } catch (e) {
+    return false;
+  }
+}
+
 /** `clip.mp4` → `clip (1).mp4` → `clip (2).mp4` … (never overwrites). */
 function uniqueFilePath(filePath) {
   const ext = path.extname(filePath);
@@ -232,6 +274,19 @@ function accessDeniedMessage(status) {
  * Chrome fetching the file itself carries the exact cookies and Fetch
  * metadata the CDN demands. Extracted pure for test/browser-engine.js.
  */
+/**
+ * Map raw engine HTTP failures to the same friendly guidance the probe path
+ * uses. Mid-stream 401/403/501 used to show a bare "Server responded with…".
+ */
+function friendlyHttpMessage(message) {
+  const httpDead = /HTTP (404|410|401|403|501)\b/.exec(String(message || ''));
+  if (!httpDead) return message;
+  const code = parseInt(httpDead[1], 10);
+  return (code === 401 || code === 403)
+    ? accessDeniedMessage(code)
+    : (code === 501 ? methodBlockedMessage(code) : deadLinkMessage(code));
+}
+
 function methodBlockedMessage(status) {
   return 'The server refused this download request (HTTP ' + status + '). ' +
     'This host rejects download-manager requests but usually serves the same file to the browser — ' +
@@ -401,6 +456,12 @@ const DEFAULT_SETTINGS = {
   autoResume: true,
   speedLimit: 0,
   queueMaxActive: 3, // historical default kept for settings-file compatibility (unused; concurrency uses maxConcurrentDownloads)
+  // yt-dlp media pipeline (used by YouTube and DASH .mpd routing)
+  youtubeMaxConcurrent: 2,
+  youtubeTimeoutMinutes: 30,
+  youtubeSubtitleLangs: '',
+  youtubeSubtitleAuto: true,
+  youtubeSubtitleEmbed: false,
   clipboardMonitor: true,
   browserIntegration: true,
   notifications: true,
@@ -552,13 +613,15 @@ class DownloadManager extends EventEmitter {
 
     this.engine.on('download-error', (data) => {
       const dl = this.downloads.get(data.id);
+      const friendly = this._friendlyEngineError(data.error);
       if (dl) {
         dl.status = 'error';
-        dl.error = data.error;
+        dl.error = friendly;
+        this._maybeAiExplainError(dl, friendly);
       }
       this._persistDownloads(true);
       this._processQueue();
-      this.emit('download-error', data);
+      this.emit('download-error', { ...data, error: friendly });
     });
 
     this.engine.on('download-paused', (data) => {
@@ -571,7 +634,11 @@ class DownloadManager extends EventEmitter {
 
     this.engine.on('download-resumed', (data) => {
       const dl = this.downloads.get(data.id);
-      if (dl) dl.status = 'downloading';
+      // Same pause/progress race as download-progress: a late resume tick must
+      // not overwrite an intentional pause/cancel/error.
+      if (dl && (dl.status === 'paused' || dl.status === 'queued-paused' || dl.status === 'queued')) {
+        dl.status = 'downloading';
+      }
       this.emit('download-resumed', data);
     });
 
@@ -698,10 +765,14 @@ class DownloadManager extends EventEmitter {
       meta: meta || null,            // video metadata from detection
       headers: replay.headers,       // allowlisted replay headers (Referer/Origin/UA)
       cookies: replay.cookies,       // session cookies for authenticated downloads (KVS etc.)
-      // Persisted (cookies themselves are not): a row that needed session
-      // cookies cannot resume after a restart — the cookies are gone, the
-      // probe would 401/403. _loadDownloads reads this to skip auto-resume.
+      // Persisted (cookies themselves are not in the downloads JSON): a row
+      // that needed session cookies can resume after a restart only when the
+      // encrypted session vault still holds them.
       needsSession: !!replay.cookies,
+      ...(replay.cookies && this.sessionVault ? (() => {
+        try { this.sessionVault.save(id, replay.cookies); } catch (e) {}
+        return {};
+      })() : {}),
       audioUrl: audioUrl || null,    // paired audio-only track to mux in (split-AV)
       isHls: isHlsUrl(url),
       isDash: isDashUrl(url),
@@ -714,8 +785,12 @@ class DownloadManager extends EventEmitter {
     };
 
     this.downloads.set(id, download);
+    if (replay.cookies && this.sessionVault) {
+      try { this.sessionVault.save(id, replay.cookies); } catch (e) {}
+    }
     this._persistDownloads(true);
     this.emit('download-added', download);
+    this._maybeAiCategorize(download);
 
     // Ask-every-time: resolve the real file name first, then raise the
     // topmost location dialog pre-filled with it and the default folder.
@@ -918,7 +993,133 @@ class DownloadManager extends EventEmitter {
     this.queue.push(id);
     this._persistDownloads(true);
     this.emit('download-added', download);
+    this._maybeAiCategorize(download);
     return download;
+  }
+
+  /** Injected by main.js — optional AI (TokenHarbor) for smart assist. */
+  setAiService(svc) {
+    this.aiService = svc || null;
+  }
+
+  /**
+   * Optional encrypted cookie vault (Electron safeStorage). When present,
+   * session cookies for `needsSession` rows are saved encrypted and restored
+   * on load so authenticated downloads can auto-resume after a restart.
+   */
+  setSessionVault(vault) {
+    this.sessionVault = vault || null;
+    try { if (this.sessionVault && this.sessionVault.prune) this.sessionVault.prune(); } catch (e) {}
+  }
+
+  /**
+   * Optional encrypted cookie vault (Electron safeStorage). When present,
+   * session cookies for `needsSession` rows are saved encrypted and restored
+   * on load so authenticated downloads can auto-resume after a restart.
+   */
+  setSessionVault(vault) {
+    this.sessionVault = vault || null;
+    try { if (this.sessionVault && this.sessionVault.prune) this.sessionVault.prune(); } catch (e) {}
+  }
+
+  _aiReady() {
+    try {
+      return !!(this.settings.aiEnabled !== false && this.aiService && this.aiService.isConfigured());
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /** Fail-open: auto-tag category when the extension guess was 'other'. */
+  _maybeAiCategorize(download) {
+    if (!download || !this._aiReady()) return;
+    if (download.category && download.category !== 'other') return;
+    try {
+      this.aiService.categorize(download.url, download.filename).then((cat) => {
+        if (!this.downloads.has(download.id)) return;
+        if (cat && cat !== download.category && CATEGORIES[cat]) {
+          download.category = cat;
+          this._persistDownloads(true);
+          this.emit('download-updated', download);
+        }
+      }).catch(() => {});
+    } catch (e) { /* fail-open */ }
+  }
+
+  /** Fail-open: attach a plain-language fix hint to an errored row. */
+  _maybeAiExplainError(download, errorMsg) {
+    if (!download || !this._aiReady() || !errorMsg) return;
+    try {
+      this.aiService.explainError(errorMsg, download.url).then((expl) => {
+        if (!expl || !this.downloads.has(download.id)) return;
+        download.aiHint = String(expl).slice(0, 500);
+        this._persistDownloads(true);
+        this.emit('download-updated', download);
+      }).catch(() => {});
+    } catch (e) { /* fail-open */ }
+  }
+
+  /** Export the download list (cookies/headers scrubbed) as JSON. */
+  exportDownloads() {
+    return Array.from(this.downloads.values()).map((d) => {
+      const { cookies, _probe, _normUrl, _probePromise, _customPath, _speedSamples, ...rest } = d;
+      return {
+        ...rest,
+        headers: withoutCookieHeader(d.headers) || null,
+        meta: d.meta && typeof d.meta === 'object'
+          ? { ...d.meta, headers: withoutCookieHeader(d.meta.headers) }
+          : (d.meta || null),
+      };
+    });
+  }
+
+  /**
+   * Import rows from exportDownloads() / a batch URL list.
+   * Accepts either an array of row objects or an array of URL strings.
+   * @returns {{ added: number, skipped: number, errors: string[] }}
+   */
+  importDownloads(items) {
+    const out = { added: 0, skipped: 0, errors: [] };
+    if (!Array.isArray(items)) return out;
+    for (const item of items.slice(0, 500)) {
+      try {
+        if (typeof item === 'string') {
+          const url = item.trim();
+          if (!url || !/^https?:\/\//i.test(url)) { out.skipped++; continue; }
+          const row = this.addDownload({ url });
+          if (row && row.duplicate) out.skipped++;
+          else if (row) out.added++;
+          else out.skipped++;
+          continue;
+        }
+        if (!item || typeof item !== 'object' || !item.url) { out.skipped++; continue; }
+        const row = this.addDownload({
+          url: item.url,
+          filename: item.filename || undefined,
+          savePath: item.savePath || undefined,
+          segments: item.segments || undefined,
+          category: item.category || undefined,
+          quality: item.quality || null,
+          meta: item.meta || null,
+          headers: item.headers || undefined,
+          mirrors: item.mirrors || undefined,
+          checksum: item.checksum || null,
+          audioUrl: item.audioUrl || null,
+        });
+        if (row && row.duplicate) out.skipped++;
+        else if (row) out.added++;
+        else out.skipped++;
+      } catch (e) {
+        out.errors.push(String((e && e.message) || e));
+        out.skipped++;
+      }
+    }
+    return out;
+  }
+
+  /** Friendly rewrite for mid-stream engine HTTP failures (401/403/501/404). */
+  _friendlyEngineError(message) {
+    try { return friendlyHttpMessage(message); } catch (e) { return message; }
   }
 
   /** True when the download was cancelled/removed/paused while we were probing. */
@@ -1000,9 +1201,51 @@ class DownloadManager extends EventEmitter {
       Promise.resolve()
         .then(() => this.probeMedia(dl))
         .then(() => this._ensureAudio(dl))
+        .then(() => this._maybeAiSummarize(dl))
         .catch(() => {})
         .finally(() => this._runPostDownloadAction(dl));
     } catch (e) { /* never throw into the Electron main process */ }
+  }
+
+  /**
+   * AI-era: if a subtitle/transcript sidecar sits next to the finished media,
+   * summarize it into `<name>.summary.txt` and store `aiSummary` on the row.
+   * Fail-open. Skipped when AI is off or `aiSummarize === false`.
+   */
+  async _maybeAiSummarize(dl) {
+    try {
+      if (!dl || dl._summaryDone || !this._aiReady()) return;
+      if (this.settings.aiSummarize === false) return;
+      if (!dl.filepath || !fs.existsSync(dl.filepath)) return;
+      dl._summaryDone = true;
+      const dir = path.dirname(dl.filepath);
+      const stem = path.basename(dl.filepath, path.extname(dl.filepath));
+      let text = '';
+      for (const ext of ['.srt', '.vtt', '.json3', '.txt']) {
+        const p = path.join(dir, stem + ext);
+        try {
+          if (fs.existsSync(p)) {
+            const raw = fs.readFileSync(p, 'utf8');
+            text = raw
+              .replace(/^WEBVTT.*$/gim, '')
+              .replace(/^\d+$/gm, '')
+              .replace(/-->/g, ' ')
+              .replace(/\s+/g, ' ')
+              .trim();
+            if (text.length > 40) break;
+          }
+        } catch (e) {}
+      }
+      if (text.length < 40) return;
+      const summary = await this.aiService.summarize(text, { title: dl.filename });
+      if (!summary) return;
+      const live = this.downloads.get(dl.id) || dl;
+      live.aiSummary = summary;
+      const out = path.join(dir, stem + '.summary.txt');
+      try { fs.writeFileSync(out, summary + '\n', 'utf8'); live.summaryPath = out; } catch (e) {}
+      this._persistDownloads(true);
+      this.emit('download-updated', live);
+    } catch (e) { /* fail-open */ }
   }
 
   /**
@@ -1279,7 +1522,8 @@ class DownloadManager extends EventEmitter {
    * @returns {Promise<boolean>} true when this method has taken over the row
    *          (the caller must return); false to continue with the normal engine.
    */
-  async _startYoutubeDownload(download, { force = false } = {}) {
+  async _startYoutubeDownload(download, { force = false, dashOnly = false } = {}) {
+    if (dashOnly) force = true;
     const choice = download.ytFormat || null;
     if (!force && youtubeResolver.isChoiceFresh(choice)) return false;
 
@@ -1319,6 +1563,7 @@ class DownloadManager extends EventEmitter {
     }
 
     if (!(await ytdlp.detectRunner())) {
+      if (dashOnly) throw new Error(ytdlp.ytdlpMissingMessage());
       fail(ytdlp.ytdlpMissingMessage(), 'missing');
       return true;
     }
@@ -1340,12 +1585,12 @@ class DownloadManager extends EventEmitter {
     try {
       await ytdlp.download({
         url: pageUrl,
-        formatSpec: youtubeResolver.buildFormatSpec(choice),
+        formatSpec: dashOnly ? 'best' : youtubeResolver.buildFormatSpec(choice),
         outputTemplate: template,
         // Flags the CHOICE itself needs (an MP3 pick re-encodes) plus the
         // user's subtitle preference. Subtitles are opt-in, so this is
         // normally an empty list and changes nothing about the normal path.
-        extraArgs: [
+        extraArgs: dashOnly ? [] : [
           ...youtubeResolver.buildExtraArgs(choice),
           ...ytdlp.buildSubtitleArgs({
             langs: String(this.settings.youtubeSubtitleLangs || '').trim(),
@@ -1433,14 +1678,16 @@ class DownloadManager extends EventEmitter {
       let size = 0;
       try { size = fs.statSync(finalPath).size; } catch (e) { /* stay 0 */ }
 
-      // An empty or header-only file is never a finished download. Marking it
-      // `completed` is the "31 bytes and it says 100% done" bug: the row looks
-      // green, the file cannot be played, and the user has no idea why. Fail
-      // with the real reason and remove the useless file.
-      // 1 KiB is below the smallest possible valid media container (an mp4
-      // needs its ftyp+moov boxes alone), so anything under it is an error
-      // page or a stub, not a video.
-      if (size < 1024) {
+      // An empty file — or a tiny HTML/JSON/stub saved as media — is never a
+      // finished download. Tiny *legitimate* binary media is rare under 512B;
+      // anything that small that is not a real container is discarded.
+      if (size === 0 || (size < 512 && !looksLikeMediaContainer(finalPath))) {
+        try { if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath); } catch (e) { /* best effort */ }
+        fail('The download finished but the saved file is empty or incomplete, so it was not kept. Retry, or pick a different quality.', 'no-output', logPath);
+        return true;
+      }
+      // A 400-byte "mp4" that is not a real container is still junk.
+      if (size < 1024 && looksLikeErrorPage(finalPath)) {
         try { if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath); } catch (e) { /* best effort */ }
         fail('The download finished but the saved file is empty or incomplete, so it was not kept. Retry, or pick a different quality.', 'no-output', logPath);
         return true;
@@ -1529,44 +1776,10 @@ class DownloadManager extends EventEmitter {
       // in flight (it can take seconds) — don't start a ghost download.
       if (this._startAborted(download)) return;
 
-      // Dead-link guard: the probe with the real headers (Referer + session
-      // cookies) proves the CDN no longer serves this URL (404/410). Fail at
-      // ADD time with guidance instead of a doomed 0% "DOWNLOADING" row whose
-      // segments each repeat the same 404. Fresh starts only — a resume with
-      // bytes on disk keeps its existing behavior.
-      // 401/403 with the real headers is a different verdict — blocked, not
-      // necessarily gone (expired token, login wall, anti-hotlink rule) — so
-      // it fails fast with its own message rather than sitting at 0% through
-      // every segment retry or being misreported as "expired".
-      if (!download.isHls && !download.isDash && download.downloaded === 0 && meta) {
-        if (isDeadProbeStatus(meta.status)) {
-          download.status = 'error';
-          download.error = deadLinkMessage(meta.status);
-          this._persistDownloads(true);
-          this.emit('download-error', { id: download.id, error: download.error });
-          this._processQueue();
-          return;
-        }
-        if (meta.status === 401 || meta.status === 403) {
-          download.status = 'error';
-          download.error = accessDeniedMessage(meta.status);
-          this._persistDownloads(true);
-          this.emit('download-error', { id: download.id, error: download.error });
-          this._processQueue();
-          return;
-        }
-        // 501 rejects the request itself (strict CDNs answer 501 to
-        // Range/HEAD from non-browser clients). Retrying cannot help — point
-        // at the in-browser fallback instead of looping through segments.
-        if (meta.status === 501) {
-          download.status = 'error';
-          download.error = methodBlockedMessage(meta.status);
-          this._persistDownloads(true);
-          this.emit('download-error', { id: download.id, error: download.error });
-          this._processQueue();
-          return;
-        }
-      }
+      // Dead-link / access-denied / method-blocked guards already ran inside
+      // `_resolveFilename` → `_enforceProbeGuards`. If that path failed the row
+      // (or a late probe did), stop here instead of double-emitting.
+      if (this._startAborted(download) || download.status === 'error') return;
 
       download.filepath = path.join(download.savePath, download.filename);
 
@@ -1576,13 +1789,19 @@ class DownloadManager extends EventEmitter {
 
       // HLS streams (m3u8) are assembled segment-by-segment, not ranged.
       if (download.isDash) {
-        // Minimal coverage: flag unsupported up front rather than silently
-        // saving the manifest XML as a video.
-        const err = new Error('DASH (.mpd) streams are not yet supported by AiDM.');
-        download.status = 'error';
-        download.error = err.message;
-        this.emit('download-error', { id: download.id, error: err.message });
-        return;
+        // Route DASH through yt-dlp (same stack as YouTube): the native engine
+        // cannot assemble .mpd adaptation sets. Fail only if yt-dlp is missing.
+        try {
+          await this._startYoutubeDownload(download, { dashOnly: true });
+          return;
+        } catch (dashErr) {
+          download.status = 'error';
+          download.error = dashErr && dashErr.message
+            ? `DASH (.mpd) needs yt-dlp: ${dashErr.message}`
+            : 'DASH (.mpd) streams require yt-dlp to be installed.';
+          this.emit('download-error', { id: download.id, error: download.error });
+          return;
+        }
       }
       if (download.isHls) {
         // Live (no ENDLIST, e.g. Xtream/IPTV channels) records until stopped
@@ -1616,7 +1835,10 @@ class DownloadManager extends EventEmitter {
       const singleConnection = download.singleConnection === true;
       const resumable = download.resumable !== false;
       let resumeOffsets = null;
-      if (resumable && download.downloaded > 0 && download.totalSize > 0 && Array.isArray(download._segProgress)) {
+      // Unknown-size files still resume from the segment map; only exclude
+      // non-resumable hosters (splicing would corrupt the part file).
+      if (resumable && download.downloaded > 0 && Array.isArray(download._segProgress) &&
+          (download.totalSize == null || download.totalSize > 0)) {
         resumeOffsets = {};
         download._segProgress.forEach((bytes, i) => { resumeOffsets[i] = bytes || 0; });
       }
@@ -1947,67 +2169,76 @@ class DownloadManager extends EventEmitter {
   async _resolveFilename(download, extraHeaders = null) {
     if (download._nameResolved) return download._probe || null;
     const probeHeaders = extraHeaders || download.headers || {};
-    let meta = null;
-    let hlsSize = null;
-    try {
-      if (download.isHls) {
-        // Real (or close-estimate) total size from the playlist, so the UI can
-        // show a size for an HLS stream before/while it downloads.
-        hlsSize = await Promise.race([
-          this.engine.probeHlsSize(download.url, probeHeaders),
-          new Promise((r) => setTimeout(() => r(null), 20000)),
-        ]);
-        if (hlsSize && hlsSize.totalSize > 0) {
-          download.totalSize = hlsSize.totalSize;
-          download.sizeEstimated = !!hlsSize.estimated;
-        }
-        // fMP4 (`#EXT-X-MAP`) playlists assemble into a real .mp4; everything
-        // else into .ts. Set here too so direct .m3u8 URLs get the right name.
-        download.isLive = !!(hlsSize && hlsSize.isLive);
-        download._hlsContainer = (hlsSize && hlsSize.container) || 'ts';
-      } else {
-        meta = await Promise.race([
-          this.engine.probeMeta(download.url, probeHeaders),
-          new Promise((r) => setTimeout(() => r(null), 8000)),
-        ]);
-        // Surface the real size up front: direct downloads usually advertise a
-        // Content-Length, and showing it early avoids an "Unknown" row.
-        if (meta && meta.contentLength > 0) {
-          download.totalSize = meta.contentLength;
-          download.sizeEstimated = false;
-        }
-        // Reclassify: a normal HEAD probe can land on a manifest — an
-        // extension-less HLS URL (Xtream live `…/live/u/p/id`), a CDN proxy
-        // path, or a KVS endpoint that returns the playlist with video/*
-        // content. Without this, the manager saved the playlist text as a file.
-        if (meta && mediaContentTypeIsStream(meta.contentType || '')) {
-          if (isDashUrl(download.url) || /dash\+xml/.test(meta.contentType || '')) {
-            download.isDash = true;
-          } else {
-            download.isHls = true;
-            const h2 = await Promise.race([
-              this.engine.probeHlsSize(download.url, probeHeaders),
-              new Promise((r) => setTimeout(() => r(null), 20000)),
-            ]);
-            if (h2 && h2.totalSize > 0) {
-              download.totalSize = h2.totalSize;
-              download.sizeEstimated = !!h2.estimated;
-            }
-            download.isLive = !!h2 && !!h2.isLive;
-            download._hlsContainer = (h2 && h2.container) || 'ts';
+    // Share one probe promise per row. A soft 8s race only delays the UI —
+    // a late result still lands (name/size/guards) and must NOT be dropped
+    // just because the race timed out first.
+    if (!download._probePromise) {
+      download._probePromise = (async () => {
+        try {
+          if (download.isHls) {
+            const hlsSize = await this.engine.probeHlsSize(download.url, probeHeaders);
+            return { kind: 'hls', hlsSize, meta: null };
           }
+          const meta = await this.engine.probeMeta(download.url, probeHeaders);
+          if (meta && mediaContentTypeIsStream(meta.contentType || '')) {
+            if (isDashUrl(download.url) || /dash\+xml/.test(meta.contentType || '')) {
+              return { kind: 'dash', meta, hlsSize: null };
+            }
+            const hlsSize = await this.engine.probeHlsSize(download.url, probeHeaders);
+            return { kind: 'hls', hlsSize, meta };
+          }
+          return { kind: 'file', meta, hlsSize: null };
+        } catch (e) {
+          return { kind: 'error', meta: null, hlsSize: null, error: e };
         }
-      }
-    } catch (e) {
-      meta = null;
-      hlsSize = null;
+      })();
     }
+
+    const settled = await Promise.race([
+      download._probePromise,
+      new Promise((r) => setTimeout(() => r(null), 8000)),
+    ]);
+
+    if (!settled) {
+      // Soft timeout: start the transfer with the URL-derived name and let the
+      // late probe refine size/name and run the dead-link guard when it lands.
+      download._probePromise.then((late) => {
+        if (!this.downloads.has(download.id)) return;
+        this._applyProbeResult(download, late);
+        this._enforceProbeGuards(download, late && late.meta);
+      }).catch(() => {});
+      return download._probe || null;
+    }
+    this._applyProbeResult(download, settled);
+    const live = this._enforceProbeGuards(download, settled && settled.meta);
+    return live || download._probe || (settled.hlsSize ? settled.hlsSize : settled.meta);
+  }
+
+  /** Apply a settled probe result (name/size/live/container) to the row. */
+  _applyProbeResult(download, result) {
+    if (!result || result.kind === 'error') {
+      download._nameResolved = true;
+      return;
+    }
+    const meta = result.meta || null;
+    const hlsSize = result.hlsSize || null;
+    if (result.kind === 'dash') download.isDash = true;
+    if (hlsSize && (hlsSize.totalSize > 0 || hlsSize.size > 0)) {
+      download.totalSize = hlsSize.totalSize || hlsSize.size;
+      download.sizeEstimated = !!hlsSize.estimated;
+    }
+    if (hlsSize) {
+      download.isLive = !!hlsSize.isLive;
+      download._hlsContainer = hlsSize.container || 'ts';
+    }
+    if (meta && meta.contentLength > 0 && !download.isHls && !download.isDash) {
+      download.totalSize = meta.contentLength;
+      download.sizeEstimated = false;
+    }
+    if (result.kind === 'hls') download.isHls = true;
     download._nameResolved = true;
-    // Only cache a probe that actually succeeded. A 403/401/5xx probe (common
-    // for KVS /get_file/ when cookies are missing) would otherwise poison the
-    // real download with a bogus size and no-Range fallback.
     const probeOk = meta && meta.status >= 200 && meta.status < 400;
-    download._probe = probeOk ? meta : (hlsSize ? { contentLength: hlsSize.totalSize } : null);
+    download._probe = probeOk ? meta : (hlsSize ? { contentLength: hlsSize.totalSize || hlsSize.size || 0 } : null);
 
     // Pick the real output container for HLS: fMP4 (`#EXT-X-MAP`) playlists
     // assemble into a genuine .mp4; everything else becomes .ts. Extensionless
@@ -2021,14 +2252,49 @@ class DownloadManager extends EventEmitter {
       download.category = detectCategory(download.filename);
     }
 
-    // Refine the file name from the server (direct files only; HLS/DASH
-    // resolve to a container decided just above).
     if (!download.isHls && !download.isDash && this._refineFilename(download, meta)) {
       download.filepath = path.join(download.savePath, download.filename);
     }
     this._persistDownloads(true);
     this.emit('download-updated', download);
-    return meta || (hlsSize ? hlsSize : null);
+  }
+
+  /**
+   * Dead-link / access-denied / method-blocked guards that need a real meta.
+   * Returns the meta when the row may continue, or null when the guard failed
+   * the row (so the caller does not double-start).
+   */
+  _enforceProbeGuards(download, meta) {
+    if (!meta) return null;
+    if (download.isHls || download.isDash) return meta;
+    // Fresh starts only — a resume with bytes on disk keeps going.
+    if (download.downloaded === 0) {
+      if (isDeadProbeStatus(meta.status)) {
+        download.status = 'error';
+        download.error = deadLinkMessage(meta.status);
+        this._persistDownloads(true);
+        this.emit('download-error', { id: download.id, error: download.error });
+        this._processQueue();
+        return null;
+      }
+      if (meta.status === 401 || meta.status === 403) {
+        download.status = 'error';
+        download.error = accessDeniedMessage(meta.status);
+        this._persistDownloads(true);
+        this.emit('download-error', { id: download.id, error: download.error });
+        this._processQueue();
+        return null;
+      }
+      if (meta.status === 501) {
+        download.status = 'error';
+        download.error = methodBlockedMessage(meta.status);
+        this._persistDownloads(true);
+        this.emit('download-error', { id: download.id, error: download.error });
+        this._processQueue();
+        return null;
+      }
+    }
+    return meta;
   }
 
   _ensureDirectories() {
@@ -2085,7 +2351,13 @@ class DownloadManager extends EventEmitter {
       // internal scratch, not something that should sit on disk in plaintext.
       // Keep `_segProgress` so a restart can resume mid-file.
       const data = Array.from(this.downloads.values()).map(d => {
-        const { cookies, headers, meta, _probe, _normUrl, _nameResolved, _customPath, _speedSamples, ...rest } = d;
+        const { cookies, headers, meta, _probe, _normUrl, _nameResolved, _customPath, _speedSamples, _probePromise, ...rest } = d;
+        if (this.sessionVault) {
+          try {
+            if (cookies) this.sessionVault.save(d.id, cookies);
+            else if (d.status === 'completed' || d.status === 'cancelled') this.sessionVault.forget(d.id);
+          } catch (e) {}
+        }
         return {
           ...rest,
           // Keep sanitized headers (Referer/Origin/UA) but never cookies —
@@ -2162,6 +2434,16 @@ class DownloadManager extends EventEmitter {
         if (Array.isArray(data)) data.forEach(d => {
           if (!d._normUrl) d._normUrl = normalizeMediaUrl(d.url); // migrate old saves
           if (typeof d.isHls !== 'boolean') d.isHls = isHlsUrl(d.url);
+          // Restore session cookies from the encrypted vault (fail-open).
+          if (this.sessionVault) {
+            try {
+              const restored = this.sessionVault.load(d.id);
+              if (restored && !d.cookies) {
+                d.cookies = restored;
+                if (d.headers && typeof d.headers === 'object') d.headers.Cookie = restored;
+              }
+            } catch (e) { /* leave as-is */ }
+          }
           // A restart must not resurrect a failed download as "paused" — the
           // user dismissed that error deliberately. Only genuinely
           // interrupted states become paused (and thus auto-resumable).
@@ -2182,8 +2464,11 @@ class DownloadManager extends EventEmitter {
         // restart sends an unauthenticated probe that fails 401/403. They stay
         // paused — the user can re-send them from the browser (fresh cookies).
         if (this.settings.autoResume !== false) {
+          // Session rows resume only when cookies were restored from the vault.
           const incomplete = [...this.downloads.values()].filter(
-            d => d.status === 'paused' && d.totalSize > 0 && d.downloaded < d.totalSize && !d.needsSession
+            d => d.status === 'paused' && d.downloaded > 0 &&
+                 (!d.needsSession || d.cookies) &&
+                 (d.totalSize == null || d.totalSize <= 0 || d.downloaded < d.totalSize)
           );
           for (const d of incomplete.slice(0, this.maxConcurrent)) {
             this._startDownload(d).catch(() => {});

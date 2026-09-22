@@ -1,8 +1,39 @@
-# ⚡ AiDM - AI-Powered Download Manager v4.8.3
+# ⚡ AiDM - AI-Powered Download Manager v4.9.0
 
 > Classic IDM-style download manager with next-generation modular download engine, dynamic in-flight segment splitting, positional random-access disk I/O, multi-mirror failover, atomic `.part.meta` crash recovery, Chrome browser integration, video quality detection, smart per-category file organization, ETA, dual-layer speed limiting, streaming multi-algorithm checksum verification, and a yt-dlp + FFmpeg extraction engine for YouTube.
 
 ---
+
+## What's New in v4.9.0
+
+Deep modernization pass: download-engine hardening, AI-era features, and a full UI redesign.
+
+### Fixed (download blockers & bugs)
+- **HLS probe field contract** — `probeHlsSize` now returns `totalSize` / `isLive` / `container` (was `size` only), so HLS rows get real sizes, live caps, and `.mp4` vs `.ts` correctly; unknown-size HLS can auto-resume after restart.
+- **Redirect hop cap** on `robustFetch` (max 10) — redirect loops no longer hang segment workers.
+- **HTTP 501 is permanent** — no more full retry budget burn on method-blocked CDNs; mid-stream 401/403/501 get the same friendly guidance as the probe path.
+- **Probe race no longer drops late meta** — name/size/dead-link guards still apply when the soft 8s timeout loses the race.
+- **Resume offsets** work when `totalSize` is unknown (segment map present).
+- **`toDownloadError` defaults non-retryable** for non-network faults (stops retry storms).
+- **Incomplete finals** are renamed to `.part` instead of sitting as a corrupt completed file.
+- **Tiny yt-dlp outputs** — empty or HTML/error-page stubs are rejected; tiny legitimate media containers (ftyp/mkv/ID3/…) are kept.
+- **DASH (`.mpd`)** routes through yt-dlp instead of a hard "not supported" reject.
+- **Auto-resume** also covers unknown-size rows; still skips `needsSession` rows.
+
+### AI-era
+- Auto **categorize** on add (fail-open) and **explainError** hints on failed rows (`aiHint`).
+- **AI summarize** helper for transcripts/subtitles (`ai-summarize` IPC) and **post-download summary** when a `.srt`/`.vtt` sidecar exists (`<name>.summary.txt`).
+- **Export / import** download list (cookies scrubbed) + plain URL list import.
+- **Batch URL paste** in the Add dialog (one URL per line).
+- **Natural-language queue commands** in the AI assistant: `download <urls>`, `limit speed to 512 KB/s`, `schedule daily at 22:00`, `pause all` / `resume all` — parsed locally, no model round-trip.
+
+### Session resume + file hosts
+- **Encrypted cookie vault** (Electron safeStorage / DPAPI) restores session cookies so `needsSession` rows can auto-resume after a restart. Cookies never sit in plaintext in the downloads JSON.
+- **Free-host wait auto-retry** — Rapidgator-style wait timers retry automatically after the countdown (captcha is never bypassed).
+
+### UI/UX (dark glass redesign)
+- Premium dark-first glass (Arc/Linear) with **light theme twin** + titlebar theme toggle.
+- SVG icon chrome, selection action bar, settings left-nav tabs, sortable columns, live **speed sparkline**, stacked toasts, empty-state CTA, type-filter counts.
 
 ## What's New in v4.8.3
 
