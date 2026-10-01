@@ -8,6 +8,10 @@ const { DEFAULT_INTERCEPT_TYPES } = require('./scheduler');
 const { muxAudioVideo, isAvailable: ffmpegAvailable, facebookMediaHeaders } = require('./media-mux');
 const ytdlp = require('./yt-dlp');
 const youtubeResolver = require('./youtube-resolver');
+const { sanitizeEntryUrl, entryUrlWasRepaired } = require('./url-hygiene');
+const { looksLikeAuthWall, sessionExpiredMessage } = require('./auth-wall');
+const googleDrive = require('./google-drive-resolver');
+const { TorrentEngine, isTorrentUrl, magnetDisplayName } = require('./torrent-engine');
 
 // Team A's real geometry reader (width/height/duration/audio-track presence
 // proven from the container bytes). Required defensively: a missing or broken
@@ -19,7 +23,8 @@ try { mediaProbe = require('./media-probe'); } catch (e) { mediaProbe = null; }
 const CATEGORIES = {
   video:    { label: 'Videos',    icon: '🎬', extensions: ['mp4','mkv','avi','mov','wmv','webm','flv','m4v','ts','m3u8'] },
   audio:    { label: 'Music',     icon: '🎵', extensions: ['mp3','wav','flac','aac','ogg','wma','m4a','opus'] },
-  document: { label: 'Documents', icon: '📄', extensions: ['pdf','doc','docx','xls','xlsx','ppt','pptx','txt','csv','rtf','epub'] },
+  document: { label: 'Documents', icon: '📄', extensions: ['doc','docx','xls','xlsx','ppt','pptx','txt','csv','rtf','epub'] },
+  pdf:      { label: 'PDFs',      icon: '📕', extensions: ['pdf'] },
   archive:  { label: 'Archives',  icon: '📦', extensions: ['zip','rar','7z','tar','gz','bz2','xz','iso','dmg','img'] },
   software: { label: 'Software',  icon: '💿', extensions: ['exe','msi','deb','rpm','apk','appimage','msix'] },
   image:    { label: 'Images',    icon: '🖼️', extensions: ['jpg','jpeg','png','gif','bmp','svg','webp','tiff','psd','ico'] },
@@ -140,6 +145,32 @@ function withoutCookieHeader(h) {
   if (!key) return h;
   const out = { ...h };
   delete out[key];
+  return out;
+}
+
+/**
+ * Tokenize a command line into argv WITHOUT a shell, honoring double quotes.
+ * Used by the post-download action so a server-controlled filename can never
+ * inject shell metacharacters (`&`, `|`, backticks, `%…%`). `"C:\Path With
+ * Spaces\scan.exe" -File "{file}"` → ['C:\\Path With Spaces\\scan.exe',
+ * '-File', '{file}'].
+ */
+function splitCommandLine(cmd) {
+  const out = [];
+  let cur = '';
+  let inQuotes = false;
+  let hasToken = false;
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i];
+    if (c === '"') { inQuotes = !inQuotes; hasToken = true; continue; }
+    if (!inQuotes && (c === ' ' || c === '\t')) {
+      if (hasToken) { out.push(cur); cur = ''; hasToken = false; }
+      continue;
+    }
+    cur += c;
+    hasToken = true;
+  }
+  if (hasToken) out.push(cur);
   return out;
 }
 
@@ -279,12 +310,13 @@ function accessDeniedMessage(status) {
  * uses. Mid-stream 401/403/501 used to show a bare "Server responded with…".
  */
 function friendlyHttpMessage(message) {
-  const httpDead = /HTTP (404|410|401|403|501)\b/.exec(String(message || ''));
+  const httpDead = /HTTP (404|410|401|403|400|501)\b/.exec(String(message || ''));
   if (!httpDead) return message;
   const code = parseInt(httpDead[1], 10);
   return (code === 401 || code === 403)
     ? accessDeniedMessage(code)
-    : (code === 501 ? methodBlockedMessage(code) : deadLinkMessage(code));
+    : (code === 400 ? badRequestMessage()
+      : (code === 501 ? methodBlockedMessage(code) : deadLinkMessage(code)));
 }
 
 function methodBlockedMessage(status) {
@@ -300,6 +332,17 @@ function methodBlockedMessage(status) {
  */
 function isDeadProbeStatus(status) {
   return status === 404 || status === 410;
+}
+
+/**
+ * Friendly message for HTTP 400: the server rejected the request itself.
+ * Usually a malformed/expired signed link, a host that 400s our Range
+ * probes (the engine falls back to a plain GET), or a login-gated URL.
+ * Extracted pure so test/http400-fallback.js can assert it.
+ */
+function badRequestMessage() {
+  return 'The server rejected this request (HTTP 400). ' +
+    'The link may be malformed or expired, or the page requires a login \u2014 re-copy the link from the source page and try again, or download it from your browser.';
 }
 
 // Query params that are per-request signatures/tokens (expiring CDN auth).
@@ -496,6 +539,7 @@ const DEFAULT_SETTINGS = {
     video: '',
     audio: '',
     document: '',
+    pdf: '',
     archive: '',
     software: '',
     image: '',
@@ -522,6 +566,20 @@ const DEFAULT_SETTINGS = {
   // list entry requirements — kept minimal on purpose.
   postDownloadCmd: '',
   postDownloadCmdTimeoutSec: 120,
+  // Network tab (v5.0.0): proxy for all engine traffic — http(s) CONNECT or
+  // socks5(h), credentials embedded in the URL are used as-is. Empty = direct.
+  proxyUrl: '',
+  engineMaxConnections: 8,   // hard per-download connection cap (1-32)
+  engineMinSplitKB: 1024,    // segments smaller than this are never split
+  preallocation: 'sparse',   // 'full' zero-fills the .part up front (aria2-style)
+  perHostMaxConnections: 16, // cross-download cap per host (0 = unlimited)
+  // HTTP/2 transport for HTTPS downloads (node:http2, no extra deps). Off by
+  // default — HTTP/1.1 multi-connection is still the right choice for most
+  // hosts; h2 helps with h2-only/ALPN-picky fronts and per-connection caps.
+  engineHttp2: false,
+  // Clipboard/AI row summary toggle checked by _aiSummarize; the settings UI
+  // writes it, so it must exist in the defaults (was a phantom key in v4).
+  aiSummarize: true,
 };
 
 class DownloadManager extends EventEmitter {
@@ -533,7 +591,15 @@ class DownloadManager extends EventEmitter {
     this.settings = this._loadSettings();
     this.maxConcurrent = this.settings.maxConcurrentDownloads;
     this.engine.setSpeedLimit(this.settings.speedLimit || 0);
+    // Torrent / magnet support: same row lifecycle, WebTorrent underneath.
+    // Throttle applies once its lazy client appears.
+    this.torrent = new TorrentEngine();
+    this.torrent.setSpeedLimit(this.settings.speedLimit || 0);
     this.engine.setHlsConcurrency(this.settings.hlsConcurrency || 6);
+    this._applyEngineSettings();
+    // yt-dlp child processes can't share the engine's agents — let them read
+    // the same proxyUrl live (see src/yt-dlp.js proxyArgs).
+    ytdlp.setProxyResolver(() => (this.settings && this.settings.proxyUrl) || '');
 
     if (!this.settings.defaultSavePath) {
       this.settings.defaultSavePath = path.join(
@@ -584,7 +650,10 @@ class DownloadManager extends EventEmitter {
       const now = Date.now();
       if (now - this._lastProgressPersist > 5000) {
         this._lastProgressPersist = now;
-        this._persistDownloads(true);
+        // force=false on the progress tick: the 60s .bak throttle only works
+        // when the tick doesn't reset it (every forced persist used to run a
+        // full copyFileSync — the main-thread stall the throttle was for).
+        this._persistDownloads(false);
       }
       this.emit('download-progress', { ...data, eta: dl ? dl.eta : null });
     });
@@ -652,6 +721,74 @@ class DownloadManager extends EventEmitter {
     });
 
     this._loadDownloads();
+
+    // Torrent / magnet downloads ride the same row lifecycle as HTTP ones.
+    // The engine emits manager-shaped events (progress/complete/error) so the
+    // handlers below mirror the HTTP engine's — the UI never knows the
+    // difference. See src/torrent-engine.js. (Client itself is created above.)
+    if (!this.torrent) this.torrent = new TorrentEngine();
+    this.torrent.on('download-progress', (data) => {
+      const dl = this.downloads.get(data.id);
+      if (dl) {
+        dl.downloaded = data.downloaded;
+        dl.totalSize = data.totalSize;
+        dl.speed = data.speed;
+        dl.percent = data.percent;
+        dl.peers = data.peers;
+        dl.uploadSpeed = data.uploadSpeed;
+        const ACTIVE_OVERRIDABLE = new Set(['connecting', 'downloading', 'queued']);
+        if (ACTIVE_OVERRIDABLE.has(dl.status)) dl.status = 'downloading';
+        dl.eta = data.eta != null ? data.eta : dl.eta;
+      }
+      const now = Date.now();
+      if (now - this._lastProgressPersist > 5000) {
+        this._lastProgressPersist = now;
+        this._persistDownloads(false);
+      }
+      this.emit('download-progress', { ...data, eta: dl ? dl.eta : null });
+    });
+    this.torrent.on('download-metadata', (data) => {
+      const dl = this.downloads.get(data.id);
+      if (!dl) return;
+      // A real name from the swarm beats the magnet-placeholder one.
+      const clean = this._cleanFilename(data.name);
+      if (clean) {
+        dl.filename = clean;
+        dl.category = detectCategory(clean);
+        dl.filepath = path.join(dl.savePath, clean);
+      }
+      dl.totalSize = data.totalSize;
+      dl.sizeEstimated = false;
+      dl.infoHash = data.infoHash;
+      dl.multiFile = !!data.multiFile; // folder torrent — never media-probe it
+      this._persistDownloads(true);
+      this.emit('download-updated', { ...dl });
+    });
+    this.torrent.on('download-complete', (data) => {
+      const dl = this.downloads.get(data.id);
+      if (dl) {
+        dl.status = 'completed';
+        dl.completedAt = Date.now();
+        dl.duration = data.duration;
+        if (data.totalSize > 0) { dl.totalSize = data.totalSize; dl.sizeEstimated = false; }
+      }
+      this._persistDownloads(true);
+      this._processQueue();
+      this.emit('download-complete', data);
+      this._finishRow(dl);
+    });
+    this.torrent.on('download-error', (data) => {
+      const dl = this.downloads.get(data.id);
+      const friendly = this._friendlyEngineError(data.error);
+      if (dl) {
+        dl.status = 'error';
+        dl.error = friendly;
+        this._maybeAiExplainError(dl, friendly);
+      }
+      this._persistDownloads(true);
+      this._processQueue();
+      this.emit('download-error', { ...data, error: friendly });
+    });
   }
 
   /**
@@ -693,10 +830,25 @@ class DownloadManager extends EventEmitter {
    * with `duplicate: true` and no new row/event is created.
    */
   addDownload({ url, filename, savePath, segments, quality, meta, headers, cookies, category, mirrors, checksum, audioUrl }) {
+    // Every entry point (HTTP API, IPC add-download, clipboard, NL command,
+    // import) funnels through here, so URL hygiene happens once, at the door.
+    //
+    // A Gmail attachment link read out of rendered markup carries `&amp;`
+    // instead of `&`; Google then sees one parameter (`ui=2&amp;ik=…`) and
+    // answers the missing `attid`/`view` with HTTP 400. Browsers never see it
+    // because `getAttribute('href')` is already decoded. See src/url-hygiene.js.
+    if (typeof url === 'string' && entryUrlWasRepaired(url)) {
+      url = sanitizeEntryUrl(url);
+    }
     // Facebook: a ?bytestart=N URL is a byte-slice of the file, not the file.
     // Saving it as-is writes a headerless chunk that no player can open — so
     // always download the full-file URL (auth params kept, only range dropped).
     try { url = stripFbRange(url); } catch {}
+
+    // Torrent / magnet: flows through the same row, but start/pause/resume go
+    // to the WebTorrent engine instead of the HTTP one.
+    const torrent = isTorrentUrl(url);
+
     const dup = this.findDuplicate(url, youtubeFields(meta).ytFormat);
     if (dup) {
       // A re-sent row may carry what the first one lacked: attach a missing
@@ -724,6 +876,13 @@ class DownloadManager extends EventEmitter {
     // "1080.mp4", a CDN hash). Generic names identify no video, so fall back
     // to the URL basename or the real page/video title instead.
     let parsedName = this._deriveFilename(url, filename, meta, quality);
+    if (torrent) {
+      // A magnet's `dn` param gives a real name before swarm metadata lands.
+      // No forced extension — the deliverable is the torrent's own file(s),
+      // and the swarm metadata handler renames the row to the real name.
+      const dn = magnetDisplayName(url);
+      if (dn && (!filename || isGenericFilename(parsedName, url))) parsedName = this._cleanFilename(dn) || parsedName;
+    }
     if (isHlsUrl(url) && !/\.ts$/i.test(parsedName)) {
       // HLS streams are assembled into a single .ts container
       parsedName = parsedName.replace(/\.(mp4|mkv|webm|m4v|mov|avi|m3u8|mpd)$/i, '');
@@ -765,14 +924,14 @@ class DownloadManager extends EventEmitter {
       meta: meta || null,            // video metadata from detection
       headers: replay.headers,       // allowlisted replay headers (Referer/Origin/UA)
       cookies: replay.cookies,       // session cookies for authenticated downloads (KVS etc.)
+      isTorrent: torrent,            // magnet/.torrent → WebTorrent engine (src/torrent-engine.js)
+      protocol: torrent ? 'torrent' : undefined,
+      peers: 0,                      // connected swarm peers (torrent rows)
+      uploadSpeed: 0,
       // Persisted (cookies themselves are not in the downloads JSON): a row
       // that needed session cookies can resume after a restart only when the
       // encrypted session vault still holds them.
       needsSession: !!replay.cookies,
-      ...(replay.cookies && this.sessionVault ? (() => {
-        try { this.sessionVault.save(id, replay.cookies); } catch (e) {}
-        return {};
-      })() : {}),
       audioUrl: audioUrl || null,    // paired audio-only track to mux in (split-AV)
       isHls: isHlsUrl(url),
       isDash: isDashUrl(url),
@@ -1012,16 +1171,6 @@ class DownloadManager extends EventEmitter {
     try { if (this.sessionVault && this.sessionVault.prune) this.sessionVault.prune(); } catch (e) {}
   }
 
-  /**
-   * Optional encrypted cookie vault (Electron safeStorage). When present,
-   * session cookies for `needsSession` rows are saved encrypted and restored
-   * on load so authenticated downloads can auto-resume after a restart.
-   */
-  setSessionVault(vault) {
-    this.sessionVault = vault || null;
-    try { if (this.sessionVault && this.sessionVault.prune) this.sessionVault.prune(); } catch (e) {}
-  }
-
   _aiReady() {
     try {
       return !!(this.settings.aiEnabled !== false && this.aiService && this.aiService.isConfigured());
@@ -1151,6 +1300,9 @@ class DownloadManager extends EventEmitter {
       if (download.status !== 'completed' && download.status !== 'muxing') return null;
       const filePath = download.filepath;
       if (!filePath || typeof filePath !== 'string') return null;
+      // A multi-file torrent's "filepath" is the containing folder — it has no
+      // container to probe.
+      if (download.multiFile) return null;
       if (!isMediaFile(filePath, download.category)) return null;
       let size = 0;
       try { size = fs.statSync(filePath).size; } catch (e) { return null; }
@@ -1264,15 +1416,19 @@ class DownloadManager extends EventEmitter {
       if (!dl.filepath || !fs.existsSync(dl.filepath)) return;
       dl._postActionDone = true;
       const { spawn } = require('child_process');
-      // {file} placeholder — quoted form too, so users can write just
-      // -File "{file}" without hand-building quoting for spaces.
-      const withFile = cmd.includes('{file}')
-        ? cmd.split('{file}').join(dl.filepath)
-        : cmd + ' "' + dl.filepath + '"';
+      // Shell-free spawn: the command line is tokenized here and the file
+      // path becomes ONE argv entry. The old `{file}` string-substitution
+      // into a shell:true command let a server-controlled filename
+      // (Content-Disposition "x & calc.exe &.mp4") inject arbitrary commands.
+      const argv = splitCommandLine(cmd);
+      if (!argv.length) return;
+      const exe = argv[0];
+      const args = argv.slice(1).map(a => a.split('{file}').join(dl.filepath));
+      if (!cmd.includes('{file}')) args.push(dl.filepath);
       const timeoutSec = Math.max(10, Number(this.settings.postDownloadCmdTimeoutSec) || 120);
       let child;
       try {
-        child = spawn(withFile, [], { shell: true, windowsHide: true, stdio: 'ignore' });
+        child = spawn(exe, args, { shell: false, windowsHide: true, stdio: 'ignore' });
       } catch (e) {
         dl.postDownloadResult = 'Command failed to start: ' + e.message;
         return;
@@ -1737,6 +1893,14 @@ class DownloadManager extends EventEmitter {
     try {
       download.status = 'connecting';
 
+      // Torrent rows run entirely in the WebTorrent engine: no HTTP probe,
+      // no URL hygiene beyond what addDownload already did. Progress/complete
+      // arrive through the manager-shaped events wired in the constructor.
+      if (download.isTorrent) {
+        await this.torrent.start(download);
+        return;
+      }
+
       // YouTube rows never go through the generic probe: the URL is a signed
       // stream (or a watch page), so a HEAD/Range probe either proves nothing
       // or 403s from a different connection. yt-dlp re-extracts fresh URLs
@@ -1761,6 +1925,53 @@ class DownloadManager extends EventEmitter {
       }
       if (download.cookies && !reqHeaders.Cookie) {
         reqHeaders.Cookie = download.cookies;
+      }
+
+      // Google Drive / Gmail-hosted files: the share URL is a viewer page, and
+      // Drive's download endpoint moved to drive.usercontent.google.com behind
+      // a `confirm=t` / `#download-form` interstitial. Without this the row
+      // saved the HTML page as the PDF. Resolved here (not at add time) so
+      // every entry point benefits and a restart re-resolves a stale token.
+      try {
+        // A restored row keeps the ORIGINAL share URL in meta so a restart
+        // re-resolves instead of replaying an expired confirm token.
+        const driveSource = googleDrive.isGoogleDriveUrl(download.url)
+          ? download.url
+          : (download.meta && googleDrive.isGoogleDriveUrl(download.meta.driveSourceUrl)
+            ? download.meta.driveSourceUrl : null);
+        if (driveSource) {
+          download.meta = { ...(download.meta || {}), driveSourceUrl: driveSource };
+          const resolved = await googleDrive.resolveGoogleDriveUrl(driveSource, {
+            cookies: download.cookies || null,
+            headers: reqHeaders,
+          });
+          download.url = resolved.url;
+          // Drive's confirm token is issued per-request; a segmented Range
+          // burst against it is refused. One connection, not resumable.
+          download.singleConnection = true;
+          download.resumable = false;
+          if (resolved.filename) {
+            const clean = this._cleanFilename(resolved.filename);
+            if (clean) {
+              download.filename = clean;
+              download.category = detectCategory(clean);
+              download.filepath = path.join(download.savePath, clean);
+            }
+          }
+          if (resolved.contentLength) {
+            download.totalSize = resolved.contentLength;
+            download.sizeEstimated = false;
+          }
+          download._driveResolved = true;
+          this.emit('download-updated', { ...download });
+        }
+      } catch (e) {
+        download.status = 'error';
+        download.error = (e && e.message) || 'Could not resolve this Google Drive file.';
+        this._persistDownloads(true);
+        this.emit('download-error', { id: download.id, error: download.error });
+        this._processQueue();
+        return;
       }
 
       // Resolve the real file name/size from the server before touching disk.
@@ -1835,12 +2046,22 @@ class DownloadManager extends EventEmitter {
       const singleConnection = download.singleConnection === true;
       const resumable = download.resumable !== false;
       let resumeOffsets = null;
-      // Unknown-size files still resume from the segment map; only exclude
-      // non-resumable hosters (splicing would corrupt the part file).
-      if (resumable && download.downloaded > 0 && Array.isArray(download._segProgress) &&
-          (download.totalSize == null || download.totalSize > 0)) {
-        resumeOffsets = {};
-        download._segProgress.forEach((bytes, i) => { resumeOffsets[i] = bytes || 0; });
+      let resumeSegments = null;
+      // Unknown-size resources are excluded on purpose: the engine's
+      // equal-slice offset math degenerates when the total is null, and a
+      // non-resumable row (file hoster) must never splice new bytes onto a
+      // stale part file — that is what produced corrupt downloads.
+      if (resumable && download.downloaded > 0 && download.totalSize > 0) {
+        const details = Array.isArray(download.segmentDetails) ? download.segmentDetails : null;
+        if (details && details.length &&
+            details.every(s => s && Number.isFinite(s.start) && Number.isFinite(s.end) && s.end >= s.start)) {
+          // The engine's REAL segment map (adaptive splitting moves the
+          // boundaries) — exact resume instead of assuming N equal slices.
+          resumeSegments = details.map(s => ({ start: s.start, end: s.end, downloaded: s.downloaded || 0 }));
+        } else if (Array.isArray(download._segProgress)) {
+          resumeOffsets = {};
+          download._segProgress.forEach((bytes, i) => { resumeOffsets[i] = bytes || 0; });
+        }
       }
 
       const engineDl = await this.engine.startDownload({
@@ -1851,6 +2072,7 @@ class DownloadManager extends EventEmitter {
         headers: reqHeaders,
         meta: download._probe || meta,
         resumeOffsets,
+        resumeSegments,
         mirrors: download.mirrors || [],
         checksum: download.checksum || null,
         // File hosters reject Range and corrupt parallel segments — one plain
@@ -1868,12 +2090,13 @@ class DownloadManager extends EventEmitter {
       // mid-stream is the same expired-CDN-link situation as a dead probe,
       // 401/403 means the request was blocked (see accessDeniedMessage), and
       // 501 rejects the request itself (see methodBlockedMessage).
-      const httpDead = /HTTP (404|410|401|403|501)\b/.exec(err && err.message);
+      const httpDead = /HTTP (404|410|401|403|400|501)\b/.exec(err && err.message);
       if (httpDead) {
         const code = parseInt(httpDead[1], 10);
         download.error = (code === 401 || code === 403)
           ? accessDeniedMessage(code)
-          : (code === 501 ? methodBlockedMessage(code) : deadLinkMessage(code));
+          : (code === 400 ? badRequestMessage()
+            : (code === 501 ? methodBlockedMessage(code) : deadLinkMessage(code)));
       } else {
         download.error = err.message;
       }
@@ -1884,6 +2107,21 @@ class DownloadManager extends EventEmitter {
 
   pauseDownload(id) {
     const dl = this.downloads.get(id);
+    if (dl && dl.isTorrent) {
+      // Pausing keeps the swarm pieces on disk; resume reopens the torrent.
+      if (this.torrent.pause(id)) {
+        dl.status = 'paused';
+        this._persistDownloads(true);
+        this.emit('download-paused', { id });
+      } else {
+        // Not attached to the swarm yet (queued/connecting) — just freeze the row.
+        this.queue = this.queue.filter(qid => qid !== id);
+        dl.status = 'paused';
+        this._persistDownloads(true);
+        this.emit('download-paused', { id });
+      }
+      return dl;
+    }
     this.engine.pauseDownload(id);
     this.queue = this.queue.filter(qid => qid !== id);
     // The engine only knows downloads it already started. A 'connecting' or
@@ -1905,6 +2143,22 @@ class DownloadManager extends EventEmitter {
   resumeDownload(id) {
     const dl = this.downloads.get(id);
     if (!dl) return null;
+
+    if (dl.isTorrent) {
+      const resumable = ['paused', 'error', 'queued-paused', 'queued'].includes(dl.status);
+      if (!resumable) return dl;
+      const activeCount = this._getActiveCount();
+      if (activeCount < this.maxConcurrent) {
+        // WebTorrent keeps the piece store on disk — re-adding the same
+        // magnet resumes; client.add() dedupes an already-live torrent.
+        dl.status = 'connecting';
+        this._startDownload(dl);
+      } else {
+        this.queue.push(id);
+        dl.status = 'queued';
+      }
+      return dl;
+    }
 
     // Accept 'downloading' status as resumable when the underlying engine task
     // is actually paused. This handles a race where a stale progress tick
@@ -1939,6 +2193,7 @@ class DownloadManager extends EventEmitter {
     const dl = this.downloads.get(id);
     // Tell any in-flight _startDownload (probing phase) to stand down.
     if (dl) dl._cancelRequested = true;
+    if (dl && dl.isTorrent) this.torrent.remove(id);
     this.engine.cancelDownload(id);
     this.queue = this.queue.filter(qid => qid !== id);
     this.downloads.delete(id);
@@ -1951,6 +2206,7 @@ class DownloadManager extends EventEmitter {
     const dl = this.downloads.get(id);
     if (!dl) return false;
     dl._cancelRequested = true;
+    if (dl.isTorrent) this.torrent.remove(id, { deleteFiles: true });
     // Cancel unconditionally (a no-op when the engine isn't running it): a
     // 'connecting' download used to survive removal and start anyway,
     // writing a file for a row that no longer exists.
@@ -1971,6 +2227,9 @@ class DownloadManager extends EventEmitter {
   }
 
   saveSettings(newSettings) {
+    if (!newSettings || typeof newSettings !== 'object' || Array.isArray(newSettings)) {
+      newSettings = {};
+    }
     // Deep-merge the nested maps: a settings dialog that leaves a file-hoster
     // password blank must not wipe the saved one, and a newer hoster added by
     // a later version must survive an older settings payload.
@@ -1991,26 +2250,55 @@ class DownloadManager extends EventEmitter {
     this.maxConcurrent = this.settings.maxConcurrentDownloads;
     // Propagate speed limit to the engine (bytes/sec; 0 = unlimited)
     this.engine.setSpeedLimit(this.settings.speedLimit || 0);
+    // …and to the torrent client. Must NOT re-create the engine here —
+    // saveSettings runs mid-session and would orphan every live torrent.
+    if (this.torrent) this.torrent.setSpeedLimit(this.settings.speedLimit || 0);
     this.engine.setHlsConcurrency(this.settings.hlsConcurrency || 6);
+    this._applyEngineSettings();
     this._ensureDirectories();
     this._saveSettings();
     return this.settings;
+  }
+
+  /** Push network/engine knobs from settings into the running engine. */
+  _applyEngineSettings() {
+    const s = this.settings || {};
+    this.engine.setProxy(s.proxyUrl || '');
+    // yt-dlp is a child process: give it a live getter so subprocess calls
+    // see the current proxy without threading it through every call site.
+    ytdlp.setProxyResolver(() => (this.settings && this.settings.proxyUrl) || '');
+    this.engine.setEngineOptions({
+      maxConnections: s.engineMaxConnections,
+      minSplitKB: s.engineMinSplitKB,
+      preallocation: s.preallocation,
+      perHostConnections: s.perHostMaxConnections != null ? s.perHostMaxConnections : 16,
+      http2: s.engineHttp2,
+    });
   }
 
   startQueue() {
     // Promote queue-paused items back to runnable, then start filling slots.
     this.queue.forEach(id => {
       const dl = this.downloads.get(id);
-      if (dl && dl.status === 'queued-paused') dl.status = 'queued';
+      if (dl && dl.status === 'queued-paused') {
+        dl.status = 'queued';
+        this.emit('download-updated', dl);
+      }
     });
     this._processQueue();
   }
 
   pauseQueue() {
+    // Without the persist + per-row event the UI kept showing "Queued" and a
+    // restart lost the paused state entirely.
     this.queue.forEach(id => {
       const dl = this.downloads.get(id);
-      if (dl) dl.status = 'queued-paused';
+      if (dl && dl.status === 'queued') {
+        dl.status = 'queued-paused';
+        this.emit('download-updated', dl);
+      }
     });
+    this._persistDownloads(true);
   }
 
   _processQueue() {
@@ -2267,6 +2555,24 @@ class DownloadManager extends EventEmitter {
   _enforceProbeGuards(download, meta) {
     if (!meta) return null;
     if (download.isHls || download.isDash) return meta;
+    // Auth wall: the server answered with a sign-in page, not the file. Google
+    // does this by 302-ing to accounts.google.com and serving 200 HTML, which
+    // used to be written to disk as "invoice.pdf" — a green row holding a
+    // login page. Fail loudly with instructions instead (src/auth-wall.js).
+    if (looksLikeAuthWall({
+      finalUrl: meta.finalUrl || download.url,
+      contentType: meta.contentType,
+      filename: download.filename,
+      url: download.url,
+    })) {
+      download.status = 'error';
+      download.error = sessionExpiredMessage();
+      download.needsSession = true;
+      this._persistDownloads(true);
+      this.emit('download-error', { id: download.id, error: download.error });
+      this._processQueue();
+      return null;
+    }
     // Fresh starts only — a resume with bytes on disk keeps going.
     if (download.downloaded === 0) {
       if (isDeadProbeStatus(meta.status)) {
@@ -2288,6 +2594,14 @@ class DownloadManager extends EventEmitter {
       if (meta.status === 501) {
         download.status = 'error';
         download.error = methodBlockedMessage(meta.status);
+        this._persistDownloads(true);
+        this.emit('download-error', { id: download.id, error: download.error });
+        this._processQueue();
+        return null;
+      }
+      if (meta.status === 400) {
+        download.status = 'error';
+        download.error = badRequestMessage();
         this._persistDownloads(true);
         this.emit('download-error', { id: download.id, error: download.error });
         this._processQueue();
@@ -2388,14 +2702,18 @@ class DownloadManager extends EventEmitter {
       }
       fs.renameSync(tmpPath, dataPath);
       // One-time cleanup: remove dotfiles left in download folders / Desktop
-      // by older versions so they never reappear.
-      try {
-        for (const legacy of this._getLegacyStatePaths()) {
-          if (legacy && legacy !== dataPath && fs.existsSync(legacy)) {
-            try { fs.unlinkSync(legacy); } catch {}
+      // by older versions so they never reappear. Only sweep until the first
+      // successful pass — an existsSync sweep on every persist is wasted I/O.
+      if (!this._legacyStateSwept) {
+        try {
+          for (const legacy of this._getLegacyStatePaths()) {
+            if (legacy && legacy !== dataPath && fs.existsSync(legacy)) {
+              try { fs.unlinkSync(legacy); } catch {}
+            }
           }
-        }
-      } catch {}
+          this._legacyStateSwept = true;
+        } catch {}
+      }
     } catch (e) {}
   }
 

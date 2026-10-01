@@ -36,7 +36,9 @@ function isFacebookCdnUrl(u) {
   catch (e) { return false; }
 }
 
-function runFfmpeg(args, { timeoutMs = 300000 } = {}) {
+// 15 min: `-c copy` finishes in seconds, but the audio-re-encode fallback on a
+// fragmented multi-gigabyte track legitimately needs minutes on a slow disk.
+function runFfmpeg(args, { timeoutMs = 900000 } = {}) {
   return new Promise((resolve, reject) => {
     const bin = resolveFfmpeg();
     if (!bin) {

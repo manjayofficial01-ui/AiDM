@@ -890,7 +890,18 @@ ipcMain.handle('import-downloads', async (event, items) => {
 });
 
 ipcMain.handle('export-settings', async () => {
-  return downloadManager.getSettings();
+  // Redacted: an exported settings file is a portable document — file-host
+  // passwords and the AI API key must never travel inside it.
+  const s = JSON.parse(JSON.stringify(downloadManager.getSettings()));
+  delete s.aiApiKey;
+  if (s.fileHosts && typeof s.fileHosts === 'object') {
+    for (const host of Object.keys(s.fileHosts)) {
+      if (s.fileHosts[host] && typeof s.fileHosts[host] === 'object') {
+        delete s.fileHosts[host].password;
+      }
+    }
+  }
+  return s;
 });
 
 ipcMain.handle('import-settings', async (event, settings) => {
@@ -916,14 +927,8 @@ ipcMain.handle('nl-command', async (event, { text }) => {
   }
   if (cmd.action === 'speed') {
     const s = downloadManager.getSettings();
+    // saveSettings applies the limit to the engine internally.
     downloadManager.saveSettings({ ...s, speedLimit: cmd.speedBps || 0 });
-    try {
-      const { destroyAgents } = require('./src/engine/agents');
-      // engine speed limit is applied via download-engine coordinator
-      if (downloadManager.engine && downloadManager.engine.setGlobalSpeedLimit) {
-        downloadManager.engine.setGlobalSpeedLimit(cmd.speedBps || 0);
-      }
-    } catch (e) {}
     return { ...cmd, applied: true };
   }
   if (cmd.action === 'pause-all') {
@@ -943,17 +948,36 @@ ipcMain.handle('nl-command', async (event, { text }) => {
     return { ...cmd, applied: true };
   }
   if (cmd.action === 'schedule') {
-    const [hh, mm] = String(cmd.when || '22:00').split(':');
-    const schedules = (downloadManager.getSettings().schedules || []).slice();
-    schedules.push({
+    // Scheduler entries require `time: "HH:MM"` (and a `date` for one-shot
+    // runs) — the old {hour, minute} shape failed validateSchedule and the
+    // schedule silently never fired.
+    const when = /^\d{1,2}:\d{2}$/.test(String(cmd.when || '')) ? String(cmd.when) : '22:00';
+    const type = ['once', 'daily', 'weekly'].includes(cmd.repeat) ? cmd.repeat : 'daily';
+    let date = null;
+    if (type === 'once') {
+      const d = new Date();
+      const [hh, mm] = when.split(':').map(Number);
+      d.setHours(hh, mm, 0, 0);
+      if (d.getTime() <= Date.now()) d.setDate(d.getDate() + 1);
+      date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    }
+    const entry = {
       id: 'nl-' + Date.now().toString(36),
-      name: `NL ${cmd.repeat} @ ${cmd.when}`,
-      type: cmd.repeat || 'once',
-      hour: parseInt(hh, 10) || 22,
-      minute: parseInt(mm, 10) || 0,
+      name: `NL ${type} @ ${when}`,
       enabled: true,
+      type,
+      time: when,
+      date,
+      days: type === 'weekly' ? [new Date().getDay()] : null,
+      stopAfterMinutes: null,
+      retryFailed: false,
       speedLimitKBs: null,
-    });
+      onComplete: 'none',
+    };
+    const v = validateSchedule(entry);
+    if (!v.ok) return { ...cmd, applied: false, error: v.error };
+    const schedules = (downloadManager.getSettings().schedules || []).slice();
+    schedules.push(entry);
     downloadManager.saveSettings({ schedules });
     if (scheduler) scheduler.configure(downloadManager.getSettings());
     return { ...cmd, applied: true, schedules };
@@ -989,5 +1013,9 @@ app.on('window-all-closed', () => {
 });
 
 app.on('activate', () => {
+  // createWindow() registers ~40 ipcMain.handle channels and constructs the
+  // manager/server — re-running it on macOS reactivation throws on duplicate
+  // handlers and starts a second engine. Just re-show the existing window.
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  else showWindow();
 });

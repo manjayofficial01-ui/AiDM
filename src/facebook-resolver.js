@@ -473,7 +473,7 @@ function extractFacebookVariants(html, pageUrl) {
     .replace(/\\"/g, '"')
     .replace(/&amp;/g, '&');
 
-  const take = (raw, qualityHint, sourceTag) => {
+  const take = (raw, qualityHint, sourceTag, srcIdx) => {
     if (!raw || typeof raw !== 'string') return;
     let u = unescape(raw).trim().replace(/&amp;/g, '&').replace(/["'\),;\\]+$/, '');
     if (!u) return;
@@ -532,6 +532,10 @@ function extractFacebookVariants(html, pageUrl) {
           format: isHls ? 'hls' : 'mp4',
           qualityHint: qualityHint || null,
           progressive: prog,
+          // Where this URL was found in `src` — lets the quality-window scan
+          // below read the rendition label directly instead of running a
+          // fresh indexOf over a multi-megabyte page for EVERY variant.
+          srcIdx: Number.isFinite(srcIdx) ? srcIdx : -1,
         });
       } else if (qualityHint && !found.get(normalized).qualityHint) {
         found.get(normalized).qualityHint = qualityHint;
@@ -576,25 +580,25 @@ function extractFacebookVariants(html, pageUrl) {
   for (const [re, q, tag] of pats) {
     let m;
     re.lastIndex = 0;
-    while ((m = re.exec(src)) !== null) take(m[1], q, tag);
+    while ((m = re.exec(src)) !== null) take(m[1], q, tag, m.index);
   }
   // Generic fallback: any fbcdn/scontent …mp4 in the page payload.
   const fbMp4 = /https?:\\?\/\\?\/[^"'\\\s<>]*?(?:fbcdn|scontent)[^"'\\\s<>]*?\.mp4[^"'\\\s<>]*/gi;
   let g;
-  while ((g = fbMp4.exec(src)) !== null) take(g[0], null, 'generic');
+  while ((g = fbMp4.exec(src)) !== null) take(g[0], null, 'generic', g.index);
   // …and any fbcdn/scontent/cdninstagram URL carrying an efg rendition tag,
   // whatever its extension (audio DASH renditions are extensionless on some
   // surfaces — take() harvests the efg-audio ones into the audio pool).
   const fbEfg = /https?:\\?\/\\?\/[^"'\\\s<>]*?(?:fbcdn|scontent|cdninstagram)[^"'\\\s<>]*?[?&]efg=[^"'\\\s<>]*/gi;
   let eg;
-  while ((eg = fbEfg.exec(src)) !== null) take(eg[0], null, 'generic');
+  while ((eg = fbEfg.exec(src)) !== null) take(eg[0], null, 'generic', eg.index);
   // …and any …mpd (counted, never offered).
   const fbMpd = /https?:\\?\/\\?\/[^"'\\\s<>]*?(?:fbcdn|scontent)[^"'\\\s<>]*?\.mpd[^"'\\\s<>]*/gi;
   let d;
-  while ((d = fbMpd.exec(src)) !== null) take(d[0], null, null);
+  while ((d = fbMpd.exec(src)) !== null) take(d[0], null, null, d.index);
 
   const out = [];
-  for (const { url, format, qualityHint, progressive } of found.values()) {
+  for (const { url, format, qualityHint, progressive, srcIdx } of found.values()) {
     let quality = null, width = 0, height = 0;
     const qm = qualityHint && /^(\d{3,4})p$/i.exec(qualityHint);
     if (qm) {
@@ -602,8 +606,9 @@ function extractFacebookVariants(html, pageUrl) {
       if (q) { quality = q.quality; width = q.width; height = q.height; }
     }
     if (!height) {
-      // Rendition encoded next to the URL ("hd"/"sd" label or WxH in path).
-      const idx = src.indexOf(url.replace(/^https?:/, '').slice(0, 80));
+      // Rendition encoded next to the URL ("hd"/"sd" label or WxH in path),
+      // read from the window around the recorded match position.
+      const idx = Number.isFinite(srcIdx) ? srcIdx : -1;
       const win = idx >= 0 ? src.slice(Math.max(0, idx - 200), idx + 200) : '';
       const wh = /(\d{3,4})x(\d{3,4})/.exec(url) || /(\d{3,4})x(\d{3,4})/.exec(win);
       if (wh) {

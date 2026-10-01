@@ -151,11 +151,11 @@ class AiService {
   /** Classify a download into one of AiDM's categories. */
   async categorize(url, filename = '') {
     const { content } = await this.quickComplete(
-      `Classify this download into exactly one category: video, audio, document, archive, software, image, other. Reply with ONLY the category word.\nURL: ${url}\nFilename: ${filename}`,
+      `Classify this download into exactly one category: video, audio, document, pdf, archive, software, image, other. Use pdf only for PDF files, document for other text/office files. Reply with ONLY the category word.\nURL: ${url}\nFilename: ${filename}`,
       { max_tokens: 20, temperature: 0 }
     );
     const cat = String(content || '').trim().toLowerCase();
-    return ['video', 'audio', 'document', 'archive', 'software', 'image', 'other'].includes(cat) ? cat : 'other';
+    return ['video', 'audio', 'document', 'pdf', 'archive', 'software', 'image', 'other'].includes(cat) ? cat : 'other';
   }
 
   /** Explain a download error in plain language with one fix suggestion. */

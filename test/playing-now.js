@@ -150,13 +150,16 @@ check('background clears tabStreams on SPA history updates',
 // ── 4. Manifest hygiene ──────────────────────────────────────────────────────
 console.log('\nManifest hygiene');
 check('dead permissions removed',
-  !manifest.permissions.includes('storage') &&
   !manifest.permissions.includes('activeTab') &&
   !manifest.permissions.includes('downloads.open') &&
   !manifest.permissions.includes('declarativeNetRequestWithHostAccess'));
 check('permissions actually used stay',
   manifest.permissions.includes('downloads') && manifest.permissions.includes('cookies') &&
-  manifest.permissions.includes('webRequest') && manifest.permissions.includes('declarativeNetRequest'));
+  manifest.permissions.includes('webRequest') && manifest.permissions.includes('declarativeNetRequest') &&
+  // storage/alarms back the session-state persistence and the connection
+  // heartbeat in background.js — both are real code paths now.
+  manifest.permissions.includes('storage') && manifest.permissions.includes('alarms') &&
+  /chrome\.storage\.session/.test(bgSrc) && /chrome\.alarms\.(addListener|onAlarm)/.test(bgSrc));
 
 // ── 5. Desktop reliability ───────────────────────────────────────────────────
 console.log('\nDesktop reliability');

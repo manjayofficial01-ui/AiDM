@@ -1,6 +1,51 @@
-# ⚡ AiDM - AI-Powered Download Manager v4.9.0
+# ⚡ AiDM - AI-Powered Download Manager v5.0.0
 
 > Classic IDM-style download manager with next-generation modular download engine, dynamic in-flight segment splitting, positional random-access disk I/O, multi-mirror failover, atomic `.part.meta` crash recovery, Chrome browser integration, video quality detection, smart per-category file organization, ETA, dual-layer speed limiting, streaming multi-algorithm checksum verification, and a yt-dlp + FFmpeg extraction engine for YouTube.
+
+---
+
+## What's New in v5.0.0
+
+The proxy release — plus a deep audit that fixed over 30 correctness, security and performance bugs across the engine, server, UI and Chrome extension.
+
+### New: Full proxy support
+- **HTTP / HTTPS CONNECT tunnels and SOCKS5 / SOCKS5h** (RFC 1928), with **RFC 1929 username/password** auth and credentials embedded in the URL (`http://user:pass@proxy:8080`). SOCKS5h delegates DNS to the proxy.
+- Wired through the **entire stack**: pooled keep-alive download connections (sockets stay keyed by target origin, so reuse works exactly like the direct path), plain-HTTP absolute-URI relay, TLS-over-tunnel with correct SNI, and **yt-dlp subprocesses** (`--proxy`) for YouTube and generic probes.
+- Configured live in **Settings → Network**; changing it rebuilds the socket pool. Covered by 45 loopback checks in `test/engine-proxy.js` against in-process fake CONNECT proxies, dual relays and a spec-correct SOCKS5 server.
+
+### New: Network & engine controls (Settings → Network)
+- **Max connections per download** (1–32, hard cap), **min split size (KB)**, and **disk pre-allocation** — sparse or aria2-style full zero-fill.
+- **Per-host connection cap** (0–64, default 16) — a new cross-download `HostGate` limits total simultaneous connections to one host, parking tasks on a waiter callback (no polling) and waking them exactly as slots free.
+
+### New: Long-tail video sites (Vimeo • TikTok • Reddit • Twitch clips)
+- A generic yt-dlp resolver registered **last** in the provider registry: a strict host+path allowlist (never a blanket "try yt-dlp on every URL"), it refuses file-extension URLs, prefers **progressive single-file MP4** with an HLS m3u8 fallback, and feeds the existing quality picker. DASH-only catalogs get a clean explanation instead of a silent-video file.
+
+### Extension: never "not connected" again
+- **Port auto-discovery** — when the health check fails, the extension sweeps 18765–18772 (the server auto-increments above 18765 when the port is taken) instead of giving up.
+- 16 further fixes: MV3 service-worker suspension amnesia (live state now persisted in `chrome.storage.session` and rehydrated), `chrome.alarms` replaces `setInterval`, SPA-navigation detection relayed from the MAIN world, DNR rule-id collisions after SW restarts, self-download re-interception loops, token-stripping narrowed to per-CDN hosts, unhandled promise rejections in the Chrome-fallback path, `lastError` handled at every messaging call site, visibility/idle gating for polling, shared debounced scan scheduler, and dead code + redundant manifest entries removed.
+
+### Security hardening
+- **`GET /api/settings` removed** — it leaked file-host passwords and the AI key to any web page that hit the local port; origins are now gated by an explicit trust check (403) and ACAO is no longer `*`.
+- **Command injection fixed** — post-download actions ran through `spawn` with a shell; a filename like `x & calc.exe &.mp4` executed code. Now `shell:false` with a quote-aware tokenizer.
+- `export-settings` redacts secrets; save paths are confined to the configured folders; batch bodies capped at 32 MB; `_readBody` no longer corrupts UTF-8 or degrades O(n²); yt-dlp partial cleanup/adoption now matches strict job-name patterns and can no longer delete or rename unrelated user files.
+
+### Engine correctness (critical bug fixes)
+- **Split-vs-completion race** — a shrunk in-flight segment produced a phantom "Incomplete response" → 416 → full restart from zero. Re-evaluated against the current segment end.
+- **Pause/cancel hang** when every segment sat in retry backoff (`_settleIdleLoop` resolves the loop now).
+- **Unbounded RAM** on slow origins — `robustFetch` now honours backpressure (pull-based pause/resume, zero-copy enqueue); one failed HLS segment no longer buffers sibling downloads unboundedly.
+- **Speed limit was double-charged** (exactly half the configured rate).
+- **HLS fd leak** kept cancelled files undeletable on Windows; `fsync` ordering fixed under sparse pre-allocation; resume of unknown-size downloads no longer persists `NaN` segment ranges; rate-limiter `sleep()` is abortable; fetch timeout is per-task instead of hardcoded 30s.
+- **Keep-alive pool**: changing `maxSockets` now rebuilds pooled agents (it used to be first-wins).
+
+### App / resolver fixes
+- Scheduler time commands actually fire (validated `{type,time,date,days}` shape); `activate` no longer re-created handlers and a second engine; `.bak` progress-flush throttle restored (a 5 s reset made every tick forced); AI-judgment cache gained a size cap + eviction; quality picker could pick a **watch-page URL** as the "best MP4" (now `directUrl`-filtered); mp3 mime corrected; yt-dlp stderr re-split inflated progress ("finished" replayed); media-probe TS/MKV fallbacks and a PAT/PMT CRC off-by fixed; Facebook page scan went from O(n²) to a single regex; ffmpeg mux timeout raised 300s→900s for re-encode fallbacks.
+
+### UI/UX (15 fixes + 3 features)
+- XSS-safe attribute escaping on rows and the quality picker; Escape closes the scheduler; Delete no longer fires while typing; sidebar badges and select-all finally match the active filter; progress percent clamped and falsy-zero fixed; **all six overlays gained focus traps**, backdrop close and focus restore; the 250 ms refresh patches rows in place instead of rebuilding the table.
+- **Auto theme** (light/dark/auto, follows the OS, persists), **Ctrl+F** search focus with clear button, **"Clear completed"** toolbar action, and arrow-key row navigation with Enter.
+
+### Tests
+- New suites wired into `npm test`: `test/engine-proxy.js` (45 checks) and `test/generic-resolver.js` (22 checks); the full chain is green.
 
 ---
 

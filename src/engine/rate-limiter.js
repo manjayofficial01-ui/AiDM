@@ -36,15 +36,17 @@ class TokenBucket {
 
   /**
    * @param {number} bytes
+   * @param {AbortSignal} [signal] aborts the refill wait (pause/cancel must
+   *   not sit out a multi-second sleep at low rates)
    * @returns {Promise<void>}
    */
-  async acquire(bytes) {
+  async acquire(bytes, signal) {
     if (this.rate <= 0 || bytes <= 0) return;
     this.refill();
     this.tokens -= bytes;
     if (this.tokens >= 0) return;
     const waitMs = (-this.tokens / this.rate) * 1000;
-    await sleep(waitMs);
+    await sleep(waitMs, signal);
   }
 
   refill() {

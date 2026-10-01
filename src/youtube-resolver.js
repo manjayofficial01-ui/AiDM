@@ -513,6 +513,7 @@ function fallbackPayload(canonical, id, reason) {
     media: [{
       type: 'video',
       url: canonical,
+      directUrl: false,
       mime: 'video/mp4',
       format: 'mp4',
       filename: buildFilename({ title: null, id, height: 0 }),
@@ -562,39 +563,53 @@ async function resolveYouTubeVideos(url, opts = {}) {
   const title = (info && info.title) || null;
   const choices = buildChoices(info);
 
-  const media = choices.map((c) => ({
-    type: c.audioOnly ? 'audio' : 'video',
-    url: c.url || canonical,
-    mime: c.audioOnly ? 'audio/mp4' : 'video/mp4',
-    // 0 when unknown — never a 16:9 guess (see resolutionOfChoice).
-    width: Number(c.width) || 0,
-    height: Number(c.height) || 0,
-    resolution: c.audioOnly ? undefined : resolutionOfChoice(c),
-    quality: choiceLabel(c),
-    format: choiceExt(c),
-    filename: buildFilename({ title, id, height: c.audioOnly ? 0 : c.height, ext: choiceExt(c) }),
-    provider: 'youtube',
-    ytUrl: canonical,
-    noAudioTrack: !!c.noAudioTrack,
-    audioNote: c.audioNote || undefined,
-    ytFormat: {
-      formatId: c.formatId,
-      audioFormatId: c.audioFormatId || null,
-      progressive: !!c.progressive,
-      audioOnly: !!c.audioOnly,
-      height: c.height || 0,
+  // An MP3 (or opus/webm audio) choice must not claim 'audio/mp4' — the mime
+  // drives extension and player decisions downstream.
+  const AUDIO_MIME_BY_EXT = {
+    mp3: 'audio/mpeg', m4a: 'audio/mp4', opus: 'audio/ogg', webm: 'audio/webm',
+    ogg: 'audio/ogg', aac: 'audio/aac', flac: 'audio/flac', wav: 'audio/wav',
+  };
+
+  const media = choices.map((c) => {
+    const ext = choiceExt(c);
+    return {
+      type: c.audioOnly ? 'audio' : 'video',
+      url: c.url || canonical,
+      // False when there is no direct stream URL (DASH pair / yt-dlp handoff):
+      // `url` then holds the watch-PAGE URL, which must never win the generic
+      // best-MP4 preference in resolvers.js or the download saves the HTML.
+      directUrl: !!c.url,
+      mime: c.audioOnly ? (AUDIO_MIME_BY_EXT[ext] || 'audio/mp4') : 'video/mp4',
+      // 0 when unknown — never a 16:9 guess (see resolutionOfChoice).
       width: Number(c.width) || 0,
+      height: Number(c.height) || 0,
       resolution: c.audioOnly ? undefined : resolutionOfChoice(c),
-      size: c.size || 0,
+      quality: choiceLabel(c),
+      format: ext,
+      filename: buildFilename({ title, id, height: c.audioOnly ? 0 : c.height, ext }),
+      provider: 'youtube',
+      ytUrl: canonical,
       noAudioTrack: !!c.noAudioTrack,
+      audioNote: c.audioNote || undefined,
+      ytFormat: {
+        formatId: c.formatId,
+        audioFormatId: c.audioFormatId || null,
+        progressive: !!c.progressive,
+        audioOnly: !!c.audioOnly,
+        height: c.height || 0,
+        width: Number(c.width) || 0,
+        resolution: c.audioOnly ? undefined : resolutionOfChoice(c),
+        size: c.size || 0,
+        noAudioTrack: !!c.noAudioTrack,
+        expiresAt: c.expiresAt || null,
+        extractedAt: c.extractedAt || Date.now(),
+        url: c.url || null,
+      },
+      // Consumer note: with yt-dlp the URL is a signed stream URL, not a
+      // permanent file — the row must be resolved again after a restart.
       expiresAt: c.expiresAt || null,
-      extractedAt: c.extractedAt || Date.now(),
-      url: c.url || null,
-    },
-    // Consumer note: with yt-dlp the URL is a signed stream URL, not a
-    // permanent file — the row must be resolved again after a restart.
-    expiresAt: c.expiresAt || null,
-  }));
+    };
+  });
 
   return {
     provider: 'youtube',

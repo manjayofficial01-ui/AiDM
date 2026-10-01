@@ -139,7 +139,19 @@ function httpsGetJson(url, { timeoutMs = 15000, headers = {}, redirectCount = 0,
         return;
       }
       const chunks = [];
-      res.on('data', c => chunks.push(c));
+      let bodyLen = 0;
+      // A hostile/buggy endpoint must not be able to stream unbounded bytes
+      // into memory before the JSON parse — syndication payloads are tiny.
+      const MAX_JSON_BYTES = 2 * 1024 * 1024;
+      res.on('data', c => {
+        bodyLen += c.length;
+        if (bodyLen > MAX_JSON_BYTES) {
+          try { res.destroy(); } catch (e) {}
+          reject(new Error('Syndication response exceeded 2 MB'));
+          return;
+        }
+        chunks.push(c);
+      });
       res.on('end', () => {
         const body = Buffer.concat(chunks).toString('utf8');
         if (res.statusCode !== 200) {
@@ -337,11 +349,6 @@ function toPickerVideos(videos) {
       size: null,
     };
   });
-}
-
-function pickBestVariant(videos) {
-  if (!videos || !videos.length) return null;
-  return videos[0];
 }
 
 module.exports = {

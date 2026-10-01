@@ -587,7 +587,9 @@ function parsePat(buf, off, end) {
   const tableId = buf[off];
   if (tableId !== 0x00) return programs;
   const sectionLen = ((buf[off + 1] & 0x0f) << 8) | buf[off + 2];
-  const stop = Math.min(off + 3 + sectionLen, end);
+  // section_length covers the payload INCLUDING its trailing 4-byte CRC32 —
+  // parsing into the CRC read garbage as a program entry.
+  const stop = Math.min(off + 3 + sectionLen - 4, end);
   let p = off + 8;                                    // skip tsid/version/section numbers
   while (p + 4 <= stop) {
     const program = buf.readUInt16BE(p);
@@ -602,7 +604,8 @@ function parsePmt(buf, off, end, out) {
   const tableId = buf[off];
   if (tableId !== 0x02) return;
   const sectionLen = ((buf[off + 1] & 0x0f) << 8) | buf[off + 2];
-  const stop = Math.min(off + 3 + sectionLen, end);
+  // section_length includes the trailing 4-byte CRC32 (see parsePat).
+  const stop = Math.min(off + 3 + sectionLen - 4, end);
   const infoLen = ((buf[off + 10] & 0x0f) << 8) | buf[off + 11];
   let p = off + 12 + infoLen;
   while (p + 5 <= stop) {
@@ -847,7 +850,13 @@ async function probeFile(filePath, opts = {}) {
     }
 
     if (info && (info.width > 0 || (info.hasAudio && !info.hasVideo))) return info;
-    return await ffmpegProbe(p, FFMPEG_TIMEOUT_MS);
+    const ff = await ffmpegProbe(p, FFMPEG_TIMEOUT_MS);
+    if (ff) return mergeInfo(info, ff);
+    // No ffmpeg: a parser result that PROVED the elementary streams (TS/MKV
+    // carry no picture size, so width/height stay 0) is still the truth —
+    // discarding it returned null for perfectly valid files.
+    if (info && (info.hasVideo || info.hasAudio)) return info;
+    return null;
   } catch (e) {
     return null;
   }

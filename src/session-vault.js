@@ -92,12 +92,15 @@ function createSessionVault(safe, dir) {
      * @returns {string|null} decrypted cookies, or null
      */
     load(id) {
-      if (!available() || !id) return null;
+      if (!available() || !id || typeof id !== 'string') return null;
       try {
         const vault = readVault();
         const entry = vault.entries[id];
         if (!entry || !entry.box) return null;
-        return safe.decrypt(Buffer.from(entry.box, 'base64'));
+        // safeStorage.decrypt returns a Buffer — normalize to string so
+        // header assignment and JSON handling downstream stay predictable.
+        const out = safe.decrypt(Buffer.from(entry.box, 'base64'));
+        return out == null ? null : String(out);
       } catch (e) {
         return null;
       }

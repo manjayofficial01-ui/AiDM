@@ -4,7 +4,44 @@
  * Detects video streams with quality/resolution/size metadata
  */
 
-const AIDM_API = 'http://127.0.0.1:18765';
+// The desktop server binds 127.0.0.1:18765 but walks UPWARDS if that port is
+// already taken (a second AiDM instance, a leftover socket). A hardcoded
+// origin then silently fails every request even while the app is running — so
+// the extension probes the small candidate range and remembers the live base.
+// AIDM_API_BASE is the single source of truth for every call site.
+const AIDM_BASE_PORT = 18765;
+const AIDM_PORT_SPAN = 8;
+let AIDM_API_BASE = `http://127.0.0.1:${AIDM_BASE_PORT}`;
+let aidmProbePromise = null;
+
+// Resolve the real live base by polling each candidate port's /api/status.
+// Concurrent callers share one probe. Returns the base URL or null.
+function discoverAidmBase() {
+  if (aidmProbePromise) return aidmProbePromise;
+  const tryOne = async (port) => {
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/api/status`, { signal: AbortSignal.timeout(1200) });
+      if (!r.ok) return null;
+      const j = await r.json().catch(() => ({}));
+      return j && j.status === 'running' ? `http://127.0.0.1:${port}` : null;
+    } catch (e) {
+      return null;
+    }
+  };
+  aidmProbePromise = (async () => {
+    // Current base first (the common single-instance case), then the rest.
+    const current = await tryOne(Number(new URL(AIDM_API_BASE).port) || AIDM_BASE_PORT);
+    if (current) return current;
+    const ports = [];
+    for (let p = AIDM_BASE_PORT; p < AIDM_BASE_PORT + AIDM_PORT_SPAN; p++) ports.push(p);
+    const found = await Promise.all(ports.map(tryOne));
+    const base = found.find(Boolean) || null;
+    if (base) AIDM_API_BASE = base;
+    return base;
+  })().finally(() => { aidmProbePromise = null; });
+  return aidmProbePromise;
+}
+
 let isConnected = false;
 let interceptedCount = 0;
 let settings = {
@@ -83,7 +120,7 @@ const STREAM_MAX = 80;
 
 function noteTabStream(tabId, url) {
   if (tabId == null || tabId < 0 || !url || !/^https?:/i.test(url)) return;
-  if (url.startsWith(AIDM_API)) return;
+  if (url.startsWith(AIDM_API_BASE)) return;
   // Never offer raw media segments as downloadable links. Facebook
   // ?bytestart=N slices are rewritten to the full-file URL FIRST so all
   // slices collapse into the one playable progressive MP4.
@@ -105,6 +142,7 @@ function noteTabStream(tabId, url) {
   if (n && list.some(e => normalizeSentUrl(e.url) === n)) return;
   list.unshift({ url, time: Date.now() });
   if (list.length > STREAM_MAX) list.length = STREAM_MAX;
+  schedulePersist();
 }
 
 // ── Exact media-request matching + header capture ──────────────────────────
@@ -251,6 +289,7 @@ try {
         if (details.tabId == null || details.tabId < 0) return;
         if (!isMediaRequestUrl(details.url, details.type)) return;
         noteCapturedRequest(capturedReqHeaders, details);
+        schedulePersist();
       } catch (e) { /* never break page traffic for bookkeeping */ }
     },
     { urls: ['<all_urls>'] },
@@ -260,7 +299,7 @@ try {
   chrome.webRequest.onHeadersReceived.addListener(
     (details) => {
       const u = details.url || '';
-      if (!u || !/^https?:/i.test(u) || u.startsWith(AIDM_API)) return;
+      if (!u || !/^https?:/i.test(u) || u.startsWith(AIDM_API_BASE)) return;
       const hs = details.responseHeaders;
       if (!hs) return;
       let ct = '';
@@ -302,6 +341,25 @@ try {
     // and grew for the whole browser session.
     tabNavAt.delete(tabId);
     pruneResolvedCaches();
+    schedulePersist();
+  });
+} catch (e) {}
+
+// A closed window takes its tabs with it; tabs.onRemoved normally fires per
+// tab, but prune defensively so no orphan per-tab state survives a window
+// close (fix paired with the debounced session persistence below).
+try {
+  chrome.windows.onRemoved.addListener(() => {
+    (async () => {
+      try {
+        const tabs = await chrome.tabs.query({});
+        const alive = new Set((tabs || []).map(t => t.id));
+        for (const tabId of [...tabStreams.keys()]) if (!alive.has(tabId)) tabStreams.delete(tabId);
+        for (const tabId of [...tabNavAt.keys()]) if (!alive.has(tabId)) tabNavAt.delete(tabId);
+        for (const tabId of [...tabDashActive.keys()]) if (!alive.has(tabId)) tabDashActive.delete(tabId);
+        schedulePersist();
+      } catch (e) { /* tabs API unavailable */ }
+    })();
   });
 } catch (e) {}
 
@@ -327,7 +385,7 @@ function maybeResolveTweet(url) {
     if (now - last < TWEET_RETRY_MS) return;
     resolvedTweets.set(tweetId, now);
 
-    fetch(`${AIDM_API}/api/resolve-twitter`, {
+    fetch(`${AIDM_API_BASE}/api/resolve-twitter`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ url }),
@@ -376,7 +434,7 @@ function maybeResolveFacebook(url) {
         if (all.length) cookies = all.join('; ');
       } catch (e) { /* probe without cookies */ }
       try {
-        const resp = await fetch(`${AIDM_API}/api/resolve-facebook`, {
+        const resp = await fetch(`${AIDM_API_BASE}/api/resolve-facebook`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ url, cookies }),
@@ -437,7 +495,7 @@ function maybeResolveYouTube(url) {
 
     (async () => {
       try {
-        const resp = await fetch(`${AIDM_API}/api/resolve-youtube`, {
+        const resp = await fetch(`${AIDM_API_BASE}/api/resolve-youtube`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ url }),
@@ -467,6 +525,7 @@ try {
     if (changeInfo.status === 'loading') {
       tabStreams.delete(tabId);
       tabNavAt.set(tabId, Date.now());
+      schedulePersist();
     }
     if (changeInfo.status === 'complete' && tab && tab.url) {
       maybeResolveTweet(tab.url);
@@ -493,6 +552,7 @@ try {
         // full-navigation one).
         tabStreams.delete(details.tabId);
         tabNavAt.set(details.tabId, Date.now());
+        schedulePersist();
         maybeResolveTweet(details.url);
         maybeResolveFacebook(details.url);
         maybeResolveYouTube(details.url);
@@ -593,17 +653,13 @@ function getStreamMeta(url) {
 // ── Already-sent tracking (dedup) ────────────────────────────────────────────
 // URLs handed to AiDM (exact + token-normalized) so the capsule/popup stop
 // offering them and the manager never stacks a duplicate row.
+// CONSERVATIVE set: only signature-class params are stripped on generic sites.
+// Ultra-generic keys (t, ts, _, e, h, key, dl, tag…) frequently carry real
+// content identity — stripping them everywhere merged distinct videos into
+// one. The aggressive per-request CDN churn set is applied ONLY for known
+// media CDN hosts, inside normalizeSentUrl below.
 const TOKEN_PARAMS = new Set([
-  'token', 'tokens', 'sig', 'signature', 'sign', 'expires', 'expiry', 'exp',
-  'e', 'h', 'hdnea', 'hdntl', 'hdnts', 'st', 'key', 'auth', 'authkey',
-  'wmsauthsign', 'mst', 'access_token', 'token_expires', 'session', 'sid',
-  'policy', 'token_hash', 'verify', 'md5', 't', 'ts', '_',
-  // Facebook / Instagram CDN auth (rotates per request — same video, new ?oh=&oe=).
-  // `vabr` (video-adaptive-bitrate token on hd_src/sd_src) rotates the same way.
-  'oh', 'oe', 'dl', 'rl', 'vabr', 'efg', 'bytestart', 'byteend',
-  '_nc_ht', '_nc_cat', '_nc_ohc', '_nc_rid', '_nc_sid', 'ccb',
-  // Twitter / X video CDN (?tag=12/14/16 rotates per poll — same file)
-  'tag', 'container', 'containers',
+  'sig', 'signature', 'token', 'expires', 'hdnts', 'hdntl', 'auth', 'se',
 ]);
 
 // Facebook edge-pool hosts rotate per request (video-ak-fbcdn-…, scontent-…,
@@ -789,8 +845,26 @@ function normalizeSentUrl(u) {
     const x = new URL(String(u || '').trim());
     x.hash = '';
     x.hostname = x.hostname.toLowerCase();
+    // Known media CDNs rotate an auth/cache-buster param on EVERY request for
+    // the SAME file (fbcdn ?oh=&oe=, twimg ?tag=&container=, instagram). Strip
+    // the aggressive set there so re-fetches dedup; on any other host keep the
+    // conservative TOKEN_PARAMS so real query identity is never erased.
+    let strip = TOKEN_PARAMS;
+    if (/(?:^|\.)(?:fbcdn\.net|cdninstagram\.com|twimg\.com|instagram\.com)$/.test(x.hostname) || /scontent\./.test(x.hostname)) {
+      // Cached on the function itself so this stays self-contained (the test
+      // harnesses extract and eval exactly this definition).
+      strip = normalizeSentUrl.__aggr || (normalizeSentUrl.__aggr = new Set([
+        'token', 'tokens', 'sig', 'signature', 'sign', 'expires', 'expiry', 'exp',
+        'e', 'h', 'hdnea', 'hdntl', 'hdnts', 'st', 'key', 'auth', 'authkey',
+        'wmsauthsign', 'mst', 'access_token', 'token_expires', 'session', 'sid',
+        'policy', 'token_hash', 'verify', 'md5', 't', 'ts', '_',
+        'oh', 'oe', 'dl', 'rl', 'vabr', 'efg', 'bytestart', 'byteend',
+        '_nc_ht', '_nc_cat', '_nc_ohc', '_nc_rid', '_nc_sid', 'ccb',
+        'tag', 'container', 'containers',
+      ]));
+    }
     const params = Array.from(x.searchParams.entries())
-      .filter(([k]) => !TOKEN_PARAMS.has(k.toLowerCase()));
+      .filter(([k]) => !strip.has(k.toLowerCase()));
     params.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : 1));
     const qs = new URLSearchParams();
     params.forEach(([k, v]) => qs.append(k, v));
@@ -847,6 +921,7 @@ function markSent(url) {
   if (n) sentNorm.add(n);
   if (sentExact.size > SENT_MAX) sentExact.delete(sentExact.values().next().value);
   if (sentNorm.size > SENT_MAX) sentNorm.delete(sentNorm.values().next().value);
+  schedulePersist();
 }
 
 function isSent(url) {
@@ -855,6 +930,107 @@ function isSent(url) {
   const n = normalizeSentUrl(url);
   return !!n && sentNorm.has(n);
 }
+
+// ── MV3 suspension persistence ─────────────────────────────────────────────
+// Chrome kills this service worker after ~30s of idleness and every global
+// above dies with it: the sent-URL dedup sets, the captured request headers,
+// the per-tab stream history and the intercept counter all reset mid-session
+// (duplicates re-appear in AiDM, header replay loses its Cookie/Referer).
+// Persist that state in chrome.storage.session with a debounced (~1s)
+// write-through and rehydrate before event handlers act on it.
+const SESSION_STATE_KEY = 'aidmSwState';
+const SENT_PERSIST_MAX = 2000;      // FIFO cap for the persisted sent sets
+const CAPTURE_PERSIST_MAX = 200;    // matches CAPTURE_MAX
+
+function schedulePersist() {
+  if (schedulePersist._timer) return;
+  try {
+    schedulePersist._timer = setTimeout(() => {
+      schedulePersist._timer = null;
+      persistState();
+    }, 1000);
+  } catch (e) { /* worker shutting down — best effort */ }
+}
+
+function persistState() {
+  try {
+    const now = Date.now();
+    // Drop stream history whose tab navigated more than STREAM_KEEP_MS ago —
+    // it is already invisible to getTabStreams and must not bloat storage.
+    const streams = {};
+    for (const [tabId, list] of tabStreams) {
+      const nav = tabNavAt.get(tabId) || 0;
+      if (nav && now - nav > STREAM_KEEP_MS) continue;
+      streams[tabId] = (list || []).slice(0, STREAM_MAX);
+    }
+    const navAt = {};
+    for (const [tabId, t] of tabNavAt) {
+      if (!t || now - t <= STREAM_KEEP_MS) navAt[tabId] = t;
+    }
+    const dnr = {};
+    for (const [id, exp] of aidmDnrExpiry) dnr[id] = exp;
+    const state = {
+      sentExact: [...sentExact].slice(-SENT_PERSIST_MAX),
+      sentNorm: [...sentNorm].slice(-SENT_PERSIST_MAX),
+      captured: [...capturedReqHeaders.entries()].slice(-CAPTURE_PERSIST_MAX),
+      streams,
+      navAt,
+      dnr,
+      interceptedCount,
+    };
+    chrome.storage.session.set({ [SESSION_STATE_KEY]: state }).catch(() => {});
+  } catch (e) { /* storage unavailable — keep running in-memory */ }
+}
+
+// Rehydrate once per worker lifetime; every state-reading event path awaits
+// this promise so a cold start never answers from empty maps. Merging is
+// live-state-first: events that fire during rehydration win over the snapshot.
+const initReady = (async () => {
+  try {
+    const data = await chrome.storage.session.get(SESSION_STATE_KEY);
+    const s = data && data[SESSION_STATE_KEY];
+    if (!s) return;
+    if (Array.isArray(s.sentExact)) s.sentExact.slice(-SENT_PERSIST_MAX).forEach(u => sentExact.add(u));
+    if (Array.isArray(s.sentNorm)) s.sentNorm.slice(-SENT_PERSIST_MAX).forEach(u => sentNorm.add(u));
+    if (Array.isArray(s.captured)) {
+      for (const [k, v] of s.captured.slice(-CAPTURE_PERSIST_MAX)) {
+        if (!capturedReqHeaders.has(k)) capturedReqHeaders.set(k, v);
+      }
+    }
+    if (s.streams) {
+      for (const tabId of Object.keys(s.streams)) {
+        const id = Number(tabId);
+        const restored = (s.streams[tabId] || []).filter(e => e && e.url);
+        const live = tabStreams.get(id);
+        if (!live) {
+          tabStreams.set(id, restored);
+        } else {
+          // Events that fired during rehydration already added entries —
+          // merge instead of overwriting, newest first, capped.
+          const have = new Set(live.map(e => e && e.url));
+          for (const e of restored) if (!have.has(e.url)) live.push(e);
+          live.sort((a, b) => (b.time || 0) - (a.time || 0));
+          if (live.length > STREAM_MAX) live.length = STREAM_MAX;
+        }
+      }
+    }
+    if (s.navAt) {
+      for (const tabId of Object.keys(s.navAt)) {
+        const id = Number(tabId);
+        if (!tabNavAt.has(id)) tabNavAt.set(id, s.navAt[tabId]);
+      }
+    }
+    if (s.dnr) {
+      for (const id of Object.keys(s.dnr)) {
+        const rid = Number(id);
+        if (!aidmDnrExpiry.has(rid)) aidmDnrExpiry.set(rid, s.dnr[id]);
+      }
+    }
+    if (typeof s.interceptedCount === 'number') {
+      interceptedCount = Math.max(interceptedCount, s.interceptedCount);
+    }
+  } catch (e) { /* storage unavailable — run with fresh state */ }
+})();
 
 // ── Capsule link liveness probe ──────────────────────────────────────────────
 // Sites like mydaddy.cc / KVS put TIME-LIMITED CDN links on the page. By the
@@ -874,10 +1050,15 @@ async function probeStreamUrl(url, referrer) {
   if (cached && Date.now() - cached.time < PROBE_TTL_MS) return cached.result;
   let result;
   try {
+    // NOTE: probes are effectively anonymous. Chrome strips the forbidden
+    // request headers (Cookie, User-Agent) from fetch() even in an extension
+    // context, so setting them here was a no-op pretense — the browser only
+    // attaches its own cookies for hosts covered by our host permissions.
+    // Range/Referer/Accept-Language below are the headers actually honored
+    // (the Referer itself is best-effort; strict CDNs may still 403 a probe).
     const headers = {
       'Range': 'bytes=0-0',
       'Referer': referrer || new URL(url).origin + '/',
-      'User-Agent': navigator.userAgent || '',
       'Accept-Language': (navigator.language || 'en-US') + ',en;q=0.9',
     };
     try {
@@ -886,8 +1067,9 @@ async function probeStreamUrl(url, referrer) {
         try { cookieHosts.add(referrer); } catch (e) {}
         try { cookieHosts.add(new URL(referrer).hostname); } catch (e) {}
       }
-      const all = await collectCookies(cookieHosts);
-      if (all.length) headers.Cookie = all.join('; ');
+      // Collected for availability only — the Cookie header cannot be set
+      // from fetch(); Chrome sends the session itself for permitted hosts.
+      await collectCookies(cookieHosts);
     } catch (e) { /* cookies unavailable — probe without them */ }
     const resp = await fetch(url, {
       method: 'GET',
@@ -952,7 +1134,7 @@ async function probeStreamUrl(url, referrer) {
 
 async function probeStreamUrls(urls, referrer) {
   const list = (Array.isArray(urls) ? urls : [])
-    .filter(u => typeof u === 'string' && /^https?:/i.test(u) && !u.startsWith(AIDM_API))
+    .filter(u => typeof u === 'string' && /^https?:/i.test(u) && !u.startsWith(AIDM_API_BASE))
     .slice(0, PROBE_MAX_URLS);
   const out = {};
   await Promise.all(list.map(async (u) => { out[u] = await probeStreamUrl(u, referrer); }));
@@ -963,19 +1145,27 @@ async function probeStreamUrls(urls, referrer) {
 // ── Connection & Settings ─────────────────────────────────────────────────────
 
 async function checkConnection() {
+  let data = null;
   try {
-    const resp = await fetch(`${AIDM_API}/api/status`, { signal: AbortSignal.timeout(2000) });
-    const data = await resp.json();
-    isConnected = data.status === 'running';
-    // Merge over defaults so a missing key never disables a control.
-    if (data.settings) settings = { ...settings, ...data.settings };
-    updateBadge();
-    return isConnected;
+    const resp = await fetch(`${AIDM_API_BASE}/api/status`, { signal: AbortSignal.timeout(2000) });
+    data = await resp.json();
   } catch {
-    isConnected = false;
-    updateBadge();
-    return false;
+    // The app may be alive on an incremented port (18765 was busy at its
+    // startup): sweep the candidate range once, then re-read the base.
+    if (await discoverAidmBase()) {
+      try {
+        const resp2 = await fetch(`${AIDM_API_BASE}/api/status`, { signal: AbortSignal.timeout(2000) });
+        data = await resp2.json();
+      } catch {
+        data = null;
+      }
+    }
   }
+  isConnected = !!data && data.status === 'running';
+  // Merge over defaults so a missing key never disables a control.
+  if (data && data.settings) settings = { ...settings, ...data.settings };
+  updateBadge();
+  return isConnected;
 }
 
 function updateBadge() {
@@ -1039,7 +1229,7 @@ async function sendBlobToAiDM(url, filename, opts = {}) {
       filename: finalName,
       meta: Object.assign({}, opts.meta || {}, { contentType: mime, sourceUrl: url }),
     };
-    const post = await fetch(`${AIDM_API}/api/download`, {
+    const post = await fetch(`${AIDM_API_BASE}/api/download`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -1047,7 +1237,7 @@ async function sendBlobToAiDM(url, filename, opts = {}) {
     });
     const data = await post.json();
     if (data && data.success) {
-      if (!data.duplicate) interceptedCount++;
+      if (!data.duplicate) { interceptedCount++; schedulePersist(); }
       return { sent: !data.duplicate, success: true, duplicate: !!data.duplicate };
     }
     return { sent: false, success: false, error: (data && data.error) || 'upload failed' };
@@ -1062,6 +1252,8 @@ async function sendToAiDM(url, filename, opts = {}) {
   if (typeof url === 'string' && url.startsWith('blob:')) {
     return sendBlobToAiDM(url, filename, opts);
   }
+  // Never dedup against half-loaded state after a worker restart.
+  await initReady;
   // Facebook: never download a ?bytestart=N slice — it is a partial chunk of
   // the file (missing the MP4 header) and saves as an unplayable video.
   // Strip the range params so the full progressive file is fetched instead.
@@ -1118,7 +1310,7 @@ async function sendToAiDM(url, filename, opts = {}) {
         if (all.length) body.cookies = all.join('; ');
       } catch (e) { /* cookies API unavailable or blocked */ }
     }
-    const resp = await fetch(`${AIDM_API}/api/download`, {
+    const resp = await fetch(`${AIDM_API_BASE}/api/download`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -1138,7 +1330,7 @@ async function sendToAiDM(url, filename, opts = {}) {
 
 async function sendBatchToAiDM(urls) {
   try {
-    const resp = await fetch(`${AIDM_API}/api/batch`, {
+    const resp = await fetch(`${AIDM_API_BASE}/api/batch`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ urls }),
@@ -1302,7 +1494,7 @@ async function sendVideoDetection(videoData) {
         if (all.length) payload.cookies = all.join('; ');
       } catch (e) { /* cookies API unavailable */ }
     }
-    const resp = await fetch(`${AIDM_API}/api/video-detected`, {
+    const resp = await fetch(`${AIDM_API_BASE}/api/video-detected`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -1340,11 +1532,17 @@ function interceptDownload(downloadItem, suggest) {
   const fallBackToChrome = () => {
     // Give the download back: resume it and let Chrome use its own filename.
     if (pausedOk) { try { chrome.downloads.resume(downloadItem.id); } catch (e) {} }
-    try { suggest({ filename: downloadItem.filename }); }
-    catch (e) { try { suggest(); } catch (e2) { /* determination already closed */ } }
+    // Bare suggest(): downloadItem.filename is still empty at determination
+    // time on most downloads — suggesting it back would blank the name.
+    try { suggest(); } catch (e) { /* determination already closed */ }
   };
 
   (async () => {
+    await initReady;
+    // Never intercept a download AiDM itself started via chrome.downloads
+    // (the native browser fallback): re-intercepting it would hand the same
+    // file back to sendToAiDM in an endless fallback loop.
+    if (isSelfDownload(downloadItem)) return fallBackToChrome();
     if (!isConnected) await checkConnection();
     if (!isConnected) return fallBackToChrome();
 
@@ -1400,35 +1598,40 @@ chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
 // ── Context Menus ─────────────────────────────────────────────────────────────
 
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({
-    id: 'aidm-download-link',
-    title: '⬇️ Download with AiDM',
-    contexts: ['link'],
-  });
+  // removeAll first: onInstalled also fires on browser/extension update, and
+  // re-creating an existing id throws "Cannot create item with duplicate id".
+  chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({
+      id: 'aidm-download-link',
+      title: '⬇️ Download with AiDM',
+      contexts: ['link'],
+    });
 
-  chrome.contextMenus.create({
-    id: 'aidm-download-video',
-    title: '🎬 Download video with AiDM',
-    contexts: ['video', 'audio'],
-  });
+    chrome.contextMenus.create({
+      id: 'aidm-download-video',
+      title: '🎬 Download video with AiDM',
+      contexts: ['video', 'audio'],
+    });
 
-  chrome.contextMenus.create({
-    id: 'aidm-download-image',
-    title: '🖼️ Download image with AiDM',
-    contexts: ['image'],
-  });
+    chrome.contextMenus.create({
+      id: 'aidm-download-image',
+      title: '🖼️ Download image with AiDM',
+      contexts: ['image'],
+    });
 
-  chrome.contextMenus.create({
-    id: 'aidm-download-all',
-    title: '📋 Download all links with AiDM',
-    contexts: ['page', 'selection'],
-  });
+    chrome.contextMenus.create({
+      id: 'aidm-download-all',
+      title: '📋 Download all links with AiDM',
+      contexts: ['page', 'selection'],
+    });
 
-  chrome.contextMenus.create({
-    id: 'aidm-download-browser',
-    title: '🌐 Download with browser (fallback)',
-    contexts: ['link', 'video', 'audio', 'image'],
+    chrome.contextMenus.create({
+      id: 'aidm-download-browser',
+      title: '🌐 Download with browser (fallback)',
+      contexts: ['link', 'video', 'audio', 'image'],
+    });
   });
+  checkConnection();
 });
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
@@ -1440,7 +1643,21 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   } else if (info.menuItemId === 'aidm-download-image') {
     await sendToAiDM(info.srcUrl, extractFilename(info.srcUrl));
   } else if (info.menuItemId === 'aidm-download-all') {
-    chrome.tabs.sendMessage(tab.id, { action: 'collect-links' });
+    chrome.tabs.sendMessage(tab.id, { action: 'collect-links' }, () => {
+      // Consume lastError (unhandled it logs "message port closed") and tell
+      // the user when no content script can answer (chrome://, web store,
+      // PDF viewer, pages loaded before the extension).
+      if (chrome.runtime.lastError) {
+        try {
+          chrome.notifications.create({
+            type: 'basic',
+            iconUrl: 'icon128.png',
+            title: 'AiDM',
+            message: 'Cannot collect links on this page: ' + chrome.runtime.lastError.message,
+          });
+        } catch (e) {}
+      }
+    });
   } else if (info.menuItemId === 'aidm-download-browser') {
     // Last-resort native download (see nativeDownloadToBrowser): Chrome
     // fetches the file itself when the desktop engine is refused.
@@ -1495,17 +1712,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.action === 'check-connection') {
-    checkConnection().then(connected => {
+    initReady.then(() => checkConnection()).then(connected => {
       sendResponse({ connected, intercepted: interceptedCount, settings });
-    });
-    return true;
-  }
-
-  if (msg.action === 'video-detected') {
-    // Legacy alias: older content builds sent a bare `data` payload; the live
-    // path is `videos-with-quality` (flat pageTitle/pageUrl/videos).
-    sendVideoDetection(msg.data).then(result => {
-      sendResponse({ ok: true, result });
     });
     return true;
   }
@@ -1524,24 +1732,28 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // One round-trip for the capsule/popup: recent tab streams + sent URLs
   if (msg.action === 'get-panel-data') {
-    const tabId = msg.tabId != null ? msg.tabId : (sender.tab && sender.tab.id);
-    // Page-load floor for stream freshness. Content scripts send their own
-    // performance.timeOrigin; the popup has no page clock, so fall back to
-    // the tab's last-navigation time recorded by this worker.
-    const since = (typeof msg.since === 'number' && msg.since > 0)
-      ? msg.since
-      : (tabNavAt.get(tabId) || 0);
-    // Attach fresh response metadata (native filename + exact size) so the
-    // capsule rows mirror what a browser download would have produced.
-    const now = Date.now();
-    const meta = {};
-    for (const [k, v] of streamMeta) {
-      if (now - v.time < META_KEEP_MS) {
-        meta[k] = { filename: v.filename, size: v.size, contentType: v.contentType };
+    // Async: the persisted state must be rehydrated first, or a freshly
+    // woken worker answers with empty streams/sent sets.
+    initReady.then(() => {
+      const tabId = msg.tabId != null ? msg.tabId : (sender.tab && sender.tab.id);
+      // Page-load floor for stream freshness. Content scripts send their own
+      // performance.timeOrigin; the popup has no page clock, so fall back to
+      // the tab's last-navigation time recorded by this worker.
+      const since = (typeof msg.since === 'number' && msg.since > 0)
+        ? msg.since
+        : (tabNavAt.get(tabId) || 0);
+      // Attach fresh response metadata (native filename + exact size) so the
+      // capsule rows mirror what a browser download would have produced.
+      const now = Date.now();
+      const meta = {};
+      for (const [k, v] of streamMeta) {
+        if (now - v.time < META_KEEP_MS) {
+          meta[k] = { filename: v.filename, size: v.size, contentType: v.contentType };
+        }
       }
-    }
-    sendResponse({ streams: getTabStreams(tabId, since), sent: [...sentExact].slice(-500), meta, dashActive: isDashActiveTab(tabDashActive, tabId) });
-    return false;
+      sendResponse({ streams: getTabStreams(tabId, since), sent: [...sentExact].slice(-500), meta, dashActive: isDashActiveTab(tabDashActive, tabId) });
+    });
+    return true;
   }
 
   // Capsule link liveness check — see probeStreamUrl() above.
@@ -1560,7 +1772,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     resolveEmbedViaBrowser(msg.url, msg.referrer).then(
       async (r) => {
         try {
-          await fetch(`${AIDM_API}/api/video-detected`, {
+          await fetch(`${AIDM_API_BASE}/api/video-detected`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -1977,7 +2189,13 @@ function shouldTakeOver(url, opts) {
 // Pure rule builder (test/browser-engine.js extracts the SHIPPED definition).
 
 const AIDM_DNR_RULE_BASE = 7000;
-let aidmDnrNextId = AIDM_DNR_RULE_BASE;
+const AIDM_DNR_RULE_TTL_MS = 5 * 60 * 1000;
+// ruleId -> expiry (epoch ms). The old in-worker counter reset to 7000 on
+// every worker restart and collided with still-live session rules, and the
+// 5-minute setTimeout cleanup never fired once Chrome suspended the worker.
+// The map is persisted with the session state (persistState) so restarts can
+// expire rules properly and always pick max(existing id) + 1.
+const aidmDnrExpiry = new Map();
 
 /** Session DNR rule setting the page Referer for one download host. */
 function buildAidmRefererRule(id, domain, referer) {
@@ -2002,29 +2220,44 @@ async function ensureAidmRefererRule(url, referer) {
   try { domain = new URL(String(url)).hostname; } catch (e) { return false; }
   if (!domain) return false;
   try {
+    await initReady;
     const filter = '||' + domain + '/';
+    const now = Date.now();
     const rules = await chrome.declarativeNetRequest.getSessionRules();
-    const ours = (rules || []).filter(r => r && r.id >= AIDM_DNR_RULE_BASE);
-    const covered = ours.some(r => r.condition && r.condition.urlFilter === filter &&
+    const liveIds = new Set((rules || []).map(r => r && r.id).filter(id => typeof id === 'number'));
+    // Remove rules whose TTL elapsed (their setTimeout cleaner may have died
+    // with a suspended worker); the expiry map is the durable source.
+    const expired = [];
+    for (const [id, exp] of [...aidmDnrExpiry]) {
+      if (exp <= now) {
+        aidmDnrExpiry.delete(id);
+        if (liveIds.has(id)) { expired.push(id); liveIds.delete(id); }
+      }
+    }
+    if (expired.length) {
+      try { await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: expired }); } catch (e) {}
+    }
+    const covered = (rules || []).some(r => r && liveIds.has(r.id) && r.id >= AIDM_DNR_RULE_BASE &&
+      r.condition && r.condition.urlFilter === filter &&
       ((r.action && r.action.requestHeaders) || []).some(h => String(h.header || '').toLowerCase() === 'referer'));
     if (covered) return true;
-    if (ours.length > 20) {
-      try {
-        await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: ours.map(r => r.id) });
-        aidmDnrNextId = AIDM_DNR_RULE_BASE;
-      } catch (e) { /* continue with a fresh id anyway */ }
-    }
-    const ruleId = aidmDnrNextId++;
+    // Next id = max(existing session rule id) + 1 — never collides with a
+    // rule that outlived the worker's in-memory counter.
+    let ruleId = AIDM_DNR_RULE_BASE;
+    for (const id of liveIds) if (id >= ruleId) ruleId = id + 1;
     await chrome.declarativeNetRequest.updateSessionRules({
       addRules: [buildAidmRefererRule(ruleId, domain, referer)],
     });
-    // Session rules die with the browser session anyway; drop ours early so
-    // a later download never inherits a stale Referer.
+    aidmDnrExpiry.set(ruleId, now + AIDM_DNR_RULE_TTL_MS);
+    schedulePersist();
+    // Best-effort in-worker cleanup; if the worker is suspended before it
+    // fires, the expiry map above removes the rule on the next call.
     setTimeout(() => {
       try {
         chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [ruleId] }).catch(() => {});
+        aidmDnrExpiry.delete(ruleId);
       } catch (e) {}
-    }, 5 * 60 * 1000);
+    }, AIDM_DNR_RULE_TTL_MS);
     return true;
   } catch (e) { return false; }
 }
@@ -2034,6 +2267,57 @@ async function ensureAidmRefererRule(url, referer) {
  * fingerprint are exactly right because it IS the browser downloading.
  * @returns {Promise<{success: boolean, downloadId?: number, error?: string}>}
  */
+// Self-initiated download markers: chrome.downloads.download() re-fires
+// onDeterminingFilename, so without them the native fallback loops back into
+// interceptDownload → sendToAiDM forever. The id is only known AFTER
+// download() resolves but onDeterminingFilename can fire FIRST — hence the
+// additional url+time marker set (TTL-bounded).
+const selfDownloadIds = new Set();
+const selfDownloadUrls = new Map(); // url / normalizeSentUrl(url) -> epoch ms
+const SELF_DL_TTL_MS = 2 * 60 * 1000;
+
+function markSelfDownload(url) {
+  try {
+    const now = Date.now();
+    for (const [k, t] of selfDownloadUrls) {
+      if (now - t > SELF_DL_TTL_MS) selfDownloadUrls.delete(k);
+    }
+    selfDownloadUrls.set(String(url), now);
+    const n = normalizeSentUrl(url);
+    if (n) selfDownloadUrls.set(n, now);
+  } catch (e) { /* swallow */ }
+}
+
+function isSelfDownload(downloadItem) {
+  try {
+    if (downloadItem && selfDownloadIds.has(downloadItem.id)) return true;
+    const now = Date.now();
+    const urls = [downloadItem && downloadItem.finalUrl, downloadItem && downloadItem.url];
+    for (const u of urls) {
+      if (!u) continue;
+      const t = selfDownloadUrls.get(String(u));
+      if (t && now - t < SELF_DL_TTL_MS) return true;
+      const n = normalizeSentUrl(u);
+      if (n) {
+        const t2 = selfDownloadUrls.get(n);
+        if (t2 && now - t2 < SELF_DL_TTL_MS) return true;
+      }
+    }
+  } catch (e) { /* swallow */ }
+  return false;
+}
+
+// Drop a finished self-download's id so the marker set never grows.
+try {
+  chrome.downloads.onChanged.addListener((delta) => {
+    try {
+      if (delta && delta.state && (delta.state.current === 'complete' || delta.state.current === 'interrupted')) {
+        selfDownloadIds.delete(delta.id);
+      }
+    } catch (e) {}
+  });
+} catch (e) { /* downloads API unavailable */ }
+
 async function nativeDownloadToBrowser({ url, filename, referrer }) {
   if (!url || !/^https?:/i.test(String(url))) {
     return { success: false, error: 'Missing url' };
@@ -2041,12 +2325,19 @@ async function nativeDownloadToBrowser({ url, filename, referrer }) {
   try {
     if (referrer) await ensureAidmRefererRule(url, referrer);
     const name = (filename && String(filename).trim()) || extractFilename(url);
+    // Mark BEFORE download(): onDeterminingFilename can fire before the
+    // promise below resolves with the download id.
+    markSelfDownload(String(url));
     const downloadId = await chrome.downloads.download({
       url: String(url),
       filename: name,
       saveAs: false,
       conflictAction: 'uniquify',
     });
+    if (typeof downloadId === 'number') {
+      selfDownloadIds.add(downloadId);
+      if (selfDownloadIds.size > 100) selfDownloadIds.delete(selfDownloadIds.values().next().value);
+    }
     try {
       chrome.notifications.create({
         type: 'basic',
@@ -2072,6 +2363,16 @@ function extractFilename(url) {
   }
 }
 
-// Periodic connection check
-setInterval(checkConnection, 30000);
+// Periodic connection check. MV3: setInterval dies with the suspended worker
+// (it only ran while the worker happened to be awake) — chrome.alarms wakes
+// the worker on schedule instead.
+try {
+  chrome.alarms.create('aidm-check-connection', { periodInMinutes: 0.5 });
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm && alarm.name === 'aidm-check-connection') checkConnection();
+  });
+} catch (e) { /* alarms unavailable */ }
+try {
+  chrome.runtime.onStartup.addListener(() => { checkConnection(); });
+} catch (e) { /* runtime unavailable */ }
 checkConnection();

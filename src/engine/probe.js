@@ -1,14 +1,54 @@
 // @ts-check
 const { basename } = require('path');
-const { DownloadError, classifyHttpStatus, toDownloadError } = require('./errors');
-const { parseRetryAfter } = require('./retry');
+const { DownloadError, classifyHttpStatus, toDownloadError, isRetryableStatus } = require('./errors');
+const { parseRetryAfter, backoffDelay } = require('./retry');
+const { DEFAULT_RETRY_POLICY } = require('./types');
+
+// A probe is the first request a task makes, and until now it had no retry at
+// all: one 429 (Google/CDN rate limiting an authenticated attachment) or one
+// 503 from a cold CDN edge killed the row before a single byte transferred,
+// even though the transfer itself is protected by a full retry policy.
+const DEFAULT_PROBE_ATTEMPTS = 3;
+
+/** @param {number} ms @param {AbortSignal} [signal] */
+function sleep(ms, signal) {
+  if (!ms) return Promise.resolve();
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    t.unref?.();
+    // Don't leave a timer referenced if the caller aborts while we wait.
+    signal?.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
+  });
+}
 
 /**
- * Probe with `GET Range: bytes=0-0` rather than HEAD.
+ * Probe with `GET Range: bytes=0-0` rather than HEAD, retrying transient
+ * failures (429/5xx/timeouts) with backoff before giving up.
+ * @param {string} url
+ * @param {{ headers: Record<string, string>, fetchImpl: typeof fetch, signal?: AbortSignal, timeoutMs: number, probeAttempts?: number }} opts
+ */
+async function probeRemote(url, opts) {
+  const attempts = Math.max(1, Math.min(5, Number(opts.probeAttempts) || DEFAULT_PROBE_ATTEMPTS));
+  let last = null;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await probeRemoteOnce(url, opts);
+    } catch (err) {
+      const de = err instanceof DownloadError ? err : toDownloadError(err);
+      last = de;
+      const worthRetrying = de.retryable || (typeof de.status === 'number' && isRetryableStatus(de.status));
+      if (!worthRetrying || attempt === attempts) throw de;
+      await sleep(backoffDelay(attempt, DEFAULT_RETRY_POLICY, de.retryAfterMs), opts.signal);
+    }
+  }
+  throw last || new DownloadError('UNKNOWN', 'Probe failed');
+}
+
+/**
  * @param {string} url
  * @param {{ headers: Record<string, string>, fetchImpl: typeof fetch, signal?: AbortSignal, timeoutMs: number }} opts
  */
-async function probeRemote(url, opts) {
+async function probeRemoteOnce(url, opts) {
   const controller = new AbortController();
   const timer = setTimeout(
     () => controller.abort(new DownloadError('TIMEOUT', `Probe timed out after ${opts.timeoutMs}ms`, { retryable: true })),
@@ -41,12 +81,14 @@ async function probeRemote(url, opts) {
   }
 
   // Some tube/CDN hosts (WAF, mod_security, hotlink rules) reject HEAD and
-  // Range probes with 401/403 yet serve a plain browser-style GET just fine.
-  // A native browser download IS a plain GET, so retry once without Range
-  // before declaring the URL dead — otherwise sites that "work in the
-  // browser" can never download in AiDM. The body is cancelled immediately;
-  // only status + headers are read.
-  if (res.status === 401 || res.status === 403) {
+  // Range probes with 401/403/400 yet serve a plain browser-style GET just
+  // fine. A native browser download IS a plain GET, so retry once without
+  // Range before declaring the URL dead — otherwise sites that "work in the
+  // browser" can never download in AiDM. (400 joins the family: strict WAFs
+  // answer a malformed-looking Range/If-Range probe with 400 instead of
+  // 401/403, and classifyHttpStatus treats 400 as permanent.) The body is
+  // cancelled immediately; only status + headers are read.
+  if (res.status === 400 || res.status === 401 || res.status === 403) {
     try { await res.body?.cancel().catch(() => {}); } catch {}
     const plainHeaders = { ...(opts.headers || {}), 'Accept-Encoding': 'identity' };
     for (const k of Object.keys(plainHeaders)) {

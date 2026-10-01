@@ -1,5 +1,5 @@
 /**
- * AiDM v4.9.0 - UI Controller
+ * AiDM v5.0.0 - UI Controller
  * Features: Video quality picker, per-category paths, ask-every-time, auto-detection
  */
 
@@ -9,6 +9,10 @@ let activeCategory = 'all';
 let selectedIds = new Set();
 let contextTarget = null;
 let marqueeEndTime = 0; // timestamp of last marquee drag — suppresses stray clicks
+// Race guard: a getDownloads() fetch must not clobber mutations that IPC
+// events applied while the fetch was in flight. Every mutation of `downloads`
+// (and every fetch start) bumps this; the fetch only assigns when unchanged.
+let downloadsGeneration = 0;
 
 const downloadList = document.getElementById('download-list');
 const emptyState = document.getElementById('empty-state');
@@ -50,63 +54,212 @@ let aidmApiPort = 18765;
 async function updateExtensionStatus() {
   const el = document.getElementById('status-connection');
   if (!el) return;
+  const setState = (label, color) => {
+    el.textContent = '🔌 Extension: ';
+    const span = document.createElement('span');
+    span.style.color = color;
+    span.textContent = label;
+    el.appendChild(span);
+  };
   try {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 2000);
     const res = await fetch('http://127.0.0.1:' + aidmApiPort + '/api/status', { signal: ctrl.signal });
     clearTimeout(timer);
-    if (res.ok) {
-      el.innerHTML = '🔌 Extension: <span style="color:var(--success)">Connected</span>';
-    } else {
-      el.innerHTML = '🔌 Extension: <span style="color:var(--warning)">Degraded</span>';
-    }
+    if (res.ok) setState('Connected', 'var(--success)');
+    else setState('Degraded', 'var(--warning)');
   } catch {
-    el.innerHTML = '🔌 Extension: <span style="color:var(--error)">Disconnected</span>';
+    setState('Disconnected', 'var(--error)');
   }
 }
 
-// ── Theme (dark default; light via data-theme="light") ────────────────────────
+// ── Theme (light / dark / auto — auto follows prefers-color-scheme) ──────────
+
+let themeChoice = 'auto';
+
+function systemTheme() {
+  try {
+    return (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+  } catch (e) { return 'dark'; }
+}
+
+const darkModeMQ = (typeof window !== 'undefined' && window.matchMedia)
+  ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+if (darkModeMQ && darkModeMQ.addEventListener) {
+  darkModeMQ.addEventListener('change', () => { if (themeChoice === 'auto') applyTheme('auto'); });
+}
 
 function initTheme() {
   try {
     const saved = localStorage.getItem('aidm-theme');
-    applyTheme(saved === 'light' ? 'light' : 'dark');
-  } catch (e) { /* stub / private mode */ }
+    themeChoice = (saved === 'light' || saved === 'dark' || saved === 'auto') ? saved : 'auto';
+  } catch (e) { themeChoice = 'auto'; }
+  applyTheme(themeChoice);
 }
 
 function applyTheme(mode) {
+  themeChoice = mode;
   const root = document.documentElement;
   if (!root || !root.setAttribute) return;
-  if (mode === 'light') root.setAttribute('data-theme', 'light');
-  else root.setAttribute('data-theme', 'dark');
+  root.setAttribute('data-theme', mode === 'auto' ? systemTheme() : mode);
   try { localStorage.setItem('aidm-theme', mode); } catch (e) {}
 }
 
 function toggleTheme() {
-  const root = document.documentElement;
-  let next = 'dark';
-  try {
-    next = (root && root.getAttribute && root.getAttribute('data-theme') === 'light') ? 'dark' : 'light';
-  } catch (e) { next = 'light'; }
+  const next = themeChoice === 'dark' ? 'light' : themeChoice === 'light' ? 'auto' : 'dark';
   applyTheme(next);
-  showNotification(next === 'light' ? 'Light theme' : 'Dark theme', 'info');
+  showNotification(next === 'auto' ? 'Auto theme (follow system)' : next === 'light' ? 'Light theme' : 'Dark theme', 'info');
 }
 
 // ── Render Downloads ──────────────────────────────────────────────────────────
 
 // Progress events arrive up to ~5x/sec per active download (throttled in the
 // engine). Rebuilding the whole table for each one froze the UI with several
-// active rows — coalesce them into at most one render every 250ms. Events that
-// change row state (added/removed/paused/error/complete) still render at once.
+// active rows — coalesce them into at most one in-place patch every 250ms.
+// Events that change row state (added/removed/paused/error/complete) still do
+// a full render at once.
 let progressRenderPending = false;
-function scheduleProgressRender() {
+const progressDirtyIds = new Set();
+function scheduleProgressRender(id) {
+  if (id != null) progressDirtyIds.add(id);
   if (progressRenderPending) return;
   progressRenderPending = true;
   setTimeout(() => {
     progressRenderPending = false;
-    renderDownloads();
+    patchDirtyRows();
     updateSpeedDisplay();
   }, 250);
+}
+
+// Live row lookup (id → <tr>) so progress ticks can patch cells in place
+// instead of rebuilding the table innerHTML ~4x/sec.
+const rowEls = new Map();
+
+/** Percent for a row: dl.percent wins (0 included), else computed; clamped [0,100]. */
+function rowPercent(dl) {
+  const computed = dl.totalSize > 0 ? (dl.downloaded / dl.totalSize * 100) : 0;
+  const n = Number(dl.percent != null ? dl.percent : computed);
+  const c = isFinite(n) ? Math.min(100, Math.max(0, n)) : 0;
+  return Math.round(c * 10) / 10;
+}
+
+function rowSizeStr(dl) {
+  const estPrefix = dl.sizeEstimated ? '~' : '';
+  return dl.totalSize > 0
+    ? estPrefix + formatBytes(dl.totalSize)
+    : (dl.quality?.size ? formatBytes(dl.quality.size) : 'Unknown');
+}
+
+function segmentSignature(segs) {
+  if (!Array.isArray(segs) || segs.length <= 1) return '';
+  return segs.map(s => s.status + ':' + (s.downloaded > 0 ? 1 : 0)).join(',');
+}
+
+/** Patch one row's live cells (progress/ETA/size/speed/segments) in place. */
+function patchRow(tr, dl) {
+  if (tr.dataset.status !== (dl.status || '')) { renderDownloads(); return false; }
+  const percent = rowPercent(dl);
+  const fill = tr.querySelector('.progress-fill');
+  if (fill) {
+    fill.style.width = percent + '%';
+    const isDone = dl.status === 'completed';
+    const isActive = dl.status === 'downloading' || dl.status === 'connecting';
+    fill.className = 'progress-fill ' + (isDone ? 'is-done' : (isActive ? 'is-active' : ''));
+  }
+  const ptext = tr.querySelector('.progress-text');
+  if (ptext) ptext.textContent = percent + '%';
+
+  const speed = tr.querySelector('.speed-cell');
+  if (speed) {
+    speed.textContent = formatSpeed(dl.speed);
+    speed.classList.toggle('zero', !(dl.speed > 0));
+  }
+
+  const sizeCell = tr.querySelector('.col-size');
+  if (sizeCell) {
+    const divs = sizeCell.querySelectorAll('div');
+    const sizeStr = rowSizeStr(dl);
+    const downloadedStr = formatBytes(dl.downloaded);
+    if (divs[0] && divs[0].textContent !== sizeStr) divs[0].textContent = sizeStr;
+    if (divs[1] && divs[1].textContent !== downloadedStr) divs[1].textContent = downloadedStr;
+  }
+
+  const cell = tr.querySelector('.col-progress');
+  if (cell) {
+    const etaStr = formatEta(dl.eta);
+    let etaEl = cell.querySelector('.eta-text');
+    if (etaStr) {
+      if (!etaEl) {
+        etaEl = document.createElement('div');
+        etaEl.className = 'eta-text';
+        const pc = cell.querySelector('.progress-cell');
+        pc ? pc.after(etaEl) : cell.appendChild(etaEl);
+      }
+      const txt = 'ETA ' + etaStr;
+      if (etaEl.textContent !== txt) etaEl.textContent = txt;
+    } else if (etaEl) {
+      etaEl.remove();
+    }
+
+    const segs = dl.segmentDetails || dl.segments;
+    const sig = segmentSignature(segs);
+    if (tr.dataset.segSig !== sig) {
+      tr.dataset.segSig = sig;
+      const old = cell.querySelector('.segments-bar');
+      if (old) old.remove();
+      const segHtml = renderSegments(segs);
+      if (segHtml) {
+        const wrap = document.createElement('div');
+        wrap.innerHTML = segHtml;
+        if (wrap.firstElementChild) cell.appendChild(wrap.firstElementChild);
+      }
+    }
+  }
+
+  // Live torrent swarm count without a full row re-render.
+  const peerCount = tr.querySelector('.torrent-badge .peer-count');
+  if (peerCount) peerCount.textContent = String(Number(dl.peers) || 0);
+  return true;
+}
+
+function patchDirtyRows() {
+  const ids = [...progressDirtyIds];
+  progressDirtyIds.clear();
+  for (const id of ids) {
+    const dl = downloads.find(d => d.id === id);
+    const tr = rowEls.get(id);
+    if (!dl || !tr) { renderDownloads(); return; }
+    if (!patchRow(tr, dl)) return; // status changed — patchRow did a full render
+  }
+}
+
+/** Toggle .selected + checkbox on existing rows without rebuilding the table. */
+function refreshSelectionClasses() {
+  downloadList.querySelectorAll('tr[data-id]').forEach(row => {
+    const sel = selectedIds.has(row.dataset.id);
+    row.classList.toggle('selected', sel);
+    const cb = row.querySelector('input[type="checkbox"]');
+    if (cb) cb.checked = sel;
+  });
+  updateSelectionBar();
+}
+
+/** ArrowUp/ArrowDown keyboard navigation over the visible (filtered+sorted) rows. */
+function moveSelection(dir) {
+  const visible = sortDownloads(filterDownloads(downloads));
+  if (!visible.length) return;
+  let idx = -1;
+  if (selectedIds.size === 1) {
+    const cur = [...selectedIds][0];
+    idx = visible.findIndex(d => d.id === cur);
+  }
+  let next = idx === -1 ? (dir > 0 ? 0 : visible.length - 1) : idx + dir;
+  next = Math.max(0, Math.min(visible.length - 1, next));
+  selectedIds.clear();
+  selectedIds.add(visible[next].id);
+  refreshSelectionClasses();
+  const tr = rowEls.get(visible[next].id);
+  if (tr && tr.scrollIntoView) tr.scrollIntoView({ block: 'nearest' });
 }
 
 // ── Sortable columns (name / size / progress / speed / status) ────────────────
@@ -158,6 +311,7 @@ function toggleSort(col) {
 function renderDownloads() {
   const filtered = sortDownloads(filterDownloads(downloads));
   downloadList.innerHTML = '';
+  rowEls.clear();
 
   if (filtered.length === 0) {
     emptyState.style.display = 'flex';
@@ -183,6 +337,11 @@ function updateSelectionBar() {
   bar.style.display = n > 0 ? 'flex' : 'none';
   const label = document.getElementById('selection-count');
   if (label) label.textContent = n + ' selected';
+  const selectAll = document.getElementById('select-all');
+  if (selectAll) {
+    const visible = filterDownloads(downloads);
+    selectAll.checked = visible.length > 0 && visible.every(d => selectedIds.has(d.id));
+  }
 }
 
 // ── True media geometry on a row (v4.5) ──────────────────────────────────────
@@ -235,8 +394,8 @@ function mediaTooltip(media) {
   return bits.join(' · ');
 }
 
-/** escapeHtml() plus quotes — safe inside title="…" attributes. */
-function escapeAttr(str) { return escapeHtml(str).replace(/"/g, '&quot;'); }
+/** escapeHtml() plus quotes — safe inside title="…" and title='…' attributes. */
+function escapeAttr(str) { return escapeHtml(str).replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
 
 /**
  * HTML for the row's media cell: the dimension readout plus the "no audio
@@ -245,6 +404,11 @@ function escapeAttr(str) { return escapeHtml(str).replace(/"/g, '&quot;'); }
  */
 function formatRowMeta(dl) {
   const out = [];
+  // Torrent rows: live swarm peer count (🧲 magnet badge).
+  if (dl && dl.isTorrent) {
+    const peers = Number(dl.peers) || 0;
+    out.push(`<span class="file-quality-badge torrent-badge" title="BitTorrent download">🧲 <span class="peer-count">${peers}</span> peer${peers === 1 ? '' : 's'}</span>`);
+  }
   const info = dimensionInfo(dl);
   if (info) {
     const tip = info.proven
@@ -301,17 +465,16 @@ function pickerResolutionInfo(video) {
 function renderDownloadRow(dl) {
     const tr = document.createElement('tr');
     tr.dataset.id = dl.id;
-    tr.className = selectedIds.has(dl.id) ? 'selected' : '';
+    tr.dataset.status = dl.status || '';
+    tr.className = (dl.status || '') + (selectedIds.has(dl.id) ? ' selected' : '');
 
-    const percent = dl.percent || (dl.totalSize > 0 ? (dl.downloaded / dl.totalSize * 100).toFixed(1) : 0);
+    const percent = rowPercent(dl);
     const icon = getFileIcon(dl.filename);
     const speedStr = formatSpeed(dl.speed);
-    const estPrefix = dl.sizeEstimated ? '~' : '';
-    const sizeStr = dl.totalSize > 0
-      ? estPrefix + formatBytes(dl.totalSize)
-      : (dl.quality?.size ? formatBytes(dl.quality.size) : 'Unknown');
+    const sizeStr = rowSizeStr(dl);
     const downloadedStr = formatBytes(dl.downloaded);
     const etaStr = formatEta(dl.eta);
+    tr.dataset.segSig = segmentSignature(dl.segmentDetails || dl.segments);
 
     // Quality badge (from video detection) — label only, never a resolution
     const qualityBadge = qualityBadgeHtml(dl);
@@ -327,8 +490,8 @@ function renderDownloadRow(dl) {
         <div class="file-info">
           <div class="file-icon">${icon}</div>
           <div class="file-details">
-            <span class="file-name" title="${escapeHtml(dl.filename)}">${escapeHtml(dl.filename)}${qualityBadge}</span>
-            <span class="file-url" title="${escapeHtml(dl.url)}">${escapeHtml(truncateUrl(dl.url))}</span>
+            <span class="file-name" title="${escapeAttr(dl.filename)}">${escapeHtml(dl.filename)}${qualityBadge}</span>
+            <span class="file-url" title="${escapeAttr(dl.url)}">${escapeHtml(truncateUrl(dl.url))}</span>
           </div>
         </div>
       </td>
@@ -376,7 +539,7 @@ function renderDownloadRow(dl) {
         selectedIds.clear();
         selectedIds.add(dl.id);
       }
-      renderDownloads();
+      refreshSelectionClasses();
     });
 
     tr.addEventListener('contextmenu', (e) => {
@@ -398,6 +561,7 @@ function renderDownloadRow(dl) {
       });
     });
 
+    rowEls.set(dl.id, tr);
     downloadList.appendChild(tr);
 }
 
@@ -438,7 +602,8 @@ function matchCategory(d, category) {
     case 'error': return d.status === 'error';
     case 'video': return d.category === 'video' || /\.(mp4|mkv|avi|mov|wmv|webm|flv|m4v)/i.test(d.filename || '');
     case 'audio': return d.category === 'audio' || /\.(mp3|wav|flac|aac|ogg|wma|m4a)/i.test(d.filename || '');
-    case 'document': return d.category === 'document' || /\.(pdf|doc|docx|xls|xlsx|ppt|pptx|txt|csv)/i.test(d.filename || '');
+    case 'document': return d.category === 'document' || /\.(doc|docx|xls|xlsx|ppt|pptx|txt|csv)/i.test(d.filename || '');
+    case 'pdf': return d.category === 'pdf' || /\.pdf$/i.test(d.filename || '');
     case 'archive': return d.category === 'archive' || /\.(zip|rar|7z|tar|gz|bz2)/i.test(d.filename || '');
     case 'software': return d.category === 'software' || /\.(exe|msi|dmg|deb|rpm|apk)/i.test(d.filename || '');
     case 'image': return d.category === 'image' || /\.(jpg|jpeg|png|gif|bmp|svg|webp|psd|ico)/i.test(d.filename || '');
@@ -489,6 +654,8 @@ async function handleAction(action, id) {
       break;
     }
     case 'ai-hint': {
+      const dl = downloads.find(d => d.id === id);
+      if (!dl) break;
       showNotification(dl.aiHint || 'No AI hint', 'info');
       return;
     }
@@ -549,11 +716,11 @@ function showDeleteModal(ids) {
     ? 'Uncheck to remove only from the AiDM list — files stay on disk.'
     : 'No completed file on disk — the list entry will be removed.';
 
-  document.getElementById('delete-overlay').style.display = 'flex';
+  openOverlay('delete-overlay');
 }
 
 function hideDeleteModal() {
-  document.getElementById('delete-overlay').style.display = 'none';
+  closeOverlay('delete-overlay');
   deleteTargetIds = [];
 }
 
@@ -564,6 +731,65 @@ function isAnyModalOpen() {
       const el = document.getElementById(id);
       return el && el.style.display !== 'none' && el.style.display !== '';
     });
+}
+
+// ── Shared overlay plumbing (backdrop close, focus trap, focus restore) ──────
+
+const OVERLAY_IDS = ['modal-overlay', 'quality-overlay', 'settings-overlay', 'scheduler-overlay', 'ai-overlay', 'delete-overlay'];
+const OVERLAY_HIDE = {
+  'modal-overlay': hideAddModal,
+  'quality-overlay': hideQualityPicker,
+  'settings-overlay': hideSettingsModal,
+  'scheduler-overlay': hideSchedulerModal,
+  'ai-overlay': hideAiModal,
+  'delete-overlay': hideDeleteModal,
+};
+const overlayReturnFocus = new Map();
+
+function openOverlay(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (el.style.display !== 'flex') {
+    try { overlayReturnFocus.set(id, document.activeElement); } catch (e) {}
+  }
+  el.style.display = 'flex';
+}
+
+function closeOverlay(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.style.display = 'none';
+  const prev = overlayReturnFocus.get(id);
+  overlayReturnFocus.delete(id);
+  try { if (prev && prev.focus && prev.isConnected !== false) prev.focus(); } catch (e) {}
+}
+
+function setupOverlayPlumbing() {
+  // Click on the backdrop (the overlay itself, outside the .modal box) closes.
+  document.addEventListener('mousedown', (e) => {
+    const t = e.target;
+    if (t && t.classList && t.classList.contains('modal-overlay')) {
+      const hide = OVERLAY_HIDE[t.id];
+      if (hide) hide();
+    }
+  });
+  // Trap Tab inside the topmost open overlay; restore happens in closeOverlay.
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Tab') return;
+    let overlay = null;
+    for (const id of OVERLAY_IDS) {
+      const el = document.getElementById(id);
+      if (el && el.style.display === 'flex') overlay = el;
+    }
+    if (!overlay) return;
+    const nodes = overlay.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+    const list = Array.prototype.filter.call(nodes, (el) => !el.disabled);
+    if (!list.length) return;
+    const first = list[0], last = list[list.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey && (active === first || !overlay.contains(active))) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && (active === last || !overlay.contains(active))) { e.preventDefault(); first.focus(); }
+  });
 }
 
 async function confirmDeleteModal() {
@@ -763,12 +989,14 @@ function toggleSidebar() {
 
 function setupIPCListeners() {
   window.aidm.onDownloadAdded((data) => {
+    downloadsGeneration++;
     if (!downloads.find(d => d.id === data.id)) downloads.push(data);
     renderDownloads();
     updateStats();
   });
 
   window.aidm.onDownloadProgress((data) => {
+    downloadsGeneration++;
     const dl = downloads.find(d => d.id === data.id);
     if (dl) {
       dl.downloaded = data.downloaded; dl.totalSize = data.totalSize;
@@ -782,10 +1010,11 @@ function setupIPCListeners() {
       if (ACTIVE_OVERRIDABLE.has(dl.status)) dl.status = 'downloading';
       if (typeof data.eta === 'number' || data.eta === null) dl.eta = data.eta;
     }
-    scheduleProgressRender();
+    scheduleProgressRender(data.id);
   });
 
   window.aidm.onDownloadComplete((data) => {
+    downloadsGeneration++;
     const dl = downloads.find(d => d.id === data.id);
     if (dl) {
       dl.status = 'completed';
@@ -811,6 +1040,7 @@ function setupIPCListeners() {
   });
 
   window.aidm.onDownloadError((data) => {
+    downloadsGeneration++;
     const dl = downloads.find(d => d.id === data.id);
     if (dl) { dl.status = 'error'; dl.error = data.error; dl.speed = 0; }
     renderDownloads();
@@ -819,6 +1049,7 @@ function setupIPCListeners() {
   });
 
   window.aidm.onDownloadPaused((data) => {
+    downloadsGeneration++;
     const dl = downloads.find(d => d.id === data.id);
     if (dl) { dl.status = 'paused'; dl.speed = 0; }
     renderDownloads();
@@ -826,6 +1057,7 @@ function setupIPCListeners() {
   });
 
   window.aidm.onDownloadResumed((data) => {
+    downloadsGeneration++;
     const dl = downloads.find(d => d.id === data.id);
     if (dl) dl.status = 'downloading';
     renderDownloads();
@@ -833,6 +1065,7 @@ function setupIPCListeners() {
   });
 
   window.aidm.onDownloadRemoved((data) => {
+    downloadsGeneration++;
     downloads = downloads.filter(d => d.id !== data.id);
     renderDownloads();
     updateStats();
@@ -841,6 +1074,7 @@ function setupIPCListeners() {
   // File name/path refined (e.g. learned from the server before download):
   // refresh the matching row so the title and any pending badge stay right.
   window.aidm.onDownloadUpdated((data) => {
+    downloadsGeneration++;
     const dl = downloads.find(d => d.id === data.id);
     if (dl) {
       dl.filename = data.filename || dl.filename;
@@ -872,7 +1106,10 @@ function setupIPCListeners() {
     // The topmost location dialog is opened by the main process. The list only
     // needs to catch up so the row shows "Pending" while it is being answered.
     try {
-      downloads = await window.aidm.getDownloads();
+      const gen = ++downloadsGeneration;
+      const rows = await window.aidm.getDownloads();
+      if (gen !== downloadsGeneration) return; // mutated while fetching — keep live state
+      downloads = rows;
       renderDownloads();
       updateStats();
     } catch (e) { /* no-op */ }
@@ -901,6 +1138,7 @@ function setupIPCListeners() {
     window.aidm.onDownloadHash((data) => {
       const dl = downloads.find(d => d.id === data.id);
       if (dl) {
+        downloadsGeneration++;
         dl.sha256 = data.sha256;
         renderDownloads();
       }
@@ -925,6 +1163,8 @@ function setupEventListeners() {
   document.getElementById('btn-delete').addEventListener('click', removeSelectedFromList);
   document.getElementById('btn-delete-all').addEventListener('click', deleteSelectedOrAll);
   document.getElementById('btn-refresh').addEventListener('click', refreshList);
+  const clearCompletedBtn = document.getElementById('btn-clear-completed');
+  if (clearCompletedBtn) clearCompletedBtn.addEventListener('click', clearCompleted);
   document.getElementById('btn-settings').addEventListener('click', showSettingsModal);
   document.getElementById('btn-scheduler').addEventListener('click', showSchedulerModal);
   document.getElementById('btn-sidebar-collapse').addEventListener('click', toggleSidebar);
@@ -964,10 +1204,19 @@ function setupEventListeners() {
     });
   });
 
-  searchInput.addEventListener('input', () => renderDownloads());
+  const searchClear = document.getElementById('search-clear');
+  const syncSearchClear = () => { if (searchClear) searchClear.style.display = searchInput.value ? 'flex' : 'none'; };
+  searchInput.addEventListener('input', () => { syncSearchClear(); renderDownloads(); });
+  if (searchClear) searchClear.addEventListener('click', () => {
+    searchInput.value = '';
+    syncSearchClear();
+    renderDownloads();
+    searchInput.focus();
+  });
 
   document.getElementById('select-all').addEventListener('change', (e) => {
-    e.target.checked ? downloads.forEach(d => selectedIds.add(d.id)) : selectedIds.clear();
+    if (e.target.checked) filterDownloads(downloads).forEach(d => selectedIds.add(d.id));
+    else selectedIds.clear();
     renderDownloads();
   });
 
@@ -990,6 +1239,9 @@ function setupEventListeners() {
 
   // Photoshop-style marquee selection on the download list
   setupMarquee();
+
+  // Shared overlay behavior: backdrop close, focus trap, focus restore
+  setupOverlayPlumbing();
 
   // Resizable columns (widths restored from previous session)
   loadColWidths();
@@ -1065,11 +1317,28 @@ function setupEventListeners() {
   // Keyboard shortcuts
   document.addEventListener('keydown', (e) => {
     if (e.ctrlKey && e.key === 'n') { e.preventDefault(); showAddModal(); }
+    if (e.ctrlKey && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); searchInput.focus(); }
     if (e.key === 'F5') { e.preventDefault(); refreshList(); }
-    if (e.key === 'Escape') { hideAddModal(); hideSettingsModal(); hideQualityPicker(); hideContextMenu(); hideAiModal(); hideDeleteModal(); }
-    // Delete key opens the delete dialog (with disk checkbox) for the selection
-    if (e.key === 'Delete' && selectedIds.size > 0 && !isAnyModalOpen()) {
-      showDeleteModal([...selectedIds]);
+    if (e.key === 'Escape') { hideAddModal(); hideSettingsModal(); hideQualityPicker(); hideContextMenu(); hideAiModal(); hideDeleteModal(); hideSchedulerModal(); }
+    const typing = !!(e.target.matches && e.target.matches('input, textarea, select'));
+    if (!typing && !isAnyModalOpen()) {
+      // Delete key opens the delete dialog (with disk checkbox) for the selection
+      if (e.key === 'Delete' && selectedIds.size > 0) {
+        showDeleteModal([...selectedIds]);
+      }
+      // Table navigation only when focus isn't on a control (so Enter on a
+      // focused button still activates the button, not open-file).
+      const onControl = !!(e.target.closest && e.target.closest('button, a, input, textarea, select'));
+      if (!onControl) {
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          e.preventDefault();
+          moveSelection(e.key === 'ArrowDown' ? 1 : -1);
+        } else if (e.key === 'Enter' && selectedIds.size === 1) {
+          const id = [...selectedIds][0];
+          const dl = downloads.find(d => d.id === id);
+          if (dl && dl.status === 'completed') handleAction('open-file', id);
+        }
+      }
     }
   });
 
@@ -1107,9 +1376,9 @@ function setupEventListeners() {
 
 // ── Add Download Modal ────────────────────────────────────────────────────────
 
-function showAddModal() { document.getElementById('modal-overlay').style.display = 'flex'; document.getElementById('input-url').focus(); }
+function showAddModal() { openOverlay('modal-overlay'); document.getElementById('input-url').focus(); }
 function hideAddModal() {
-  document.getElementById('modal-overlay').style.display = 'none';
+  closeOverlay('modal-overlay');
   document.getElementById('input-url').value = '';
   document.getElementById('input-filename').value = '';
   document.getElementById('input-savepath').value = '';
@@ -1415,7 +1684,7 @@ function showQualityPicker(data) {
       <div class="quality-icon">#${rank}</div>
       <div class="quality-info">
         <div class="quality-label">${video.quality?.toUpperCase() || 'Unknown'}</div>
-        <div class="quality-filename" title="${escapeHtml(video.url)}">${escapeHtml(fileName)}</div>
+        <div class="quality-filename" title="${escapeAttr(video.url)}">${escapeHtml(fileName)}</div>
         <div class="quality-resolution ${resInfo.proven ? 'proven' : 'guessed'}" title="${escapeAttr(resInfo.proven ? 'Measured from the file' : 'Claimed by the site — not measured')}">${escapeHtml(resInfo.text)}${resInfo.proven ? ' · proven' : ' <span class="quality-res-flag">unverified · site-claimed</span>'}</div>
         <div class="quality-meta">
           ${sizeText ? `<span class="quality-size">${sizeText}</span>` : ''}
@@ -1440,13 +1709,16 @@ function showQualityPicker(data) {
     list.querySelector('.quality-option')?.click();
   }
 
-  document.getElementById('quality-overlay').style.display = 'flex';
+  openOverlay('quality-overlay');
 }
 
 function hideQualityPicker() {
-  document.getElementById('quality-overlay').style.display = 'none';
+  closeOverlay('quality-overlay');
   qualityVideos = [];
   qualitySelectedIdx = -1;
+  // A cancelled/closed picker must not permanently suppress the same pageUrl —
+  // the sticky dedupe guard only matters while one pick session is alive.
+  qualityShownForPageUrl = null;
 }
 
 async function downloadSelectedQuality() {
@@ -1537,6 +1809,12 @@ async function showSettingsModal() {
   settings = await window.aidm.getSettings();
   document.getElementById('setting-concurrent').value = settings.maxConcurrentDownloads;
   document.getElementById('setting-segments').value = settings.defaultSegments;
+  document.getElementById('setting-proxy-url').value = settings.proxyUrl || '';
+  document.getElementById('setting-engine-max-connections').value = settings.engineMaxConnections || 8;
+  document.getElementById('setting-engine-min-split-kb').value = settings.engineMinSplitKB || 1024;
+  document.getElementById('setting-preallocation').value = settings.preallocation === 'full' ? 'full' : 'sparse';
+  document.getElementById('setting-per-host-connections').value =
+    Number.isFinite(settings.perHostMaxConnections) ? settings.perHostMaxConnections : 16;
   document.getElementById('setting-savepath').value = settings.defaultSavePath;
   document.getElementById('setting-speed-limit').value = Math.round((settings.speedLimit || 0) / 1024);
   document.getElementById('setting-speed-rules').value = settings.speedRules || '';
@@ -1582,19 +1860,19 @@ async function showSettingsModal() {
   if (ytBrowserSelect) ytBrowserSelect.value = String(settings.youtubeCookiesFromBrowser || '');
 
   // Category paths
-  const cats = ['video', 'audio', 'document', 'archive', 'software', 'image'];
+  const cats = ['video', 'audio', 'document', 'pdf', 'archive', 'software', 'image'];
   cats.forEach(cat => {
     const el = document.getElementById(`cat-path-${cat}`);
     if (el) el.value = settings.categoryPaths?.[cat] || '';
   });
 
-  document.getElementById('settings-overlay').style.display = 'flex';
+  openOverlay('settings-overlay');
 }
 
-function hideSettingsModal() { document.getElementById('settings-overlay').style.display = 'none'; }
+function hideSettingsModal() { closeOverlay('settings-overlay'); }
 
 async function saveSettings() {
-  const cats = ['video', 'audio', 'document', 'archive', 'software', 'image'];
+  const cats = ['video', 'audio', 'document', 'pdf', 'archive', 'software', 'image'];
   const categoryPaths = {};
   cats.forEach(cat => {
     const el = document.getElementById(`cat-path-${cat}`);
@@ -1602,12 +1880,21 @@ async function saveSettings() {
   });
 
   const aiKeyInput = document.getElementById('setting-ai-key').value.trim();
+  const intField = (id, min, max, dflt) => {
+    const n = parseInt(document.getElementById(id).value, 10);
+    return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : dflt;
+  };
   const splitList = (id) => document.getElementById(id).value.split(/[,;\s]+/)
     .map(t => t.trim().toLowerCase().replace(/^\.+/, ''))
     .filter(t => t.length > 0);
   settings = {
     maxConcurrentDownloads: parseInt(document.getElementById('setting-concurrent').value) || 3,
     defaultSegments: parseInt(document.getElementById('setting-segments').value) || 8,
+    proxyUrl: document.getElementById('setting-proxy-url').value.trim(),
+    engineMaxConnections: intField('setting-engine-max-connections', 1, 32, 8),
+    engineMinSplitKB: intField('setting-engine-min-split-kb', 1, 1024 * 1024 * 1024, 1024),
+    preallocation: document.getElementById('setting-preallocation').value === 'full' ? 'full' : 'sparse',
+    perHostMaxConnections: intField('setting-per-host-connections', 0, 64, 16),
     defaultSavePath: document.getElementById('setting-savepath').value,
     speedLimit: (parseInt(document.getElementById('setting-speed-limit').value, 10) || 0) * 1024,
     speedRules: document.getElementById('setting-speed-rules').value,
@@ -1623,9 +1910,6 @@ async function saveSettings() {
     minimizeToTray: document.getElementById('setting-minimize-tray').checked,
     autoResume: document.getElementById('setting-autoresume').checked,
     categoryPaths,
-    // Honor the toggle live: the status-bar dot flips with the setting too.
-    // (The main process applies clipboardMonitor on save + startup.)
-    clipboardMonitor: document.getElementById('setting-clipboard').checked,
     jevAssist: document.getElementById('setting-jev-assist').checked,
     // File hosts (v4.5.0): only overwrite a stored secret when the user typed
     // a new one, so opening Settings and saving never wipes the account.
@@ -1659,10 +1943,10 @@ let schedules = [];
 async function showSchedulerModal() {
   await loadSchedules();
   clearSchedulerForm();
-  document.getElementById('scheduler-overlay').style.display = 'flex';
+  openOverlay('scheduler-overlay');
 }
 
-function hideSchedulerModal() { document.getElementById('scheduler-overlay').style.display = 'none'; }
+function hideSchedulerModal() { closeOverlay('scheduler-overlay'); }
 
 async function loadSchedules() {
   try { schedules = await window.aidm.getSchedules() || []; }
@@ -1825,10 +2109,10 @@ function showAiModal() {
     showNotification('AI features are disabled in Settings', 'warn');
     return;
   }
-  document.getElementById('ai-overlay').style.display = 'flex';
+  openOverlay('ai-overlay');
   document.getElementById('ai-input').focus();
 }
-function hideAiModal() { document.getElementById('ai-overlay').style.display = 'none'; }
+function hideAiModal() { closeOverlay('ai-overlay'); }
 
 function appendAiMessage(role, text) {
   const box = document.getElementById('ai-history');
@@ -1965,7 +2249,10 @@ function deleteSelectedOrAll() {
 
 async function refreshList() {
   try {
-    downloads = await window.aidm.getDownloads();
+    const gen = ++downloadsGeneration;
+    const rows = await window.aidm.getDownloads();
+    if (gen !== downloadsGeneration) return; // events mutated the list mid-fetch — keep live state
+    downloads = rows;
     // Drop selections that no longer exist
     const alive = new Set(downloads.map(d => d.id));
     [...selectedIds].forEach(id => { if (!alive.has(id)) selectedIds.delete(id); });
@@ -1977,15 +2264,33 @@ async function refreshList() {
   }
 }
 
+/** Remove every completed row from the list (files stay on disk). */
+async function clearCompleted() {
+  const ids = downloads.filter(d => d.status === 'completed').map(d => d.id);
+  if (!ids.length) {
+    showNotification('No completed downloads to clear', 'info');
+    return;
+  }
+  for (const id of ids) {
+    try { await window.aidm.removeDownload(id); } catch (e) {}
+  }
+  downloads = downloads.filter(d => !ids.includes(d.id));
+  ids.forEach(id => selectedIds.delete(id));
+  renderDownloads();
+  updateStats();
+  showNotification(`Cleared ${ids.length} completed item(s) from the list — files stay on disk`);
+}
+
 // ── Stats ─────────────────────────────────────────────────────────────────────
 
 function updateStats() {
   const all = downloads.length;
-  const active = downloads.filter(d => d.status === 'downloading').length;
-  const completed = downloads.filter(d => d.status === 'completed').length;
-  const queued = downloads.filter(d => d.status === 'queued').length;
-  const pending = downloads.filter(d => d.status === 'pending-approval').length;
-  const errors = downloads.filter(d => d.status === 'error').length;
+  // Badges must equal what the matching sidebar filter shows — use matchCategory.
+  const active = downloads.filter(d => matchCategory(d, 'downloading')).length;
+  const completed = downloads.filter(d => matchCategory(d, 'completed')).length;
+  const queued = downloads.filter(d => matchCategory(d, 'queued')).length;
+  const pending = downloads.filter(d => matchCategory(d, 'pending')).length;
+  const errors = downloads.filter(d => matchCategory(d, 'error')).length;
 
   document.getElementById('count-all').textContent = all;
   document.getElementById('count-active').textContent = active;
@@ -2000,7 +2305,7 @@ function updateStats() {
     if (!el) return;
     el.textContent = downloads.filter(d => matchCategory(d, cat)).length;
   };
-  ['video', 'audio', 'document', 'archive', 'software'].forEach(typeCount);
+  ['video', 'audio', 'document', 'pdf', 'archive', 'software'].forEach(typeCount);
 
   activeCount.textContent = active;
   document.getElementById('status-total').textContent = `Total: ${all} files`;

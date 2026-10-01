@@ -1,4 +1,5 @@
 const http = require('http');
+const path = require('path');
 const facebookResolver = require('./facebook-resolver.js');
 const resolvers = require('./resolvers.js');
 
@@ -53,6 +54,51 @@ function sanitizeHeaders(input) {
     }
   }
   return out;
+}
+
+/**
+ * Origin gate. The 127.0.0.1 bind alone is NOT a security boundary: any web
+ * page the user visits can fetch() the local port, and reflected CORS made
+ * every response (settings incl. credentials, download history) readable
+ * cross-origin. Trusted callers are:
+ *   - no Origin header at all (curl, Node harnesses, native code)
+ *   - browser extensions (chrome-extension:// / moz-extension://)
+ *   - localhost pages (the AiDM UI itself, dev tools)
+ * Untrusted origins are refused BEFORE routing (a CORS header alone would
+ * still let fire-and-forget form POSTs execute side effects), and only
+ * trusted origins get an Access-Control-Allow-Origin reflection.
+ */
+function isTrustedOrigin(origin) {
+  if (!origin) return true;
+  if (/^(chrome|moz)-extension:\/\//i.test(origin)) return true;
+  try {
+    const u = new URL(origin);
+    if ((u.protocol === 'http:' || u.protocol === 'https:') &&
+        (u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '[::1]')) {
+      return true;
+    }
+  } catch (e) { /* malformed origin → untrusted */ }
+  return false;
+}
+
+/**
+ * Host gate against DNS rebinding. The 127.0.0.1 bind alone is not enough:
+ * an attacker page can resolve its own domain to 127.0.0.1, and the request
+ * then arrives with the ATTACKER's Host header - while isTrustedOrigin()
+ * deliberately allows requests with no Origin header (curl, harnesses,
+ * native callers), which a rebinding browser request also lacks. Checking
+ * the Host header closes that hole: a real browser always sends the host it
+ * actually dialed, so a rebound request carries a non-local Host and is
+ * refused before routing.
+ */
+function isLocalHost(host) {
+  if (!host || typeof host !== 'string') return false;
+  try {
+    const u = new URL('http://' + host);
+    return u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '[::1]';
+  } catch (e) {
+    return false; // malformed Host  untrusted
+  }
 }
 
 // ── YouTube CDN guard ───────────────────────────────────────────────────────
@@ -133,41 +179,69 @@ class IPCServer {
     } catch (e) { return null; }
   }
 
-  _readBody(req) {
+  _readBody(req, maxBytes = MAX_BODY_BYTES) {
     return new Promise((resolve, reject) => {
-      let body = '';
+      const chunks = [];
       let size = 0;
       req.on('data', (chunk) => {
         size += chunk.length;
-        if (size > MAX_BODY_BYTES) {
+        if (size > maxBytes) {
           reject(new Error('Request body too large'));
           req.destroy();
           return;
         }
-        body += chunk;
+        chunks.push(chunk);
       });
-      req.on('end', () => resolve(body));
+      // Buffer.concat + one decode: `body += chunk` on raw Buffers both
+      // mangles multi-byte UTF-8 split across TCP chunks and is O(n²).
+      req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
       req.on('error', reject);
     });
   }
 
+  /**
+   * savePath confinement: HTTP callers may only choose save locations inside
+   * AiDM's own configured roots (default save path + category paths) — the
+   * same guard delete-file-from-disk applies in main.js. Without it a page
+   * talking to the local API could write an .exe into the Startup folder.
+   */
+  _isAllowedSavePath(p) {
+    if (!p || typeof p !== 'string' || p.includes('\0')) return false;
+    let abs;
+    try { abs = path.resolve(p); } catch (e) { return false; }
+    const roots = [];
+    try {
+      const s = this.dm.getSettings();
+      if (s.defaultSavePath) roots.push(path.resolve(s.defaultSavePath));
+      for (const cp of Object.values(s.categoryPaths || {})) {
+        if (cp) roots.push(path.resolve(cp));
+      }
+    } catch (e) { /* settings unavailable → deny */ }
+    return roots.some(root => abs === root || abs.startsWith(root + path.sep));
+  }
+
   start() {
+    this._statusCache = { at: 0, body: null };
     this.server = http.createServer((req, res) => {
-      // CORS: this server binds to 127.0.0.1 only, so the real boundary is
-      // localhost. Reflect the request Origin so Chrome extensions (which
-      // send `Origin: chrome-extension://…`) and localhost pages can read
-      // responses. A missing Origin (privileged extension fetch) still works.
-      //
-      // NOTE: v3.0.0 restricted this to an allowlist and broke extension
-      // connectivity on some Chrome versions — host_permissions does NOT
-      // guarantee the response is readable without a CORS header. Keep
-      // permissive reflection; the localhost bind is the security boundary.
+      // Host gate (DNS rebinding) - runs before routing; see isLocalHost().
+      if (!isLocalHost(req.headers.host)) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Host not allowed' }));
+        return;
+      }
+      // Origin gate — see isTrustedOrigin(). Web pages get neither readable
+      // responses (no CORS reflection) nor executed side effects (403 before
+      // routing). Extensions and localhost are reflected; non-browser callers
+      // (no Origin) pass through.
       const origin = req.headers.origin;
+      if (!isTrustedOrigin(origin)) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Origin not allowed' }));
+        return;
+      }
       if (origin) {
         res.setHeader('Access-Control-Allow-Origin', origin);
         res.setHeader('Vary', 'Origin');
-      } else {
-        res.setHeader('Access-Control-Allow-Origin', '*');
       }
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -178,28 +252,35 @@ class IPCServer {
         return;
       }
 
-      // GET /api/status — health check
+      // GET /api/status — health check. The extension polls this every 30 s
+      // from every service-worker wake; cache the payload briefly so the poll
+      // never turns into a full download-list serialization.
       if (req.method === 'GET' && req.url === '/api/status') {
+        const now = Date.now();
+        if (!this._statusCache.body || now - this._statusCache.at > 2000) {
+          const all = this.dm.getAllDownloads();
+          this._statusCache = { at: now, body: JSON.stringify({
+            status: 'running',
+            version: require('../package.json').version,
+            name: 'AiDM',
+            downloads: all.length,
+            active: all.filter(d => d.status === 'downloading').length,
+            settings: {
+              askLocationEveryTime: this.dm.settings.askLocationEveryTime,
+              categoryPaths: this.dm.settings.categoryPaths,
+              browserIntegration: this.dm.settings.browserIntegration !== false,
+              notifications: this.dm.settings.notifications !== false,
+              // Browser-takeover controls (v4.3.0) so the extension can enforce
+              // them without an extra round-trip.
+              interceptAll: this.dm.settings.interceptAll !== false,
+              interceptFileTypes: this.dm.settings.interceptFileTypes || [],
+              excludedSites: this.dm.settings.excludedSites || [],
+              forceTakeoverKey: this.dm.settings.forceTakeoverKey || 'Shift',
+            },
+          }) };
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          status: 'running',
-          version: require('../package.json').version,
-          name: 'AiDM',
-          downloads: this.dm.getAllDownloads().length,
-          active: this.dm.getAllDownloads().filter(d => d.status === 'downloading').length,
-          settings: {
-            askLocationEveryTime: this.dm.settings.askLocationEveryTime,
-            categoryPaths: this.dm.settings.categoryPaths,
-            browserIntegration: this.dm.settings.browserIntegration !== false,
-            notifications: this.dm.settings.notifications !== false,
-            // Browser-takeover controls (v4.3.0) so the extension can enforce
-            // them without an extra round-trip.
-            interceptAll: this.dm.settings.interceptAll !== false,
-            interceptFileTypes: this.dm.settings.interceptFileTypes || [],
-            excludedSites: this.dm.settings.excludedSites || [],
-            forceTakeoverKey: this.dm.settings.forceTakeoverKey || 'Shift',
-          },
-        }));
+        res.end(this._statusCache.body);
         return;
       }
 
@@ -210,12 +291,10 @@ class IPCServer {
         return;
       }
 
-      // GET /api/settings — get current settings
-      if (req.method === 'GET' && req.url === '/api/settings') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(this.dm.getSettings()));
-        return;
-      }
+      // NOTE: GET /api/settings was removed in v5.0.0 — it serialized the
+      // full settings object (file-host passwords, AI API key) to anything
+      // that could reach the local port. Nothing in the extension ever read
+      // it; the extension-facing subset lives in /api/status.
 
       // POST /api/download — submit a single download
       // Body: { url, filename?, savePath?, segments?, quality?, meta?, headers? }
@@ -240,7 +319,9 @@ class IPCServer {
       // POST /api/video-detected — video with quality variants detected
       // Body: { pageTitle, pageUrl, videos: [{ url, quality, resolution, size, format, codec }] }
       if (req.method === 'POST' && req.url === '/api/video-detected') {
-        this._readBody(req).then((body) => {
+        // Variant lists are tiny JSON; a small cap keeps a runaway body from
+        // becoming a memory-amplification vector (same reasoning as /api/batch).
+        this._readBody(req, 2 * 1024 * 1024).then((body) => {
           try {
             const data = JSON.parse(body);
             // The extension's variant list can still carry the player's own
@@ -281,7 +362,7 @@ class IPCServer {
       // the winner). Resolution is rate-limited and only ever passes the
       // post identifier — never an arbitrary URL — to the metadata source.
       if (req.method === 'POST' && req.url === '/api/resolve') {
-        this._readBody(req).then(async (body) => {
+        this._readBody(req, 1024 * 1024).then(async (body) => {
           const respond = (code, obj) => {
             res.writeHead(code, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify(obj));
@@ -326,7 +407,7 @@ class IPCServer {
       // the extension hands us the tweet URL and we resolve it here in Node,
       // then emit `video-detected` so the UI shows the normal quality picker.
       if (req.method === 'POST' && req.url === '/api/resolve-twitter') {
-        this._readBody(req).then(async (body) => {
+        this._readBody(req, 1024 * 1024).then(async (body) => {
           try {
             if (!RESOLVE_LIMITERS[req.url]?.allow()) {
               res.writeHead(429, { 'Content-Type': 'application/json' });
@@ -371,7 +452,7 @@ class IPCServer {
       // page HTML itself; like /api/resolve-twitter this emits
       // `video-detected` so the UI shows the normal quality picker instead.
       if (req.method === 'POST' && req.url === '/api/resolve-facebook') {
-        this._readBody(req).then(async (body) => {
+        this._readBody(req, 1024 * 1024).then(async (body) => {
           try {
             if (!RESOLVE_LIMITERS[req.url]?.allow()) {
               res.writeHead(429, { 'Content-Type': 'application/json' });
@@ -415,7 +496,7 @@ class IPCServer {
       // file. yt-dlp resolves it into real qualities and merges them, and the
       // normal quality picker is shown with sizes taken from the probe.
       if (req.method === 'POST' && req.url === '/api/resolve-youtube') {
-        this._readBody(req).then(async (body) => {
+        this._readBody(req, 1024 * 1024).then(async (body) => {
           try {
             if (!RESOLVE_LIMITERS[req.url]?.allow()) {
               res.writeHead(429, { 'Content-Type': 'application/json' });
@@ -461,9 +542,12 @@ class IPCServer {
       // POST /api/approve — approve a pending download with chosen path
       // Body: { id, savePath }
       if (req.method === 'POST' && req.url === '/api/approve') {
-        this._readBody(req).then((body) => {
+        this._readBody(req, 64 * 1024).then((body) => {
           try {
             const { id, savePath } = JSON.parse(body);
+            if (savePath != null && !this._isAllowedSavePath(savePath)) {
+              throw new Error('savePath is outside the configured AiDM save folders');
+            }
             const dl = this.dm.approveDownload(id, savePath);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: true, download: dl }));
@@ -483,7 +567,7 @@ class IPCServer {
       // harness cannot clean up rows it created — leaving stale rows that
       // the user has no way to dismiss from outside the renderer.
       if (req.method === 'POST' && req.url === '/api/remove') {
-        this._readBody(req).then((body) => {
+        this._readBody(req, 64 * 1024).then((body) => {
           try {
             const { id } = JSON.parse(body);
             if (!id || typeof id !== 'string') throw new Error('Missing id');
@@ -501,10 +585,11 @@ class IPCServer {
         return;
       }
 
-      // POST /api/cancel — cancel an in-flight row by id (keeps the row,
-      // status='cancelled'). Symmetric with IPC cancel-download.
+      // POST /api/cancel — cancel an in-flight row by id. cancelDownload
+      // removes the row (partial file becomes .part), so `download` is the
+      // removed row's last state, or true when it was already gone.
       if (req.method === 'POST' && req.url === '/api/cancel') {
-        this._readBody(req).then((body) => {
+        this._readBody(req, 64 * 1024).then((body) => {
           try {
             const { id } = JSON.parse(body);
             if (!id || typeof id !== 'string') throw new Error('Missing id');
@@ -525,7 +610,7 @@ class IPCServer {
       // POST /api/reject — reject a pending download (drops the row).
       // Symmetric with IPC reject-download.
       if (req.method === 'POST' && req.url === '/api/reject') {
-        this._readBody(req).then((body) => {
+        this._readBody(req, 64 * 1024).then((body) => {
           try {
             const { id } = JSON.parse(body);
             if (!id || typeof id !== 'string') throw new Error('Missing id');
@@ -543,9 +628,11 @@ class IPCServer {
         return;
       }
 
-      // POST /api/batch — submit multiple URLs
+      // POST /api/batch — submit multiple URLs. URL lists are tiny; cap the
+      // body far below the data:-URL endpoint's 128 MB so a 200-URL batch
+      // can't be used as a memory-amplification vector.
       if (req.method === 'POST' && req.url === '/api/batch') {
-        this._readBody(req).then(async (body) => {
+        this._readBody(req, 32 * 1024 * 1024).then(async (body) => {
           try {
             const parsed = JSON.parse(body);
             const { urls } = parsed;
@@ -559,7 +646,12 @@ class IPCServer {
             // guards against.
             const results = await Promise.all(urls.map(async (url) => {
               try {
-                const r = await this._routeDownload({ url, headers: batchHeaders });
+                // Cookies travel in their own field, NOT through
+                // sanitizeHeaders (which allowlists only Referer/Origin/UA/
+                // Accept-Language). Batch used to forward no cookies at all,
+                // so a pasted list of Gmail/Drive links came back 400 or,
+                // worse, silently saved the Google sign-in page as the file.
+                const r = await this._routeDownload({ url, headers: batchHeaders, cookies: parsed.cookies });
                 // Surface the URL alongside non-success results so the caller
                 // can tell which entry failed.
                 if (r.body && r.body.success === false) return { url, ...r.body };
@@ -588,6 +680,9 @@ class IPCServer {
     this.server.listen(this.port, '127.0.0.1', () => {
       console.log(`AiDM IPC Server running on http://127.0.0.1:${this.port}`);
     });
+    // Never let the listening socket alone keep the Node event loop alive
+    // (clean test teardown and shutdown).
+    try { this.server.unref(); } catch (e) {}
 
     this.server.on('error', (err) => {
       if (err.code === 'EADDRINUSE') {
@@ -701,15 +796,24 @@ class IPCServer {
       // ytFormat present → caller picked; fall through to addDownload.
     }
 
+    // A caller-supplied savePath must live inside AiDM's configured save
+    // roots — same confinement as /api/approve (arbitrary-path write guard).
+    const savePath = data.savePath != null && this._isAllowedSavePath(data.savePath)
+      ? data.savePath : undefined;
+
     const download = this.dm.addDownload({
       url: data.url,
       filename: data.filename,
-      savePath: data.savePath,
+      savePath,
       segments: data.segments,
       quality: data.quality,
       meta: data.meta,
       headers,
-      cookies: typeof data.cookies === 'string' && data.cookies.length < 32768 ? data.cookies : null,
+      // A Google account jar is easily >32 KB. The old 32 KB cap silently
+      // dropped it, turning an authenticated Gmail/Drive download into an
+      // unauthenticated one (302 → sign-in page → saved as "invoice.pdf").
+      // Cap stays as a sanity bound, but far above any real jar.
+      cookies: typeof data.cookies === 'string' && data.cookies.length <= 262144 ? data.cookies : null,
       audioUrl: typeof data.audioUrl === 'string' && data.audioUrl.length < 4096 ? data.audioUrl : null,
     });
     return { statusCode: 200, body: { success: true, duplicate: !!download.duplicate, download } };
@@ -718,9 +822,10 @@ class IPCServer {
 
 module.exports = {
   IPCServer,
-  // Pure helpers — exported so the YouTube CDN guard is regression-tested
-  // without booting the HTTP server (see test/server-youtube-cdn-guard.js).
+  // Pure helpers — exported so the YouTube CDN guard and the origin gate are
+  // regression-tested without booting the HTTP server.
   isYouTubeMediaUrl,
   youtubePageUrlFor,
   sanitizeHeaders,
+  isTrustedOrigin,
 };

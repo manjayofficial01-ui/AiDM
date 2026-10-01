@@ -58,6 +58,10 @@ function resolveConfig(options, defaults = {}) {
     retry: { ...DEFAULT_RETRY_POLICY, ...(merged.retry ?? {}) },
     checksum: merged.checksum,
     resumeOffsets: merged.resumeOffsets || null,
+    // Real { start, end, downloaded } segment map persisted by the manager —
+    // preferred over resumeOffsets, whose equal-size assumption does not match
+    // the adaptive splits the engine actually made.
+    resumeSegments: Array.isArray(merged.resumeSegments) && merged.resumeSegments.length ? merged.resumeSegments : null,
     preallocation: merged.preallocation ?? 'sparse',
     // `rename` is the only safe default: `overwrite` lets a re-added or
     // re-run download rm() an already finished file of the same name.
@@ -76,7 +80,7 @@ function resolveConfig(options, defaults = {}) {
 class DownloadTask extends EventEmitter {
   /**
    * @param {any} options
-   * @param {{ globalLimiter?: TokenBucket }} [deps]
+   * @param {{ globalLimiter?: TokenBucket, hostGate?: import('./host-gate').HostGate }} [deps]
    * @param {any} [defaults]
    */
   constructor(options, deps = {}, defaults = {}) {
@@ -88,6 +92,8 @@ class DownloadTask extends EventEmitter {
     this.mirrors = new MirrorPool(this.config.mirrors, this.config.maxConnectionsPerServer);
     this.taskLimiter = new TokenBucket(this.config.speedLimit);
     this.limiters = deps.globalLimiter ? [deps.globalLimiter, this.taskLimiter] : [this.taskLimiter];
+    /** Shared cross-download per-host connection gate (null = ungated). */
+    this.hostGate = deps.hostGate || null;
     this.baseHeaders = this.buildHeaders();
 
     /** @type {'queued' | 'probing' | 'downloading' | 'paused' | 'verifying' | 'completed' | 'failed' | 'cancelled'} */
@@ -247,6 +253,7 @@ class DownloadTask extends EventEmitter {
     this.setState('paused');
     this.log('info', 'Paused');
     this.runAbort?.abort(new DownloadError('PAUSED', 'Download paused'));
+    this._settleIdleLoop();
     await this.runFinished?.promise;
   }
 
@@ -270,29 +277,28 @@ class DownloadTask extends EventEmitter {
     this.setState('cancelled');
     this.log('info', 'Cancelled');
     this.runAbort?.abort(new DownloadError('CANCELLED', 'Download cancelled'));
+    this._settleIdleLoop();
     if (wasRunning) await this.runFinished?.promise;
     await this.closeWriter();
     if (opts.deleteFiles ?? true) await this.deleteArtifacts();
   }
 
   /**
-   * @param {number} bytesPerSecond
+   * Stopping with zero workers in flight (every segment sitting in retry
+   * backoff) leaves nothing that can ever settle loopDone — pause()/cancel()
+   * would await forever. Resolve it here and drop the pending retry timer.
    */
-  setSpeedLimit(bytesPerSecond) {
-    this.config.speedLimit = Math.max(0, bytesPerSecond);
-    this.taskLimiter.setRate(this.config.speedLimit);
+  _settleIdleLoop() {
+    if (!this.stopping) return;
+    this.clearRetryTimer();
+    if (this.active.size === 0) this.loopDone?.resolve();
   }
 
-  /**
-   * @param {number} n
-   */
-  setMaxConnections(n) {
-    this.config.maxConnections = clamp(Math.floor(n), 1, 64);
-    this.targetConnections = this.config.adaptiveConnections
-      ? Math.min(this.targetConnections, this.config.maxConnections)
-      : this.config.maxConnections;
-    this.fill();
-  }
+  // setSpeedLimit() and setMaxConnections() were removed 2026-10-01: zero
+  // callers (per-task limiting never shipped — DownloadEngine.setSpeedLimit
+  // drives the global bucket only), and setMaxConnections() called into
+  // fill(), the adaptive connection manager, making it unexercised code in a
+  // hot path. Re-add WITH a caller when per-task throttling ships.
 
   getProgress() {
     const total = this.segments?.totalSize ?? this.info?.size ?? null;
@@ -392,7 +398,33 @@ class DownloadTask extends EventEmitter {
       }
     }
 
-    if (!restored && canResume && this.config.resumeOffsets && (info.size > 0 || info.size == null)) {
+    // Unknown-size resources cannot use either offset-based resume path: the
+    // equal-size split math degenerates (segSize 0 → inverted/open segments).
+    const sizeKnown = Number.isFinite(info.size) && info.size > 0;
+
+    if (!restored && canResume && sizeKnown && Array.isArray(this.config.resumeSegments)) {
+      const existingPath = (await fileExists(partPath)) ? partPath : ((await fileExists(finalPath)) ? finalPath : null);
+      if (existingPath) {
+        if (existingPath === finalPath && finalPath !== partPath) {
+          await rename(finalPath, partPath).catch(() => {});
+        }
+        const snapshots = this.config.resumeSegments
+          .map((s, i) => ({
+            id: i + 1,
+            start: Math.floor(Number(s && s.start)),
+            end: Math.floor(Number(s && s.end)),
+            downloaded: Math.max(0, Math.floor(Number(s && s.downloaded) || 0)),
+          }))
+          .filter((s) => Number.isFinite(s.start) && Number.isFinite(s.end) && s.start >= 0 && s.end >= s.start);
+        if (snapshots.length) {
+          const onDisk = await fileSize(partPath);
+          restored = SegmentManager.restore(snapshots, info.size, this.segmentOptions(info), onDisk);
+          this.log('info', `Resuming from persisted segment map (${restored.downloadedBytes} bytes done)`);
+        }
+      }
+    }
+
+    if (!restored && canResume && this.config.resumeOffsets && sizeKnown) {
       const existingPath = (await fileExists(partPath)) ? partPath : ((await fileExists(finalPath)) ? finalPath : null);
       if (existingPath) {
         if (existingPath === finalPath && finalPath !== partPath) {
@@ -604,6 +636,13 @@ class DownloadTask extends EventEmitter {
         segments.release(segment);
         break;
       }
+      if (this.hostGate && !this.hostGate.hasCapacity(mirror.host)) {
+        // Another download already holds every slot for this host: give the
+        // segment back and let the releasing connection wake us (no polling).
+        segments.release(segment);
+        this.hostGate.waitForSlot(mirror.host, this.id, () => this.fill());
+        break;
+      }
       this.launch(segment, mirror);
     }
 
@@ -628,6 +667,7 @@ class DownloadTask extends EventEmitter {
   launch(segment, mirror) {
     const segments = this.segments;
     this.mirrors.acquire(mirror);
+    const gated = !!this.hostGate && this.hostGate.acquire(mirror.host);
     this.log('debug', `Connection #${segment.id} -> ${mirror.host} [${segment.position}-${segment.end < 0 ? '' : segment.end}]`);
 
     const run = runSegmentWorker(segment, mirror, {
@@ -660,6 +700,7 @@ class DownloadTask extends EventEmitter {
         },
       )
       .finally(() => {
+        if (gated) this.hostGate.release(mirror.host);
         this.mirrors.release(mirror);
         this.active.delete(segment.id);
         if (this.stopping) {
@@ -691,6 +732,23 @@ class DownloadTask extends EventEmitter {
     if (err.code === 'RESOURCE_CHANGED') {
       this.fail(err);
       return;
+    }
+
+    // A ranged worker GET that draws HTTP 400 behaves like a host that
+    // ignores Range: the probe passed, but the server refuses the ranged
+    // request itself (strict WAFs answer 400 instead of stripping ranges).
+    // classifyHttpStatus(400) is permanent, so without this the task would
+    // die mid-download; re-labeling to RANGE_UNSUPPORTED reuses the proven
+    // shouldRestart() collapse to one plain connection (MAX_RESTARTS caps
+    // genuinely broken URLs). Only when ranges were actually in play —
+    // a plain-connection 400 is a real bad request and must fail honestly.
+    if (
+      err.status === 400 &&
+      this.info &&
+      this.info.acceptRanges &&
+      !this.forceSingleConnection
+    ) {
+      err = new DownloadError('RANGE_UNSUPPORTED', err.message, { cause: err, status: 400 });
     }
 
     if (err.code === 'RANGE_UNSUPPORTED') {
@@ -822,7 +880,14 @@ class DownloadTask extends EventEmitter {
       this.emitProgress();
       if (now - this.lastSaveAt >= SAVE_INTERVAL_MS) {
         this.lastSaveAt = now;
-        this.saveControl().catch((err) => this.log('warn', `Control file save failed: ${String(err)}`));
+        const save = () => this.saveControl().catch((err) => this.log('warn', `Control file save failed: ${String(err)}`));
+        // fsync BEFORE recording progress: with sparse preallocation the .part
+        // reports its final size from the very first tick, so the on-disk
+        // trim guard cannot see unwritten holes — a power loss would leave
+        // the control file claiming bytes that never reached the disk.
+        const w = this.writer;
+        if (w && !w.closed) w.sync().then(save, save);
+        else save();
       }
       if (now - this.lastAdaptAt >= ADAPT_INTERVAL_MS) {
         this.lastAdaptAt = now;

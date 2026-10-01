@@ -31,10 +31,25 @@ class Deferred {
 
 /**
  * @param {number} ms
+ * @param {AbortSignal} [signal] rejects with the signal's reason when aborted
  * @returns {Promise<void>}
  */
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal && signal.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      if (signal) signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, Math.max(0, ms));
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 /**

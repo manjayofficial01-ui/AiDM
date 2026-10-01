@@ -125,7 +125,8 @@ function parseFileHostUrl(input) {
   if (!isAllowedHost(hostname)) return null;
 
   const path = u.pathname || '/';
-  const canonicalHost = /rg\.to$/i.test(hostname) ? 'rapidgator.net' : 'rapidgator.net';
+  // rg.to and friends all canonicalise to the main rapidgator host.
+  const canonicalHost = 'rapidgator.net';
 
   // 1. /file/<id>/<slug>.html  — and the short /file/<id> form.
   let m = /^\/file\/(\d{4,20})(?:\/([^/]*))?\/?$/i.exec(path);
@@ -975,12 +976,9 @@ const fileHostMediaResolver = {
   },
 
   async resolve(url, opts) {
-    const r = await resolveFileHost(url, opts || {});
-    if (r && r.waitSeconds > 0 && (!r.media || !r.media.length)) {
-      // Nothing downloadable yet: surface the wait instead of a silent row.
-      return r;
-    }
-    return r;
+    // A waitSeconds-only result (no media yet) is returned as-is on purpose:
+    // callers read the wait from the same payload.
+    return resolveFileHost(url, opts || {});
   },
 };
 

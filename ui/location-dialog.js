@@ -178,7 +178,7 @@
   filenameEl.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); confirm(); }
   });
-  savePathEl.addEventListener('input', () => { userEditedPath = true; });
+  savePathEl.addEventListener('input', () => { userEditedPath = true; setPathHint(); });
   savePathEl.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); confirm(); }
   });
@@ -194,7 +194,6 @@
       ? 'Default download location — change it only if you want to.'
       : 'Pick a different folder with Browse…, or ↺ Default.';
   }
-  savePathEl.addEventListener('input', setPathHint);
 
   // A patch can land before `location-init` (probe won beat the window load).
   // Buffer it so the initial render still picks it up instead of dropping it.
@@ -229,7 +228,7 @@
       payload.filename = patch_.filename;
       setHint('File name detected from the source.');
       updateInfo(); // type badge derives from the extension
-      setTimeout(() => filenameEl.focus() && selectStem(), 0);
+      setTimeout(() => { filenameEl.focus(); selectStem(); }, 0);
     }
     if (patch_.savePath && !userEditedPath) {
       savePathEl.value = patch_.savePath;

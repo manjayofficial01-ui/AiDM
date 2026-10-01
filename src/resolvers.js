@@ -28,6 +28,7 @@ const embedResolver = require('./embed-resolver');
 const facebookResolver = require('./facebook-resolver');
 const youtubeResolver = require('./youtube-resolver');
 const fileHostResolver = require('./filehost-resolver');
+const genericResolver = require('./generic-resolver');
 
 // ── Registry ──────────────────────────────────────────────────────────────────
 
@@ -121,10 +122,13 @@ function parseTwitterUrl(input) {
  */
 function bestMP4(variants) {
   return (variants || [])
-    .filter(v => v && (
+    // A non-empty url is mandatory, and `directUrl: false` marks re-resolve
+    // placeholders whose url is a watch PAGE (YouTube DASH/handoff rows) —
+    // flagging one as preferred made callers download the page HTML.
+    .filter(v => v && typeof v.url === 'string' && v.url && v.directUrl !== false && (
       v.mime === 'video/mp4' ||
       v.isMp4 === true ||
-      (typeof v.url === 'string' && /\.mp4(?:\?|$)/i.test(v.url))
+      /\.mp4(?:\?|$)/i.test(v.url)
     ))
     .sort((a, b) =>
       ((b.height || 0) - (a.height || 0)) ||
@@ -315,6 +319,16 @@ const youtubeMediaResolver = youtubeResolver.youtubeMediaResolver;
 
 registerResolver(youtubeMediaResolver);
 
+// ── Generic yt-dlp long-tail resolver (sixth provider, registered LAST) ─────
+// Vimeo / TikTok / Reddit / Twitch-clip page URLs resolve through yt-dlp into
+// direct progressive MP4 (or HLS) variants. Strict host+path allowlist and
+// registered after every specific resolver so plain file URLs and other
+// providers can never be captured here.
+
+const genericMediaResolver = genericResolver.genericMediaResolver;
+
+registerResolver(genericMediaResolver);
+
 module.exports = {
   registerResolver,
   findResolver,
@@ -327,6 +341,7 @@ module.exports = {
   facebookMediaResolver,
   fileHostMediaResolver,
   youtubeMediaResolver,
+  genericMediaResolver,
   youtubeResolver,
   fileHostResolver,
 };

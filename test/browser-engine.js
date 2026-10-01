@@ -160,7 +160,7 @@ const methodBlockedMessage = new Function(
   check('501 guard wired at probe time',
     /meta\.status === 501/.test(mgrSrc) && /methodBlockedMessage\(meta\.status\)/.test(mgrSrc));
   check('501 mapped mid-stream',
-    /401\|403\|501/.test(mgrSrc) && /methodBlockedMessage\(code\)/.test(mgrSrc));
+    /401\|403\|400\|501/.test(mgrSrc) && /methodBlockedMessage\(code\)/.test(mgrSrc));
 }
 
 // ── 6. wiring ──────────────────────────────────────────────────────────────

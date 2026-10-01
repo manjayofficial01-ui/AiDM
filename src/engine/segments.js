@@ -212,7 +212,17 @@ class SegmentManager {
    * @param {Segment} seg
    */
   release(seg) {
-    if (seg.state === 'active') seg.state = 'pending';
+    if (seg.state !== 'active') return;
+    // A split may have shrunk this segment below what the worker already
+    // wrote (or an abort landed after the last chunk): it is complete.
+    // Re-pending it would retry with an inverted Range (position > end),
+    // which answers 416 and escalates to a spurious RESOURCE_CHANGED restart.
+    if (!seg.isOpenEnded && seg.remaining === 0) {
+      seg.downloaded = seg.length;
+      seg.state = 'done';
+      return;
+    }
+    seg.state = 'pending';
   }
 
   /**

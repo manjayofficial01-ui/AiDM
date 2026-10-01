@@ -119,6 +119,24 @@ function postJson(port, path, payload) {
   });
 }
 
+// GET with an arbitrary Host header - a real browser sends the host it
+// dialed, so a DNS-rebinding attack shows up as a foreign Host here.
+function rawGet(port, path, headers) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, path, method: 'GET', headers }, (res) => {
+      let out = '';
+      res.on('data', (d) => { out += d.toString(); });
+      res.on('end', () => {
+        let parsed = null;
+        try { parsed = JSON.parse(out); } catch (e) { /* non-JSON */ }
+        resolve({ status: res.statusCode, body: parsed, raw: out });
+      });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
 (async () => {
   const srv = new server.IPCServer(stubDm);
   // Step off the default port so a running AiDM is never disturbed.
@@ -369,6 +387,37 @@ function postJson(port, path, payload) {
         rReject.status === 200 && rReject.body && rReject.body.success === true);
     } finally {
       try { srv2.stop(); } catch (e) { /* best effort */ }
+    }
+  }
+
+  // -- 8. Host gate blocks DNS rebinding ------------------------------------
+  // The server binds 127.0.0.1, but an attacker page can resolve its own
+  // domain to 127.0.0.1 and reach it with a foreign Host header (and no
+  // Origin header - which isTrustedOrigin allows for non-browser callers).
+  // The Host gate must refuse such requests before routing while the
+  // localhost names keep working.
+  console.log('\nHost gate blocks DNS rebinding');
+  {
+    const srv3 = new server.IPCServer({ ...stubDm, getAllDownloads: () => [], settings: {} });
+    srv3.port = 19767;
+    await new Promise((resolve, reject) => {
+      srv3.start();
+      setTimeout(resolve, 400);
+      setTimeout(() => reject(new Error('rebind server did not start')), 4000);
+    });
+    try {
+      const ok = await rawGet(srv3.port, '/api/status', { Host: '127.0.0.1:' + srv3.port });
+      check('request with local IP Host still served', ok.status === 200, 'status=' + ok.status);
+      const okLocal = await rawGet(srv3.port, '/api/status', { Host: 'localhost:' + srv3.port });
+      check('localhost Host accepted', okLocal.status === 200, 'status=' + okLocal.status);
+      const evil = await rawGet(srv3.port, '/api/status', { Host: 'evil.example' });
+      check('rebound Host refused with 403', evil.status === 403, 'status=' + evil.status);
+      const evilPort = await rawGet(srv3.port, '/api/status', { Host: 'evil.example:80' });
+      check('rebound Host with port refused', evilPort.status === 403);
+      const malformed = await rawGet(srv3.port, '/api/status', { Host: 'not a host' });
+      check('malformed Host refused', malformed.status === 403);
+    } finally {
+      try { srv3.stop(); } catch (e) { /* best effort */ }
     }
   }
 

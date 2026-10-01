@@ -82,7 +82,7 @@ body {
 svg.icon, .btn-icon svg, .cat-icon svg, .empty-icon svg, .modal-header svg, .ctx-item svg, .status-item svg {
   overflow: visible;
 }
-.symbol-stroke, .icon { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.icon { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .icon[fill="currentColor"], .icon[fill="none"][stroke="none"] { stroke: none; }
 
 ::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -285,7 +285,7 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
 }
 .search-icon { display: flex; color: var(--text-muted); position: absolute; left: 26px; pointer-events: none; }
 .search-bar input {
-  width: 100%; padding: 8px 12px 8px 34px;
+  width: 100%; padding: 8px 36px 8px 34px;
   background: var(--bg-primary);
   border: 1px solid var(--border); color: var(--text-primary);
   font-size: 12.5px; border-radius: var(--radius-pill); outline: none;
@@ -293,6 +293,15 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
 }
 .search-bar input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
 .search-bar input::placeholder { color: var(--text-muted); }
+.search-clear {
+  position: absolute; right: 24px;
+  width: 22px; height: 22px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: transparent; border: none; border-radius: 50%;
+  color: var(--text-muted); font-size: 15px; line-height: 1;
+  cursor: pointer; font-family: inherit;
+}
+.search-clear:hover { background: var(--row-hover); color: var(--text-primary); }
 
 /* Selection action bar */
 .selection-bar {
@@ -602,7 +611,6 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
   box-shadow: 0 0 0 3px var(--accent-glow);
 }
 /* Scheduler rows + weekday chips (v4.3.0) */
-.sched-row { display: flex; align-items: center; gap: 8px; }
 .sched-info { flex: 1; min-width: 0; }
 .sched-name { font-size: 13px; font-weight: 650; color: var(--text-primary); }
 .sched-detail { font-size: 11px; color: var(--text-muted); margin-top: 2px; }

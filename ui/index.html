@@ -53,7 +53,7 @@
       <span class="app-title">AiDM <span class="app-subtitle">Download Manager</span><span class="app-version" id="app-version"></span></span>
     </div>
     <div class="titlebar-controls">
-      <button class="title-btn" id="btn-theme" title="Toggle light / dark theme" aria-label="Toggle theme"><span class="btn-icon"><svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-theme"></use></svg></span></button>
+      <button class="title-btn" id="btn-theme" title="Switch theme (light / dark / auto)" aria-label="Switch theme"><span class="btn-icon"><svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-theme"></use></svg></span></button>
       <button class="title-btn" id="btn-minimize" title="Minimize" aria-label="Minimize"><span class="btn-icon"><svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-min"></use></svg></span></button>
       <button class="title-btn" id="btn-maximize" title="Maximize" aria-label="Maximize"><span class="btn-icon"><svg class="icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><use href="#i-max"></use></svg></span></button>
       <button class="title-btn btn-close" id="btn-close" title="Close" aria-label="Close"><span class="btn-icon"><svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-close"></use></svg></span></button>
@@ -69,6 +69,7 @@
       <button class="tool-btn" id="btn-delete" title="Remove from list (files stay on disk)" aria-label="Remove from list"><span class="btn-icon"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-list-x"></use></svg></span></button>
       <button class="tool-btn" id="btn-delete-all" title="Delete from disk (optional file removal)" aria-label="Delete from disk"><span class="btn-icon"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-trash"></use></svg></span></button>
       <button class="tool-btn" id="btn-refresh" title="Refresh list (F5)" aria-label="Refresh list (F5)"><span class="btn-icon"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-refresh"></use></svg></span></button>
+      <button class="tool-btn" id="btn-clear-completed" title="Clear completed from list (files stay on disk)" aria-label="Clear completed from list"><span class="btn-icon"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-check"></use></svg></span></button>
     </div>
     <div class="toolbar-group">
       <div class="speed-display">
@@ -134,6 +135,10 @@
           <span class="cat-icon"><svg class="icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-doc"></use></svg></span><span class="cat-label">Documents</span>
           <span class="cat-count" id="count-document">0</span>
         </div>
+        <div class="sidebar-item" data-category="pdf" title="PDFs">
+          <span class="cat-icon"><svg class="icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-file"></use></svg></span><span class="cat-label">PDFs</span>
+          <span class="cat-count" id="count-pdf">0</span>
+        </div>
         <div class="sidebar-item" data-category="archive" title="Archives">
           <span class="cat-icon"><svg class="icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-archive"></use></svg></span><span class="cat-label">Archives</span>
           <span class="cat-count" id="count-archive">0</span>
@@ -149,7 +154,8 @@
     <div class="download-area">
       <div class="search-bar">
         <span class="search-icon"><svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-search"></use></svg></span>
-        <input type="text" id="search-input" placeholder="Search downloads by name or URL…" />
+        <input type="text" id="search-input" placeholder="Search downloads by name or URL…  (Ctrl+F)" />
+        <button id="search-clear" class="search-clear" title="Clear search" aria-label="Clear search" style="display:none;">×</button>
       </div>
 
       <!-- Selection action bar (pause / resume / remove / delete selected) -->
@@ -247,6 +253,7 @@
             <option value="video">Video</option>
             <option value="audio">Music</option>
             <option value="document">Document</option>
+            <option value="pdf">PDF</option>
             <option value="archive">Archive</option>
             <option value="software">Software</option>
             <option value="image">Image</option>
@@ -302,6 +309,7 @@
         <aside class="settings-nav" role="tablist" aria-label="Settings sections">
           <button type="button" class="settings-tab active" data-settings-tab="general">General</button>
           <button type="button" class="settings-tab" data-settings-tab="downloads">Downloads</button>
+          <button type="button" class="settings-tab" data-settings-tab="network">Network</button>
           <button type="button" class="settings-tab" data-settings-tab="paths">Paths</button>
           <button type="button" class="settings-tab" data-settings-tab="youtube">YouTube</button>
           <button type="button" class="settings-tab" data-settings-tab="ai">AI</button>
@@ -374,6 +382,36 @@
             </div>
           </section>
 
+          <section class="settings-pane" data-settings-pane="network">
+            <h4>Network</h4>
+            <div class="form-group">
+              <label>Proxy URL</label>
+              <input type="text" id="setting-proxy-url" placeholder="http://user:pass@proxy:8080 or socks5://127.0.0.1:1080 (empty = direct)" spellcheck="false" />
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label>Max connections per download</label>
+                <input type="number" id="setting-engine-max-connections" min="1" max="32" value="8" />
+              </div>
+              <div class="form-group">
+                <label>Min split size (KB)</label>
+                <input type="number" id="setting-engine-min-split-kb" min="1" value="1024" />
+              </div>
+            </div>
+            <div class="form-group">
+              <label>Disk pre-allocation</label>
+              <select id="setting-preallocation">
+                <option value="sparse" selected>Sparse (default)</option>
+                <option value="full">Full</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Per-host connection cap</label>
+              <input type="number" id="setting-per-host-connections" min="0" max="64" value="16" />
+              <div class="settings-hint">Total simultaneous connections to one host across all downloads (0 = unlimited).</div>
+            </div>
+          </section>
+
           <section class="settings-pane" data-settings-pane="paths">
             <h4>Default &amp; Category Paths</h4>
             <div class="form-group">
@@ -404,6 +442,13 @@
               <div class="path-input category-path-input">
                 <input type="text" id="cat-path-document" placeholder="Default" />
                 <button class="tool-btn small btn-browse-cat" data-cat="document">Browse</button>
+              </div>
+            </div>
+            <div class="category-path-row">
+              <span class="category-path-label">PDFs</span>
+              <div class="path-input category-path-input">
+                <input type="text" id="cat-path-pdf" placeholder="Default" />
+                <button class="tool-btn small btn-browse-cat" data-cat="pdf">Browse</button>
               </div>
             </div>
             <div class="category-path-row">
@@ -642,7 +687,7 @@
     <div class="modal settings-modal">
       <div class="modal-header">
         <h3><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><use href="#i-sparkles"></use></svg> AI Assistant (TokenHarbor)</h3>
-        <span id="btn-ai-close"><button class="modal-close" id="ai-close" aria-label="Close"><svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-close"></use></svg></button></span>
+        <button class="modal-close" id="ai-close" aria-label="Close"><svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-close"></use></svg></button>
       </div>
       <div class="modal-body">
         <div class="settings-hint" id="ai-model-hint">Primary mimo-v2.5:free → fallback deepseek-v4-flash:free</div>

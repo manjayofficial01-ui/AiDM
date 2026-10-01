@@ -81,7 +81,11 @@
     if (TWIMG_RE.test(url) && !isTwitterMp4Url(url)) return false;
     if (detectedVideos.has(url)) return false;
     const n = normalizeStreamUrl(url);
-    if (n) {
+    // detectedNormKeys mirrors normalizeStreamUrl(k) for every k in
+    // detectedVideos — the old code re-normalized EVERY stored key per new
+    // URL (O(n) URL parses per media request). The set answers the common
+    // "is this new?" case in O(1); only a confirmed duplicate walks the map.
+    if (n && detectedNormKeys.has(n)) {
       for (const [k, v] of detectedVideos) {
         if (normalizeStreamUrl(k) === n) {
           // Merge anything the survivor is missing (filename/size/quality).
@@ -103,12 +107,25 @@
       }
     }
     detectedVideos.set(url, info);
+    if (n) detectedNormKeys.add(n);
     // Bounded: a page that mints endless unique media URLs (one ad-rotation
     // or per-request nonce per poll) must not grow this registry forever —
     // the oldest entries are least likely to be the video the user wants.
     if (detectedVideos.size > 400) {
       const oldest = detectedVideos.keys().next().value;
       detectedVideos.delete(oldest);
+      // Keep the mirror set exact: drop the evicted key only when no
+      // surviving entry normalizes to it (rare — only on eviction).
+      try {
+        const oldestN = normalizeStreamUrl(oldest);
+        if (oldestN) {
+          let stillThere = false;
+          for (const k of detectedVideos.keys()) {
+            if (normalizeStreamUrl(k) === oldestN) { stillThere = true; break; }
+          }
+          if (!stillThere) detectedNormKeys.delete(oldestN);
+        }
+      } catch (e) {}
     }
     return true;
   }
@@ -118,22 +135,15 @@
   // returns an m3u8 — so the optional extension is required to detect them.)
   const XTREAM_RE = /\/(live|movie|series)\/[^/?#]+\/[^/?#]+\/\d+(?:\.(m3u8|ts|mp4|mkv|avi))?(?:$|[/?#])/i;
 
-  // Per-request token params stripped when comparing stream URLs
+  // Per-request token params stripped when comparing stream URLs.
+  // CONSERVATIVE set: only signature-class params are stripped on generic
+  // sites. Ultra-generic keys (t, ts, _, e, h, key, dl, tag…) frequently
+  // carry real content identity — stripping them everywhere merged distinct
+  // videos into one. The aggressive per-request CDN churn set (Facebook /
+  // Instagram / Twitter auth + cache busters) is applied ONLY for known media
+  // CDN hosts, inside normalizeStreamUrl below.
   const TOKEN_PARAMS = new Set([
-    'token', 'tokens', 'sig', 'signature', 'sign', 'expires', 'expiry', 'exp',
-    'e', 'h', 'hdnea', 'hdntl', 'hdnts', 'st', 'key', 'auth', 'authkey',
-    'wmsauthsign', 'mst', 'access_token', 'token_expires', 'session', 'sid',
-    'policy', 'token_hash', 'verify', 'md5', 't', 'ts', '_',
-    // Facebook / Instagram CDN auth (rotates per request — same video, new ?oh=&oe=)
-    // NOTE: `vabr` (video-adaptive-bitrate token on hd_src/sd_src) also rotates
-    // per request and must be stripped — otherwise the SAME file compares as
-    // N distinct URLs and one video explodes into dozens of identical rows.
-    'oh', 'oe', 'dl', 'rl', 'vabr', 'efg', 'bytestart', 'byteend',
-    '_nc_ht', '_nc_cat', '_nc_ohc', '_nc_rid', '_nc_sid', 'ccb',
-    // Twitter / X video CDN (same file re-requested with ?tag=12/14/16… and
-    // &container=fmp4 — the tag selects nothing downloadable, it only
-    // busts caches while the player polls the HLS playlist).
-    'tag', 'container', 'containers',
+    'sig', 'signature', 'token', 'expires', 'hdnts', 'hdntl', 'auth', 'se',
   ]);
 
   // ── Twitter / X helpers ────────────────────────────────────────────────────
@@ -454,8 +464,26 @@ function normalizeStreamUrl(u) {
       const x = new URL(String(u || '').trim());
       x.hash = '';
       x.hostname = x.hostname.toLowerCase();
+      // Known media CDNs rotate an auth/cache-buster param on EVERY request
+      // for the SAME file (fbcdn ?oh=&oe=, twimg ?tag=&container=,
+      // instagram). Strip the aggressive set there only; any other host keeps
+      // the conservative TOKEN_PARAMS so real query identity survives.
+      let strip = TOKEN_PARAMS;
+      if (/(?:^|\.)(?:fbcdn\.net|cdninstagram\.com|twimg\.com|instagram\.com)$/.test(x.hostname) || /scontent\./.test(x.hostname)) {
+        // Cached on the function itself so this definition stays
+        // self-contained (test harnesses extract and eval exactly it).
+        strip = normalizeStreamUrl.__aggr || (normalizeStreamUrl.__aggr = new Set([
+          'token', 'tokens', 'sig', 'signature', 'sign', 'expires', 'expiry', 'exp',
+          'e', 'h', 'hdnea', 'hdntl', 'hdnts', 'st', 'key', 'auth', 'authkey',
+          'wmsauthsign', 'mst', 'access_token', 'token_expires', 'session', 'sid',
+          'policy', 'token_hash', 'verify', 'md5', 't', 'ts', '_',
+          'oh', 'oe', 'dl', 'rl', 'vabr', 'efg', 'bytestart', 'byteend',
+          '_nc_ht', '_nc_cat', '_nc_ohc', '_nc_rid', '_nc_sid', 'ccb',
+          'tag', 'container', 'containers',
+        ]));
+      }
       const params = Array.from(x.searchParams.entries())
-        .filter(([k]) => !TOKEN_PARAMS.has(k.toLowerCase()));
+        .filter(([k]) => !strip.has(k.toLowerCase()));
       params.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : 1));
       const qs = new URLSearchParams();
       params.forEach(([k, v]) => qs.append(k, v));
@@ -1209,7 +1237,11 @@ function normalizeStreamUrl(u) {
       try {
         if (addDetectedVideo(v.url, v)) added++;
       } catch (e) {
-        if (!detectedVideos.has(v.url)) { detectedVideos.set(v.url, v); added++; }
+        if (!detectedVideos.has(v.url)) {
+          detectedVideos.set(v.url, v);
+          try { const nk = normalizeStreamUrl(v.url); if (nk) detectedNormKeys.add(nk); } catch (e2) {}
+          added++;
+        }
       }
     }
     return added;
@@ -1245,6 +1277,9 @@ function normalizeStreamUrl(u) {
   };
 
   let detectedVideos = new Map(); // url -> { url, quality, resolution, size, format }
+  // Mirror of normalizeStreamUrl(key) for every detectedVideos entry (see
+  // addDetectedVideo) — kept in sync at every direct mutation site.
+  const detectedNormKeys = new Set();
   let detectedLinks = new Set();
   let pageScanComplete = false;
 
@@ -1363,6 +1398,13 @@ function normalizeStreamUrl(u) {
           refreshOpenPanel();
         }
       } catch (e) {}
+    } else if (type === 'spa-nav') {
+      // The MAIN-world interceptor patches history in the PAGE context, so it
+      // sees SPA navigations this ISOLATED world's own patch can miss (page
+      // frames that grabbed history early, realm differences). Clear the
+      // per-page caches on its signal too — clearPageDetections() no-ops when
+      // the URL did not actually change.
+      try { clearPageDetections(); } catch (e) {}
     }
   });
 
@@ -1884,7 +1926,9 @@ function normalizeStreamUrl(u) {
     scanLinks();
 
     // 5. KVS player flashvars (Nubiles, BustyAR, PetitesRDS, etc.)
-    extractKvsFlashvars().forEach(track);
+    //    Gated: skip the inline-script sweep unless the page mentions
+    //    flashvars at all (MutationObserver-driven scans run this often).
+    if (pageMentionsTokens(['flashvars'])) extractKvsFlashvars().forEach(track);
 
     // 6. OpenGraph and Twitter meta tags
     scanOGAndMetaTags().forEach(track);
@@ -1893,7 +1937,10 @@ function normalizeStreamUrl(u) {
     scanJsonLd().forEach(track);
 
     // 7b. Facebook / Instagram playable URLs (blob+MSE pages have no <video src>)
-    try { extractFacebookVideos().forEach(track); } catch (e) {}
+    //     Gated on the same tokens the extractor's own regexes look for.
+    if (pageMentionsTokens(['playable_url', 'browser_native', 'hd_src', 'sd_src', 'fbcdn'])) {
+      try { extractFacebookVideos().forEach(track); } catch (e) {}
+    }
 
     // 8. Request MAIN-world player extraction (JWPlayer, Video.js, etc.)
     requestPlayerExtraction();
@@ -2016,6 +2063,10 @@ function normalizeStreamUrl(u) {
           pageTitle: document.title,
           pageUrl: location.href,
           videos: all,
+        }, () => {
+          // Consume lastError — the worker may be asleep or the extension
+          // just reloaded; an unchecked error spams the console.
+          if (chrome.runtime.lastError) { /* background unavailable */ }
         });
       }
       sendResponse({ videos: all });
@@ -3485,9 +3536,11 @@ function normalizeStreamUrl(u) {
       });
     }
     // Facebook playable URLs live in page JSON, not in network entries.
-    try {
-      extractFacebookVideos().forEach(pushCand);
-    } catch (e) {}
+    // Extracted ONCE per panel build — the audio-pairing pass below used to
+    // re-run the same full-document sweep a second time.
+    let fbJsonVideos = [];
+    try { fbJsonVideos = extractFacebookVideos() || []; } catch (e) {}
+    fbJsonVideos.forEach(pushCand);
 
     // Facebook DASH split-AV: the video-only track and its audio-only
     // counterpart share an efg video_id. Attach the audio URL to its video
@@ -3500,7 +3553,7 @@ function normalizeStreamUrl(u) {
       interceptedMediaUrls.forEach(u => fbAll.push(u));
       detectedVideos.forEach(v => { if (v && v.url) fbAll.push(v.url); });
       (pd.streams || []).forEach(u => fbAll.push(u));
-      try { extractFacebookVideos().forEach(v => { if (v && v.url) fbAll.push(v.url); }); } catch (e) {}
+      fbJsonVideos.forEach(v => { if (v && v.url) fbAll.push(v.url); });
       for (const u of fbAll) rememberFbAudioUrl(u);
       cands.forEach(v => attachFbAudioUrl(v));
     } catch (e) {}
@@ -4128,12 +4181,26 @@ function normalizeStreamUrl(u) {
         const info = detectedVideos.get(link.href) || detectQuality(link.href, null);
         if (filename) info.filename = filename;
         detectedVideos.set(link.href, info);
+        const nk = normalizeStreamUrl(link.href);
+        if (nk) detectedNormKeys.add(nk);
       } catch (err) {}
-      chrome.runtime.sendMessage({
-        action: 'single-download',
-        url: link.href,
-        filename: filename || undefined,
-      });
+      // The site may still preventDefault() this click (custom download
+      // handlers, SPA routers, players). Defer the send one macrotask and
+      // skip prevented clicks — sending immediately double-downloaded files
+      // the page handled itself.
+      const clickHref = link.href;
+      const clickFilename = filename || undefined;
+      setTimeout(() => {
+        if (e.defaultPrevented) return;
+        chrome.runtime.sendMessage({
+          action: 'single-download',
+          url: clickHref,
+          filename: clickFilename,
+        }, () => {
+          // Consume lastError (worker asleep / extension reloaded).
+          if (chrome.runtime.lastError) { /* background unavailable */ }
+        });
+      }, 0);
     }
   }, true);
 
@@ -4149,6 +4216,7 @@ function normalizeStreamUrl(u) {
     if (location.href === aidmPageUrl) return; // hash-only change: same page
     aidmPageUrl = location.href;
     detectedVideos.clear();
+    detectedNormKeys.clear();
     interceptedMediaUrls.clear();
     mseBlobUrls.clear();
     blobToRealUrlMap.clear();
@@ -4183,6 +4251,46 @@ function normalizeStreamUrl(u) {
 
   // ── MutationObserver for Dynamic Content ─────────────────────────────────────
 
+  // Shared debounced full-scan scheduler. Both observers below used to fire
+  // their own fullScan per mutation batch — unbounded full-document sweeps on
+  // busy pages (feeds, players re-rendering). One pending flag coalesces any
+  // burst into a single scan, and scans are never closer than SCAN_COOLDOWN_MS.
+  const SCAN_COOLDOWN_MS = 1500;
+  let scanPending = false;
+  let lastFullScanAt = 0;
+  function scheduleFullScan() {
+    if (scanPending) return;
+    scanPending = true;
+    const wait = Math.max(0, SCAN_COOLDOWN_MS - (Date.now() - lastFullScanAt));
+    setTimeout(() => {
+      scanPending = false;
+      lastFullScanAt = Date.now();
+      try { fullScan(); } catch (e) {}
+      try { scanNetworkResources(); } catch (e) {}
+      scheduleSyncCapsules();
+    }, wait);
+  }
+
+  // Cheap pre-checks gating the extractors' full-document sweeps inside
+  // fullScan: indexOf probes over inline scripts (+ a length-capped
+  // innerHTML probe) instead of unconditional regex sweeps of every script
+  // and the whole document on every scan.
+  function pageMentionsTokens(tokens) {
+    try {
+      const scripts = document.querySelectorAll('script:not([src])');
+      for (const s of scripts) {
+        const t = s.textContent || '';
+        if (t.length < 20) continue;
+        for (const tok of tokens) if (t.indexOf(tok) >= 0) return true;
+      }
+      const html = document.documentElement ? document.documentElement.innerHTML || '' : '';
+      if (html.length <= 2000000) {
+        for (const tok of tokens) if (html.indexOf(tok) >= 0) return true;
+      }
+    } catch (e) { return true; } // probe failed — fail open, run the extractor
+    return false;
+  }
+
   const observer = new MutationObserver((mutations) => {
     let shouldScan = false;
     for (const mutation of mutations) {
@@ -4192,7 +4300,7 @@ function normalizeStreamUrl(u) {
       }
     }
     if (shouldScan) {
-      setTimeout(fullScan, 500);
+      scheduleFullScan();
     }
   });
 
@@ -4215,9 +4323,9 @@ function normalizeStreamUrl(u) {
     const hasReal = Array.from(document.querySelectorAll('video'))
       .some(v => (v.currentSrc || v.src || '').startsWith('http') || (v.currentSrc && v.currentSrc.startsWith('blob:')));
     if (hasReal) {
-      fullScan();
-      scanNetworkResources();
-      scheduleSyncCapsules();
+      // Shares the debounced scheduler with the DOM observer above — a late
+      // player injection no longer triggers an immediate second full sweep.
+      scheduleFullScan();
     }
   });
   try {
@@ -4242,11 +4350,18 @@ function normalizeStreamUrl(u) {
 
   setTimeout(() => { fullScan(); scheduleSyncCapsules(); }, 1500);
   setTimeout(probe, 2500);
+  // Hidden tabs don't need network sweeps or capsule syncs — nothing is
+  // visible to update and the 8s/1s timers kept burning CPU per background
+  // tab. Both resume on the first tick after the tab becomes visible again.
   setInterval(() => {
+    if (document.visibilityState !== 'visible') return;
     scanNetworkResources();
     scheduleSyncCapsules();
   }, 8000);
-  setInterval(scheduleSyncCapsules, 1000);
+  setInterval(() => {
+    if (document.visibilityState !== 'visible') return;
+    scheduleSyncCapsules();
+  }, 1000);
   window.addEventListener('scroll', scheduleSyncCapsules, { passive: true, capture: true });
   window.addEventListener('resize', scheduleSyncCapsules);
 

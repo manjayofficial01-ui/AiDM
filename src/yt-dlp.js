@@ -31,7 +31,7 @@ const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
 const path = require('path');
-const { isAvailable: ffmpegAvailable, resolveFfmpeg } = require('./media-mux');
+const { resolveFfmpeg } = require('./media-mux');
 
 const IS_WIN = process.platform === 'win32';
 
@@ -109,22 +109,34 @@ function runOnce(argv, args, { timeoutMs = 8000, maxOutput = 65536 } = {}) {
 }
 
 let runnerCache;      // { argv, source, version } | null
+let runnerCacheMissAt = 0;
 let runnerPromise = null;
 
 /** Detect a working yt-dlp. Cached — call `detectRunner(true)` to re-check. */
 function detectRunner(force = false) {
-  if (!force && runnerCache !== undefined) return Promise.resolve(runnerCache);
+  if (!force && runnerCache) return Promise.resolve(runnerCache);
+  // A MISS is only cached for 60s: users install yt-dlp while AiDM is
+  // running, and a permanent negative cache made every later video fail
+  // until an app restart.
+  if (!force && runnerCache === null && Date.now() - runnerCacheMissAt < 60000) {
+    return Promise.resolve(null);
+  }
   if (runnerPromise && !force) return runnerPromise;
   runnerPromise = (async () => {
-    for (const candidate of candidateRunners()) {
-      const res = await runOnce(candidate.argv, ['--version'], { timeoutMs: 10000 });
-      if (res.ok && /\d{4}[.\-]\d{2}/.test(res.stdout)) {
-        runnerCache = { argv: candidate.argv, source: candidate.source, version: res.stdout.split(/\s+/).pop() };
-        return runnerCache;
+    try {
+      for (const candidate of candidateRunners()) {
+        const res = await runOnce(candidate.argv, ['--version'], { timeoutMs: 10000 });
+        if (res.ok && /\d{4}[.\-]\d{2}/.test(res.stdout)) {
+          runnerCache = { argv: candidate.argv, source: candidate.source, version: res.stdout.split(/\s+/).pop() };
+          return runnerCache;
+        }
       }
+      runnerCache = null;
+      runnerCacheMissAt = Date.now();
+      return null;
+    } finally {
+      runnerPromise = null;
     }
-    runnerCache = null;
-    return null;
   })();
   return runnerPromise;
 }
@@ -161,9 +173,24 @@ function specNeedsMerge(spec) {
 }
 
 /**
+ * Names yt-dlp writes for a job: the media file itself (prefix + a bare
+ * extension) or one of its intermediates (.part, .ytdl, .temp, .f<id>.<ext>,
+ * .frag*). A user file that merely SHARES the title prefix ("Clip.yt 2.mp4",
+ * "Clip.youtube-notes.txt") must never match — the old startsWith() check
+ * could delete or adopt unrelated files.
+ */
+const JOB_TEMP_NAME_RE = /\.(part|ytdl|temp|frag)(\.|$)|\.f\d+\./i;
+
+function isJobOutputName(name, prefix) {
+  if (!name.startsWith(prefix)) return false;
+  const rest = name.slice(prefix.length);
+  return /^\.[A-Za-z0-9]{1,10}$/.test(rest) || JOB_TEMP_NAME_RE.test(rest);
+}
+
+/**
  * Remove every file this job wrote for `outputTemplate` (merged file, the
- * separate video/audio tracks, .part leftovers). Only names carrying the
- * template's own prefix are touched, so a user's unrelated file is safe.
+ * separate video/audio tracks, .part leftovers). Only names that look like
+ * yt-dlp's own outputs for the template prefix are touched.
  */
 function cleanupPartialOutputs(outputTemplate) {
   let removed = 0;
@@ -173,7 +200,7 @@ function cleanupPartialOutputs(outputTemplate) {
     const prefix = path.basename(tpl).split('%(ext)s')[0];
     if (!prefix || !dir) return 0;
     for (const name of fs.readdirSync(dir)) {
-      if (!name.startsWith(prefix)) continue;
+      if (!isJobOutputName(name, prefix)) continue;
       try { fs.unlinkSync(path.join(dir, name)); removed++; } catch (e) { /* in use */ }
     }
   } catch (e) { /* best effort */ }
@@ -190,8 +217,8 @@ function producedFileFor(outputTemplate) {
     let best = null;
     let bestSize = -1;
     for (const name of fs.readdirSync(dir)) {
-      if (!name.startsWith(prefix)) continue;
-      if (/\.part($|\.)/i.test(name) || /\.ytdl$/i.test(name)) continue;
+      if (!isJobOutputName(name, prefix)) continue;
+      if (/\.(part|ytdl|temp)($|\.)/i.test(name) || /\.f\d+\./i.test(name)) continue;
       const p = path.join(dir, name);
       let st;
       try { st = fs.statSync(p); } catch (e) { continue; }
@@ -389,6 +416,7 @@ function writeCookieFile(url, cookieHeader) {
   try {
     const dir = cookieDir();
     fs.mkdirSync(dir, { recursive: true });
+    sweepStaleCookieFiles();
     const p = path.join(dir, 'cookies-' + crypto.randomBytes(8).toString('hex') + '.txt');
     fs.writeFileSync(p, body, { mode: 0o600 });
     return p;
@@ -399,6 +427,35 @@ function writeCookieFile(url, cookieHeader) {
 function deleteCookieFile(p) {
   if (!p) return;
   try { fs.unlinkSync(p); } catch (e) { /* already gone */ }
+}
+
+let lastCookieSweepAt = 0;
+
+/**
+ * The cookie files hold LIVE session credentials. A crash between
+ * writeCookieFile() and deleteCookieFile() leaves them on disk forever —
+ * sweep strays older than an hour (checked at most once an hour).
+ */
+function sweepStaleCookieFiles(maxAgeMs = 3600 * 1000) {
+  const now = Date.now();
+  if (now - lastCookieSweepAt < maxAgeMs) return 0;
+  lastCookieSweepAt = now;
+  let removed = 0;
+  try {
+    const dir = cookieDir();
+    for (const name of fs.readdirSync(dir)) {
+      if (!/^cookies-[0-9a-f]+\.txt$/i.test(name)) continue;
+      const p = path.join(dir, name);
+      try {
+        const st = fs.statSync(p);
+        if (st.isFile() && now - st.mtimeMs > maxAgeMs) {
+          fs.unlinkSync(p);
+          removed++;
+        }
+      } catch (e) { /* already gone */ }
+    }
+  } catch (e) { /* no cookie dir yet */ }
+  return removed;
 }
 
 /**
@@ -420,6 +477,37 @@ function cookieArgs(o) {
   const ref = String(o.referer || '').trim();
   if (ref && /^https?:\/\//i.test(ref)) out.push('--referer', ref);
   return out;
+}
+
+/**
+ * Network proxy argument for the yt-dlp subprocess. Pure.
+ * Only well-formed http(s)/socks5 URLs pass — anything else is dropped so a
+ * stray settings value can never smuggle an option into argv.
+ * @param {{ proxy?: string | null }} [o]
+ * @returns {string[]} ready to spread into argv
+ */
+function proxyArgs(o) {
+  const p = resolveProxyUrl(o && o.proxy);
+  if (!p || !/^(https?|socks5h?):\/\/\S+$/i.test(p)) return [];
+  return ['--proxy', p];
+}
+
+// yt-dlp runs as a child process, so it cannot inherit the engine's in-process
+// proxy agents. The manager registers a getter at startup and every subprocess
+// call then picks up the current Settings › Network value without each call
+// site having to thread it through.
+let proxyResolver = null;
+function setProxyResolver(fn) {
+  proxyResolver = typeof fn === 'function' ? fn : null;
+}
+function resolveProxyUrl(explicit) {
+  const s = String(explicit || '').trim();
+  if (s) return s;
+  try {
+    return String((proxyResolver && proxyResolver()) || '').trim();
+  } catch (e) {
+    return '';
+  }
 }
 
 /**
@@ -473,9 +561,10 @@ function buildSubtitleArgs(o) {
  * @param {string} [opts.cookies]    `Cookie:` header value for this job
  * @param {string} [opts.referer]    page URL to send as Referer
  * @param {string} [opts.cookiesFromBrowser] opt-in browser cookie store
+ * @param {string} [opts.proxy]    http(s)/socks5 proxy URL (empty = direct)
  * @returns {Promise<object>} parsed info dict
  */
-async function probe(url, { timeoutMs = 60000, cookies = null, referer = null, cookiesFromBrowser = null } = {}) {
+async function probe(url, { timeoutMs = 60000, cookies = null, referer = null, cookiesFromBrowser = null, proxy = null } = {}) {
   const runner = await detectRunner();
   if (!runner) throw Object.assign(new Error(ytdlpMissingMessage()), { code: 'missing' });
   // A private/members-only video cannot even be LISTED without the session,
@@ -493,6 +582,7 @@ async function probe(url, { timeoutMs = 60000, cookies = null, referer = null, c
     '--retries', '2',
     '--extractor-retries', '2',
     ...cookieArgs({ cookieFile, referer, cookiesFromBrowser }),
+    ...proxyArgs({ proxy }),
     '--',
     String(url),
   ];
@@ -627,6 +717,7 @@ function downloadWithRunner(o, runner, resolve, reject) {
       cookies = null,
       referer = null,
       cookiesFromBrowser = null,
+      proxy = null,
     } = o;
 
     if (!url || !formatSpec || !outputTemplate) {
@@ -699,6 +790,7 @@ function downloadWithRunner(o, runner, resolve, reject) {
     // Written to a file so the secret never appears in argv.
     const cookieFile = cookies ? writeCookieFile(url, cookies) : null;
     args.push(...cookieArgs({ cookieFile, referer, cookiesFromBrowser }));
+    args.push(...proxyArgs({ proxy }));
 
     args.push('--', String(url));
 
@@ -718,6 +810,7 @@ function downloadWithRunner(o, runner, resolve, reject) {
     }
 
     let stderrTail = '';
+    let stderrParseBuf = '';
     let settled = false;
     let lastEmit = 0;
     let sawProgress = false;
@@ -801,12 +894,20 @@ function downloadWithRunner(o, runner, resolve, reject) {
       }
     });
     child.stderr.on('data', (chunk) => {
-      stderrTail += chunk.toString();
+      const text = chunk.toString();
+      stderrTail += text;
       if (stderrTail.length > 16384) stderrTail = stderrTail.slice(-16384);
-      // yt-dlp writes progress to stderr in some builds/versions too.
-      const nl = stderrTail.lastIndexOf('\n');
+      // yt-dlp writes progress to stderr in some builds/versions too. Parse
+      // each line EXACTLY once via a consumed-offset buffer — re-splitting
+      // the whole tail on every chunk replayed old "100%…finished" lines and
+      // inflated trackDone (progress jumped past 100% / wrong ETA).
+      stderrParseBuf += text;
+      const nl = stderrParseBuf.lastIndexOf('\n');
       if (nl >= 0) {
-        for (const line of stderrTail.slice(0, nl).split('\n')) handleLine(line);
+        const block = stderrParseBuf.slice(0, nl);
+        stderrParseBuf = stderrParseBuf.slice(nl + 1);
+        if (stderrParseBuf.length > 16384) stderrParseBuf = stderrParseBuf.slice(-16384);
+        for (const line of block.split('\n')) handleLine(line);
       }
     });
 
@@ -894,10 +995,13 @@ module.exports = {
   download,
   killTree,
   candidateRunners,
+  proxyArgs,
+  setProxyResolver,
   // ── merge safety ──
   specNeedsMerge,
   cleanupPartialOutputs,
   producedFileFor,
+  sweepStaleCookieFiles,
   verifyMergedAudio,
   // Cookie / Referer plumbing (pure helpers are regression-tested).
   BROWSERS,

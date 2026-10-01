@@ -17,6 +17,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   // ── Check Connection ─────────────────────────────────────────────────────────
 
   chrome.runtime.sendMessage({ action: 'check-connection' }, (response) => {
+    // Consume lastError (worker cold-start/unavailable) — without this Chrome
+    // logs "Unchecked runtime.lastError" and the popup looks broken.
+    if (chrome.runtime.lastError) { /* show disconnected below */ }
     if (response && response.connected) {
       statusDot.classList.add('connected');
       statusDot.title = 'Connected to AiDM';
@@ -798,7 +801,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Token-insensitive URL compare so rotated signed URLs still match sent ones
   // (Facebook ?oh=/&oe= rotate per request — same video must still match).
-  const TOKEN_KEYS = new Set(['token', 'tokens', 'sig', 'signature', 'sign', 'expires', 'expiry', 'exp', 'e', 'h', 'hdnea', 'hdntl', 'hdnts', 'st', 'key', 'auth', 'authkey', 'wmsauthsign', 'mst', 'access_token', 'token_expires', 'session', 'sid', 'policy', 'token_hash', 'verify', 'md5', 't', 'ts', '_', 'oh', 'oe', 'dl', 'rl', 'vabr', 'efg', 'bytestart', 'byteend', '_nc_ht', '_nc_cat', '_nc_ohc', '_nc_rid', '_nc_sid', 'ccb', 'tag', 'container', 'containers']);
+  // CONSERVATIVE set: only signature-class params are stripped on generic
+  // sites; the aggressive CDN churn set is applied per-host in normalizeInline
+  // (keep in sync with TOKEN_PARAMS in content.js / background.js).
+  const TOKEN_KEYS = new Set(['sig', 'signature', 'token', 'expires', 'hdnts', 'hdntl', 'auth', 'se']);
   function fbCanonHostInline(h) {
     try {
       h = String(h || '').toLowerCase().replace(/\.$/, '');
@@ -886,7 +892,15 @@ document.addEventListener('DOMContentLoaded', async () => {
       const x = new URL(String(u || '').trim());
       x.hash = '';
       x.hostname = x.hostname.toLowerCase();
-      const params = Array.from(x.searchParams.entries()).filter(([k]) => !TOKEN_KEYS.has(k.toLowerCase()));
+      // Aggressive stripping ONLY on known media CDNs (rotating auth/cache
+      // busters for the same file); generic sites keep the conservative set.
+      let strip = TOKEN_KEYS;
+      if (/(?:^|\.)(?:fbcdn\.net|cdninstagram\.com|twimg\.com|instagram\.com)$/.test(x.hostname) || /scontent\./.test(x.hostname)) {
+        // Cached on the function itself so this definition stays
+        // self-contained (test harnesses extract and eval exactly it).
+        strip = normalizeInline.__aggr || (normalizeInline.__aggr = new Set(['token', 'tokens', 'sig', 'signature', 'sign', 'expires', 'expiry', 'exp', 'e', 'h', 'hdnea', 'hdntl', 'hdnts', 'st', 'key', 'auth', 'authkey', 'wmsauthsign', 'mst', 'access_token', 'token_expires', 'session', 'sid', 'policy', 'token_hash', 'verify', 'md5', 't', 'ts', '_', 'oh', 'oe', 'dl', 'rl', 'vabr', 'efg', 'bytestart', 'byteend', '_nc_ht', '_nc_cat', '_nc_ohc', '_nc_rid', '_nc_sid', 'ccb', 'tag', 'container', 'containers']));
+      }
+      const params = Array.from(x.searchParams.entries()).filter(([k]) => !strip.has(k.toLowerCase()));
       params.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
       const qs = new URLSearchParams();
       params.forEach(([k, v]) => qs.append(k, v));

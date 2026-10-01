@@ -7,7 +7,15 @@ const dns = require('dns');
 const net = require('net');
 const { URL } = require('url');
 const { EventEmitter } = require('events');
-const { agentFor, destroyAgents } = require('./engine/agents');
+const { agentFor, destroyAgents, setProxyUrl } = require('./engine/agents');
+const { HostGate } = require('./engine/host-gate');
+const { isRetryableStatus } = require('./engine/errors');
+const { makeH2AwareFetch } = require('./engine/http2-fetch');
+
+/** Unref'd sleep — a probe backoff must never keep the Electron loop alive. */
+function sleep(ms) {
+  return new Promise((r) => { const t = setTimeout(r, ms); t.unref?.(); });
+}
 
 const {
   DownloadTask,
@@ -173,7 +181,7 @@ function robustFetch(url, init = {}) {
         port: parsed.port,
         path: parsed.pathname + parsed.search,
         headers: jarHeader(jar, headers),
-        timeout: 30000,
+        timeout: Number.isFinite(init.timeoutMs) && init.timeoutMs > 0 ? init.timeoutMs : 30000,
         rejectUnauthorized: !insecure,
         lookup: dohFallbackLookup,
         agent: agentFor(parsed, { insecure }),
@@ -209,8 +217,16 @@ function robustFetch(url, init = {}) {
           : new ReadableStream({
               start(controller) {
                 bodyCtl = controller;
-                res.on('data', (chunk) => controller.enqueue(new Uint8Array(chunk)));
-                res.on('end', () => controller.close());
+                res.on('data', (chunk) => {
+                  // Enqueue the Buffer directly — copying into a new
+                  // Uint8Array per chunk doubled GC pressure on the hot path.
+                  try { controller.enqueue(chunk); } catch (e) { return; }
+                  // Backpressure: stop reading from the socket once the queue
+                  // is full. Flowing mode otherwise buffered the whole body
+                  // in RAM whenever a rate limiter slowed the consumer.
+                  if (controller.desiredSize !== null && controller.desiredSize <= 0) res.pause();
+                });
+                res.on('end', () => { try { controller.close(); } catch (e) { /* already settled */ } });
                 res.on('error', (err) => failStream(err));
                 // A server that hangs up mid-body must surface as a stream
                 // error, not as a silently truncated download.
@@ -218,6 +234,7 @@ function robustFetch(url, init = {}) {
                   if (!res.complete) failStream(new Error('Response ended prematurely'));
                 });
               },
+              pull() { res.resume(); },
               cancel() { res.destroy(); },
             });
         const response = new Response(bodyStream, {
@@ -333,17 +350,6 @@ function parseKeyAttrs(attrs) {
   out.IV = get('IV');
   out.KEYFORMAT = get('KEYFORMAT');
   return out;
-}
-
-/**
- * Parse the first #EXT-X-KEY tag of an HLS playlist.
- * Returns { method, uri, iv, keyformat } or null when the playlist is clear.
- */
-function parseHlsKey(text) {
-  const m = String(text || '').match(/#EXT-X-KEY:([^\r\n]*)/i);
-  if (!m) return null;
-  const a = parseKeyAttrs(m[1]);
-  return { method: a.METHOD, uri: a.URI, iv: a.IV, keyformat: a.KEYFORMAT };
 }
 
 /**
@@ -491,6 +497,48 @@ class DownloadEngine extends EventEmitter {
     this.globalSpeedLimit = 0;        // bytes/sec, 0 = unlimited
     this.globalLimiter = new TokenBucket(0);
     this.hlsConcurrency = 6;          // parallel segment fetches for HLS streams
+    // Engine knobs driven by settings (see setEngineOptions):
+    this.engineMaxConnections = 8;    // hard per-download connection cap
+    this.engineMinSplitSize = 1024 * 1024;
+    this.enginePreallocation = 'sparse';
+    this.engineHttp2 = false;         // h2 transport for https (off by default)
+    // 16 lets two 8-segment downloads share a host but stops a third from
+    // bursting 24 simultaneous connections at one CDN.
+    this.hostGate = new HostGate(16);
+  }
+
+  /**
+   * Route all pooled engine traffic through a proxy ('' = direct).
+   * @param {string} rawUrl http/https/socks5/socks5h, optional user:pass.
+   * @returns {boolean} false when the URL was non-empty but unparsable.
+   */
+  setProxy(rawUrl) {
+    const s = String(rawUrl || '').trim();
+    const parsed = setProxyUrl(s);
+    return !s || !!parsed;
+  }
+
+  /**
+   * Apply engine-level tuning from user settings.
+   * @param {{ maxConnections?: number, minSplitKB?: number, preallocation?: string, perHostConnections?: number, http2?: boolean }} [opts]
+   */
+  setEngineOptions(opts = {}) {
+    if (opts.http2 != null) {
+      this.engineHttp2 = !!opts.http2;
+    }
+    if (opts.maxConnections != null) {
+      this.engineMaxConnections = Math.max(1, Math.min(parseInt(opts.maxConnections, 10) || 8, 32));
+    }
+    if (opts.minSplitKB != null) {
+      const kb = parseInt(opts.minSplitKB, 10);
+      this.engineMinSplitSize = Math.max(1, Number.isFinite(kb) ? kb : 1024) * 1024;
+    }
+    if (opts.preallocation != null) {
+      this.enginePreallocation = opts.preallocation === 'full' ? 'full' : 'sparse';
+    }
+    if (opts.perHostConnections != null) {
+      this.hostGate.setLimit(Math.max(0, parseInt(opts.perHostConnections, 10) || 0));
+    }
   }
 
   /** Set a global download speed limit (bytes/sec). 0 disables the limit. */
@@ -520,6 +568,7 @@ class DownloadEngine extends EventEmitter {
     headers = {},
     meta: preProbed = null,
     resumeOffsets = null,
+    resumeSegments = null,
     mirrors = [],
     checksum = null,
     // 'rename' is the default: a re-added / re-run download must never rm()
@@ -561,7 +610,7 @@ class DownloadEngine extends EventEmitter {
 
     const reqHeaders = buildRequestHeaders(url, headers);
     const wantsSingle = singleConnection === true || !!(preProbed && preProbed.singleConnection);
-    const maxConn = wantsSingle ? 1 : Math.max(1, Math.min(totalSegments || 8, 32));
+    const maxConn = wantsSingle ? 1 : Math.max(1, Math.min(totalSegments || 8, this.engineMaxConnections, 32));
 
     const taskOptions = {
       id,
@@ -572,22 +621,27 @@ class DownloadEngine extends EventEmitter {
       headers: reqHeaders,
       maxConnections: maxConn,
       initialConnections: Math.min(maxConn, 4),
-      minSplitSize: 1024 * 1024,
+      minSplitSize: this.engineMinSplitSize,
       adaptiveConnections: !wantsSingle,
       pieceSelection: 'largest',
-      preallocation: 'sparse',
+      preallocation: this.enginePreallocation,
       onConflict: ['rename', 'overwrite', 'fail'].includes(onConflict) ? onConflict : 'rename',
       singleConnection: wantsSingle,
       resumable: resumable === false || resumeable === false ? false : true,
-      speedLimit: this.globalSpeedLimit || 0,
+      // NOTE: no speedLimit here — the global bucket is injected via deps
+      // below. Passing this.globalSpeedLimit as the per-task rate too made
+      // BOTH buckets charge every chunk, halving the effective limit.
       checksum: checksum || undefined,
       resumeOffsets: resumeOffsets || null,
+      resumeSegments: Array.isArray(resumeSegments) ? resumeSegments : null,
       // Use the robust http/https transport (DoH fallback + insecure-TLS retry)
       // instead of Node's built-in fetch, which uses undici's stricter TLS/DNS.
-      fetch: robustFetch,
+      // When the HTTP/2 setting is on, ranged streams ride one multiplexed h2
+      // session per origin (falling back to HTTP/1.1 when ALPN refuses h2).
+      fetch: this.engineHttp2 ? makeH2AwareFetch(robustFetch) : robustFetch,
     };
 
-    const task = new DownloadTask(taskOptions, { globalLimiter: this.globalLimiter });
+    const task = new DownloadTask(taskOptions, { globalLimiter: this.globalLimiter, hostGate: this.hostGate });
     this.activeTasks.set(id, task);
 
     const startTime = Date.now();
@@ -903,7 +957,40 @@ class DownloadEngine extends EventEmitter {
     }
   }
 
+  /**
+   * _probeFile with a bounded retry on transient answers.
+   *
+   * The manager's row-creation probe had no retry: one 429 (Google rate-limits
+   * authenticated attachment fetches hard) or one 503 from a cold edge
+   * surfaced as a dead row before the transfer — which does have a retry
+   * policy — ever started. Only statuses the engine already classifies as
+   * retryable are retried; 400/401/403/404 stay fast so the existing
+   * plain-GET fallback and dead-link guards still run immediately.
+   */
   async _probeFile(url, extraHeaders = {}, redirectCount = 0, jar = null) {
+    const attempts = 3;
+    let last = null;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      let res;
+      try {
+        res = await this._probeFileOnce(url, extraHeaders, redirectCount, jar);
+      } catch (e) {
+        // Network/TLS faults are worth one more try; "Too many redirects" is not.
+        if (attempt === attempts || /Too many redirects|Invalid URL|Unsupported protocol/i.test(String(e && e.message))) throw e;
+        await sleep(300 * Math.pow(2, attempt - 1));
+        continue;
+      }
+      if (res && typeof res.status === 'number' && isRetryableStatus(res.status) && attempt < attempts) {
+        last = res;
+        await sleep(300 * Math.pow(2, attempt - 1));
+        continue;
+      }
+      return res;
+    }
+    return last;
+  }
+
+  async _probeFileOnce(url, extraHeaders = {}, redirectCount = 0, jar = null) {
     if (redirectCount > 5) throw new Error('Too many redirects');
     jar = jar || { cookies: '' };
     const headers = jarHeader(jar, { ...extraHeaders });
@@ -924,14 +1011,14 @@ class DownloadEngine extends EventEmitter {
     }
     if (head) {
       const loc = redirectTo(head);
-      if (loc) { await head.destroy(); return this._probeFile(loc, extraHeaders, redirectCount + 1, jar); }
+      if (loc) { await head.destroy(); return this._probeFileOnce(loc, extraHeaders, redirectCount + 1, jar); }
     }
-    if (!head || head.status === 405 || head.status === 403 || head.status === 501 || head.status === 401) {
+    if (!head || head.status === 405 || head.status === 403 || head.status === 501 || head.status === 401 || head.status === 400) {
       if (head) await head.destroy();
       head = await this._openRequestAuto(url, { method: 'GET', headers: { ...headers, Range: 'bytes=0-0' } });
       jarNote(jar, head.headers);
       const loc = redirectTo(head);
-      if (loc) { await head.destroy(); return this._probeFile(loc, extraHeaders, redirectCount + 1, jar); }
+      if (loc) { await head.destroy(); return this._probeFileOnce(loc, extraHeaders, redirectCount + 1, jar); }
     }
 
     const contentType = head.headers['content-type'] || '';
@@ -947,7 +1034,7 @@ class DownloadEngine extends EventEmitter {
       if (loc) {
         await rangeProbe.destroy();
         await head.destroy();
-        return this._probeFile(loc, extraHeaders, redirectCount + 1, jar);
+        return this._probeFileOnce(loc, extraHeaders, redirectCount + 1, jar);
       }
       if (rangeProbe.status === 206) {
         supportsRange = true;
@@ -966,12 +1053,12 @@ class DownloadEngine extends EventEmitter {
     }
 
     // Plain-GET fallback: some tube/CDN hosts (WAF, mod_security, hotlink
-    // rules) reject HEAD and Range probes with 401/403 yet serve a plain
+    // rules) reject HEAD and Range probes with 401/403/400 yet serve a plain
     // browser-style GET just fine — a native browser download IS a plain GET,
     // so try one (headers only, body destroyed unread) before reporting the
     // URL as refused. Success means single-connection, Range-free download.
-    const probesBlocked = (head.status === 401 || head.status === 403) &&
-      (!rangeProbe || rangeProbe.status === 401 || rangeProbe.status === 403);
+    const probesBlocked = (head.status === 400 || head.status === 401 || head.status === 403) &&
+      (!rangeProbe || rangeProbe.status === 400 || rangeProbe.status === 401 || rangeProbe.status === 403);
     if (probesBlocked) {
       let plain = null;
       try {
@@ -1490,6 +1577,14 @@ class DownloadEngine extends EventEmitter {
       let liveDone = false;
       let firstError = null;
 
+      // One dead segment means the stream can never complete: stop every
+      // sibling fetch NOW. Otherwise the remaining workers kept downloading
+      // the whole playlist into `pending`, which flush() can never drain
+      // past the missing index — unbounded RAM on long VOD streams.
+      const abortSiblings = () => {
+        for (const r of hlsReqs) { try { r.destroy(); } catch (e) {} }
+      };
+
       const flush = () => {
         while (pending.has(writeIdx)) {
           const item = pending.get(writeIdx);
@@ -1528,7 +1623,7 @@ class DownloadEngine extends EventEmitter {
 
       const worker = async () => {
         for (;;) {
-          if (genDead() || liveDone) return;
+          if (genDead() || liveDone || firstError) return;
           if (nextIndex >= queue.length) {
             if (!isLive) return;
             await sleep(250);
@@ -1539,7 +1634,7 @@ class DownloadEngine extends EventEmitter {
           let buf = null;
           let lastErr = null;
           for (let attempt = 0; attempt < 3; attempt++) {
-            if (genDead() || liveDone) return;
+            if (genDead() || liveDone || firstError) return;
             try {
               const segHeaders = seg.range
                 ? { ...headers, Range: `bytes=${seg.range.offset}-${seg.range.offset + seg.range.length - 1}` }
@@ -1562,12 +1657,13 @@ class DownloadEngine extends EventEmitter {
               break;
             } catch (err) {
               lastErr = err;
-              if (stopped()) return;
+              if (stopped() || firstError) return;
               await sleep(700 * (attempt + 1));
             }
           }
           if (!buf) {
             firstError = firstError || new Error(`Segment ${idx + 1} failed: ${lastErr ? lastErr.message : 'unknown error'}`);
+            abortSiblings();
             return;
           }
           let keyEntry = null;
@@ -1575,6 +1671,7 @@ class DownloadEngine extends EventEmitter {
             keyEntry = await getKey(seg.key);
           } catch (e) {
             firstError = firstError || e;
+            abortSiblings();
             return;
           }
           pending.set(idx, { buf, key: keyEntry, seq: seg.seq });
@@ -1582,6 +1679,7 @@ class DownloadEngine extends EventEmitter {
             flush();
           } catch (e) {
             firstError = firstError || e;
+            abortSiblings();
             return;
           }
         }
@@ -1627,9 +1725,15 @@ class DownloadEngine extends EventEmitter {
       liveDone = true;
       if (refresher) { try { await refresher; } catch (e) {} }
 
-      // Superseded run (cancel/pause/start raced): never close, emit, or
-      // touch the file — the current generation owns it now.
-      if (genDead()) return;
+      // Superseded run (cancel/pause/start raced): never emit or write into
+      // the file — the current generation owns its contents now. The fd is
+      // still ours though (every generation opens its own): leaking it kept
+      // the file locked on Windows, so a cancel could not delete it.
+      if (genDead()) {
+        try { fs.closeSync(fd); } catch (e) {}
+        fd = null;
+        return;
+      }
       try { fs.closeSync(fd); } catch (e) {}
       fd = null;
 
@@ -1854,7 +1958,6 @@ module.exports = {
   pickHlsVariant,
   hlsVariantAudioScore,
   parseHlsMedia,
-  parseHlsKey,
   parseKeyAttrs,
   parseHlsMediaSequence,
   sumHlsDuration,

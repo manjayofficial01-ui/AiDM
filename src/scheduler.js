@@ -259,6 +259,7 @@ class Scheduler extends EventEmitter {
     this._firedStart = new Set(); // `${id}@${minuteKey}` — no refire within a run
     this._firedStop = new Set();
     this._firedOnceIds = new Set(); // one-shot ids already started this run
+    this._lastFiredAt = new Map();  // id → epoch ms of the run's actual start
   }
 
   configure(settings) {
@@ -295,19 +296,24 @@ class Scheduler extends EventEmitter {
         if (!this._firedStart.has(fk) && !onceDone) {
           this._firedStart.add(fk);
           if (s.type === 'once') this._firedOnceIds.add(String(s.id));
+          this._lastFiredAt.set(String(s.id), firing.getTime());
           this.emit('schedule-start', { schedule: s, at: new Date(at.getTime()) });
         }
       }
 
-      // Stop: fixed offset after the firing minute. Fires on any tick at or
-      // after the stop time (keyed by the firing minute) — with the old
-      // "stop minute must equal the tick minute" rule, a missed minute
-      // (sleep, app busy) meant the scheduled stop NEVER fired.
+      // Stop: fixed offset after the run's ACTUAL start. Anchoring on
+      // firesAtMinute (today's occurrence) meant a 23:30+60min run never
+      // stopped: after midnight "today's" firing jumped ~24h into the
+      // future. Fall back to today's firing only when the start tick was
+      // missed (e.g. app restarted mid-run) and it lies in the past.
       const stopAfter = Number(s.stopAfterMinutes);
-      if (firing && Number.isFinite(stopAfter) && stopAfter > 0) {
-        const stopAt = firing.getTime() + stopAfter * 60000;
-        if (at.getTime() >= stopAt) {
-          const sk = `${s.id}@${minuteKey(firing)}`;
+      if (Number.isFinite(stopAfter) && stopAfter > 0) {
+        let firedMs = this._lastFiredAt.get(String(s.id));
+        if (firedMs == null && firing && firing.getTime() <= at.getTime()) {
+          firedMs = firing.getTime();
+        }
+        if (firedMs != null && at.getTime() >= firedMs + stopAfter * 60000) {
+          const sk = `${s.id}@${minuteKey(new Date(firedMs))}`;
           if (!this._firedStop.has(sk)) {
             this._firedStop.add(sk);
             this.emit('schedule-stop', { schedule: s, at: new Date(at.getTime()) });
@@ -320,8 +326,11 @@ class Scheduler extends EventEmitter {
 
   /** Fired-key sets grow one entry per schedule per run — prune old ones. */
   _pruneFired(at) {
-    if (this._firedStart.size < 512 && this._firedStop.size < 512) return;
     const cutoff = at.getTime() - 2 * 24 * 60 * 60 * 1000;
+    for (const [id, ms] of this._lastFiredAt) {
+      if (ms < cutoff) this._lastFiredAt.delete(id);
+    }
+    if (this._firedStart.size < 512 && this._firedStop.size < 512) return;
     const keepRecent = (set) => {
       for (const k of set) {
         // Keys are `${id}@${Y-M-D-H-M}` — parse the minute back out.

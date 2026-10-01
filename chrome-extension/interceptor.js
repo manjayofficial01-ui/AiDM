@@ -25,6 +25,13 @@
       if (location.href === interceptorPageUrl) return;
       interceptorPageUrl = location.href;
       sentUrls.clear();
+      // Tell the ISOLATED content script: its own history patch runs in a
+      // different realm and can miss page-context navigations, so its
+      // per-page caches (detectedVideos, blob maps, …) are cleared on this
+      // signal ('spa-nav' branch in content.js's window message handler).
+      postToContentScript('spa-nav', {});
+      // A new page loads new media — restart the idle-stopped perf sweeps.
+      startPerfSweeps();
     } catch (e) { /* ignore */ }
   }
   try {
@@ -455,7 +462,6 @@
     if (url && looksLikeMedia(url)) {
       notifyUrl(url, { via: 'fetch' });
     }
-    // Twitter: try to upgrade an HLS playlist to a direct MP4.
 
     const result = origFetch.apply(this, arguments);
 
@@ -634,15 +640,39 @@
   // When any video starts playing, try to extract player sources
   document.addEventListener('playing', () => {
     try {
+      // Media activity again — resume the idle-stopped periodic sweeps.
+      startPerfSweeps();
       const sources = extractPlayerSources();
       sources.forEach(s => notifyUrl(s.url, { via: s.via }));
     } catch (e) { /* swallow */ }
   }, true);
 
   // Sweep periodically so media that loaded before our hooks were installed,
-  // or via a path we don't patch, still gets picked up.
+  // or via a path we don't patch, still gets picked up. On idle pages the
+  // 3s sweep used to poll the performance timeline forever; stop it after
+  // ~10 consecutive passes with nothing new and resume on any media event
+  // ('playing' above) or SPA navigation (onSpaNavigation).
+  let perfSweepTimer = null;
+  let perfSweepIdlePasses = 0;
+  const PERF_SWEEP_IDLE_MAX = 10;
+  function startPerfSweeps() {
+    perfSweepIdlePasses = 0;
+    if (perfSweepTimer != null) return;
+    try {
+      perfSweepTimer = setInterval(() => {
+        const before = sentUrls.size;
+        scanPerformanceResources();
+        if (sentUrls.size > before) {
+          perfSweepIdlePasses = 0;
+        } else if (++perfSweepIdlePasses >= PERF_SWEEP_IDLE_MAX) {
+          clearInterval(perfSweepTimer);
+          perfSweepTimer = null;
+        }
+      }, 3000);
+    } catch (e) { perfSweepTimer = null; }
+  }
   try {
-    setInterval(scanPerformanceResources, 3000);
+    startPerfSweeps();
     setTimeout(scanPerformanceResources, 1500);
   } catch (e) { /* swallow */ }
 })();

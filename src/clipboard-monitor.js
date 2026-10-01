@@ -36,6 +36,9 @@ class ClipboardMonitor extends EventEmitter {
       /fb\.watch\//i,
       /(?:www\.)?instagram\.com\/(?:reel|p|tv)\//i,
       /(?:www\.|mobile\.)?(?:twitter\.com|x\.com)\/(?:i\/web\/)?(?:[^/]+\/)?status(?:es)?\/\d{5,25}/i,
+      // Torrent / magnet — the WebTorrent engine picks these up.
+      /^magnet:\?xt=urn:(?:btih|btmh)/i,
+      /\.torrent(\?|#|$)/i,
     ];
   }
 
@@ -127,10 +130,10 @@ class ClipboardMonitor extends EventEmitter {
   }
 
   _isDownloadUrl(text) {
-    // Must be a valid URL
+    // Must be a valid URL (magnet: included — the torrent engine handles it)
     try {
       const url = new URL(text.trim());
-      if (!['http:', 'https:', 'ftp:'].includes(url.protocol)) return false;
+      if (!['http:', 'https:', 'ftp:', 'magnet:'].includes(url.protocol)) return false;
     } catch {
       return false;
     }

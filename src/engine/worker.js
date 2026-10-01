@@ -114,7 +114,14 @@ async function runSegmentWorker(segment, mirror, ctx) {
       const value = result.value;
       if (!value || value.byteLength === 0) continue;
 
-      for (const limiter of ctx.limiters) await limiter.acquire(value.byteLength);
+      for (const limiter of ctx.limiters) {
+        try {
+          await limiter.acquire(value.byteLength, signal);
+        } catch (err) {
+          if (signal.aborted) throw abortError(signal);
+          throw err;
+        }
+      }
       if (signal.aborted) break;
 
       const position = segment.position;
@@ -158,11 +165,18 @@ async function runSegmentWorker(segment, mirror, ctx) {
 
     // The stream said "end". If that is fewer bytes than the server promised
     // (or than the segment asked for) the file would be silently short, so
-    // treat it as a failed attempt rather than a finished segment.
-    if (promisedBytes !== null && bytes !== promisedBytes) {
+    // treat it as a failed attempt rather than a finished segment. A split
+    // may have shrunk segment.end mid-flight — the write loop caps at the
+    // CURRENT end, so re-evaluate the promise against it; comparing against
+    // the response-time value reported a bogus "Incomplete response" and the
+    // retry then sent an inverted Range (416 → full restart).
+    const expectedBytes = promisedBytes === null || segment.isOpenEnded
+      ? promisedBytes
+      : Math.min(promisedBytes, segment.end - from + 1);
+    if (expectedBytes !== null && bytes !== expectedBytes) {
       throw new DownloadError(
         'NETWORK',
-        `Incomplete response: expected ${promisedBytes} bytes, received ${bytes}`,
+        `Incomplete response: expected ${expectedBytes} bytes, received ${bytes}`,
         { retryable: true },
       );
     }
@@ -191,6 +205,26 @@ async function runSegmentWorker(segment, mirror, ctx) {
  */
 function inspectResponse(res, segment, from, sentIfRange, ctx) {
   const retryAfterMs = parseRetryAfter(res.headers.get('retry-after'));
+
+  // Every request this engine makes asks for `Accept-Encoding: identity`:
+  // a compressed body has no usable byte-range semantics and would break
+  // checksum verification. A server that compresses ANYWAY is sending bytes
+  // that cannot be written — the old behavior saved them raw and produced a
+  // file that looked complete (100%, correct-ish size) but would not open.
+  // Loud failure beats a silently corrupt download.
+  if (res.status === 200 || res.status === 206) {
+    const encoding = String(res.headers.get('content-encoding') || '').trim().toLowerCase();
+    if (encoding && encoding !== 'identity') {
+      throw new DownloadError(
+        'UNSUPPORTED_ENCODING',
+        `Server compressed the response (${encoding}) although identity was requested — ` +
+        'saving it would write an unreadable file. Download this one from your browser.',
+        { retryable: false, status: res.status },
+      );
+    }
+  }
+
+
   // Cap at what this segment actually wants: a server may legitimately
   // answer with a wider range than requested, and we stop reading at our end.
   const wanted = segment.isOpenEnded ? null : segment.end - from + 1;
@@ -237,8 +271,21 @@ function inspectResponse(res, segment, from, sentIfRange, ctx) {
       }
       return cap(len);
     }
+    // Judge the entity on the validator we ACTUALLY sent (worker.js:73 uses
+    // `etag ?? lastModified`). The old code only ever compared ETags, so a
+    // host with no ETag — where If-Range carried Last-Modified — answered a
+    // 200 with no ETag, `sameEntity` came out false, and a perfectly good
+    // partial download was thrown away by a RESOURCE_CHANGED full restart.
+    // Absent evidence is not evidence of change: only a *mismatching*
+    // Last-Modified proves the file moved.
     const etag = res.headers.get('etag');
-    const sameEntity = etag !== null && ctx.info.etag !== null && etag === ctx.info.etag;
+    const lastModified = res.headers.get('last-modified');
+    let sameEntity;
+    if (ctx.info.etag) {
+      sameEntity = etag !== null && etag === ctx.info.etag;
+    } else {
+      sameEntity = lastModified === null || lastModified === ctx.info.lastModified;
+    }
     const acceptRanges = res.headers.get('accept-ranges');
     if (sentIfRange && !sameEntity && acceptRanges !== 'none') {
       throw new DownloadError('RESOURCE_CHANGED', 'Remote file changed (If-Range precondition failed)');

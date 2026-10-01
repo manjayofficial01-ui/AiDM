@@ -42,6 +42,16 @@ function classifyHttpStatus(status, retryAfterMs) {
   return new DownloadError('HTTP', `Server responded with HTTP ${status}`, { retryable, status, retryAfterMs });
 }
 
+/**
+ * Statuses worth re-probing. A probe is the very first request a task makes;
+ * before this existed a single 429/500/503 during probe was terminal — the
+ * task never got to use the retry machinery that protects the transfer itself.
+ * @param {number} status
+ */
+function isRetryableStatus(status) {
+  return RETRYABLE_STATUSES.has(status) || (status >= 500 && !PERMANENT_STATUSES.has(status));
+}
+
 const TIMEOUT_CODES = new Set([
   'ETIMEDOUT',
   'UND_ERR_CONNECT_TIMEOUT',
@@ -98,4 +108,7 @@ module.exports = {
   DownloadError,
   classifyHttpStatus,
   toDownloadError,
+  isRetryableStatus,
+  RETRYABLE_STATUSES,
+  PERMANENT_STATUSES,
 };

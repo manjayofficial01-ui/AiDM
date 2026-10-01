@@ -24,6 +24,7 @@ const JEVI_ENDPOINT = 'https://api.typesafe.ai/v1/systemone';
 const JEVI_MODEL = 'jev-latest';
 const DEFAULT_TIMEOUT_MS = 4000;
 const CACHE_TTL_MS = 10 * 60 * 1000;
+const CACHE_MAX_ENTRIES = 500;
 const BREAKER_THRESHOLD = 3;        // consecutive failures before opening
 const BREAKER_COOLDOWN_MS = 5 * 60 * 1000;
 
@@ -99,6 +100,20 @@ async function ask(state, questions, opts = {}) {
       const answers = data && data.answers;
       if (!answers || typeof answers !== 'object') throw new Error('Jev: bad response shape');
       consecutiveFailures = 0; // success closes the breaker
+      // Evict expired entries and cap total size — the cache had a TTL but
+      // never pruned, so a long session with clipboard/extension churn grew
+      // the Map without bound.
+      if (cache.size >= CACHE_MAX_ENTRIES) {
+        const now = Date.now();
+        for (const [k, v] of cache) {
+          if (v.expiresAt <= now) cache.delete(k);
+        }
+        while (cache.size >= CACHE_MAX_ENTRIES) {
+          const oldest = cache.keys().next();
+          if (oldest.done) break;
+          cache.delete(oldest.value);
+        }
+      }
       cache.set(key, { answers, expiresAt: Date.now() + CACHE_TTL_MS });
       return answers;
     } catch (e) {

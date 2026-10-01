@@ -1,8 +1,5 @@
 // @ts-check
 const { EventEmitter } = require('events');
-const { readdir } = require('fs/promises');
-const { join } = require('path');
-const { loadControlFile } = require('./control-file');
 const { TokenBucket } = require('./rate-limiter');
 const { DownloadTask } = require('./task');
 const { clamp } = require('./utils');
@@ -10,6 +7,15 @@ const { clamp } = require('./utils');
 /**
  * Multi-download coordinator: bounded concurrency queue, shared global bandwidth bucket,
  * and crash recovery by re-hydrating tasks from `.part.meta` control files.
+ *
+ * IMPORTANT — this class is only half-live. `DownloadEngine` constructs it and
+ * calls `setGlobalSpeedLimit()` / reads `globalSpeedLimit`, but it builds its
+ * own `new DownloadTask(...)` (download-engine.js) instead of `coordinator.add()`,
+ * and concurrency is owned by `DownloadManager` (maxConcurrentDownloads). So
+ * `this.tasks` stays empty and every method below that walks it is a facade
+ * nothing drives. The dead ones (restoreDirectory, restore, setMaxConcurrent-
+ * Downloads, activeCount, queuedCount, pauseAll, resumeAll) were removed
+ * 2026-10-01 rather than left as traps for the next reader.
  */
 class DownloadEngineCoordinator extends EventEmitter {
   /**
@@ -104,18 +110,6 @@ class DownloadEngineCoordinator extends EventEmitter {
     this.emit('removed', task);
   }
 
-  async pauseAll() {
-    this.paused = true;
-    await Promise.all(this.list().map((t) => t.pause()));
-  }
-
-  resumeAll() {
-    this.paused = false;
-    for (const task of this.tasks.values()) {
-      if (task.state === 'paused' || task.state === 'queued' || task.state === 'failed') this.resume(task.id);
-    }
-  }
-
   // ---------------------------------------------------------------- global controls
 
   /**
@@ -129,59 +123,8 @@ class DownloadEngineCoordinator extends EventEmitter {
     return this.globalLimiter.bytesPerSecond;
   }
 
-  /**
-   * @param {number} n
-   */
-  setMaxConcurrentDownloads(n) {
-    this.maxConcurrent = clamp(Math.floor(n), 1, 100);
-    this.schedule();
-  }
-
   get maxConcurrentDownloads() {
     return this.maxConcurrent;
-  }
-
-  get activeCount() {
-    return this.running.size;
-  }
-
-  get queuedCount() {
-    return this.queue.length;
-  }
-
-  // ---------------------------------------------------------------- crash recovery
-
-  /**
-   * Re-create a task from a `.part.meta` control file.
-   * @param {string} controlFilePath
-   * @param {any} [overrides]
-   * @returns {Promise<DownloadTask | null>}
-   */
-  async restore(controlFilePath, overrides = {}) {
-    const data = await loadControlFile(controlFilePath);
-    if (!data || this.tasks.has(data.id)) return null;
-    return this.add({ ...data.options, ...overrides, id: data.id, filename: data.filename });
-  }
-
-  /**
-   * Scan a directory for unfinished downloads and restore them all.
-   * @param {string} directory
-   * @returns {Promise<DownloadTask[]>}
-   */
-  async restoreDirectory(directory) {
-    let entries;
-    try {
-      entries = await readdir(directory);
-    } catch {
-      return [];
-    }
-    const restored = [];
-    for (const entry of entries) {
-      if (!entry.endsWith('.part.meta')) continue;
-      const task = await this.restore(join(directory, entry));
-      if (task) restored.push(task);
-    }
-    return restored;
   }
 
   // ---------------------------------------------------------------- internals
