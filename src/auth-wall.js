@@ -124,6 +124,36 @@ function looksLikeAuthWall(meta) {
 }
 
 /**
+ * True when the head of a downloaded file is an HTML document. Used at
+ * COMPLETION time: a request that looked like a file download but was
+ * answered with a sign-in/consent page (Google 302s to accounts.google.com
+ * and serves 200 HTML) used to be written to disk under the binary name -
+ * a green "completed" row holding a login page. Probe-time guards cannot
+ * catch that for single-use-token rows (their probe is skipped on purpose),
+ * so the finished file itself is sniffed.
+ *
+ * Only unambiguous HTML openers match (`<!doctype html`, `<html`, `<head`,
+ * `<body`), case-insensitively, after a BOM/whitespace skip. Real binaries
+ * never start with `<`: PDF is `%PDF-`, Office/zip is `PK`, JPEG is
+ * `FF D8 FF`, PNG is the 8-byte signature, MP4 has a `ftyp` box at offset 4.
+ * SVG/XML text files are deliberately NOT matched (and are not in
+ * BINARY_EXTENSIONS) - an XML chart legitimately starts with `<?xml`.
+ *
+ * @param {Buffer|Uint8Array} head first bytes of the file (<= a few KB)
+ * @returns {boolean}
+ */
+function looksLikeHtmlHead(head) {
+  if (!head || head.length < 4) return false;
+  let i = 0;
+  // UTF-8 / UTF-16 BOMs.
+  if (head[0] === 0xef && head[1] === 0xbb && head[2] === 0xbf) i = 3;
+  else if ((head[0] === 0xff && head[1] === 0xfe) || (head[0] === 0xfe && head[1] === 0xff)) i = 2;
+  while (i < head.length && (head[i] === 0x20 || head[i] === 0x09 || head[i] === 0x0a || head[i] === 0x0d)) i++;
+  if (head[i] !== 0x3c /* '<' */) return false;
+  const text = Buffer.from(head.buffer, head.byteOffset + i, head.length - i).toString('latin1').toLowerCase();
+  return /^<(!doctype\s+html|html[\s>]|head[\s>]|body[\s>])/.test(text);
+}
+/**
  * Friendly, actionable message for a row that hit an auth wall.
  * Extracted pure so it is regression-testable.
  */
@@ -136,6 +166,7 @@ function sessionExpiredMessage() {
 
 module.exports = {
   looksLikeAuthWall,
+  looksLikeHtmlHead,
   sessionExpiredMessage,
   extensionOfUrl,
   extensionOfFilename,

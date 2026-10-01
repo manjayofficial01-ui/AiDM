@@ -8,8 +8,8 @@ const { DEFAULT_INTERCEPT_TYPES } = require('./scheduler');
 const { muxAudioVideo, isAvailable: ffmpegAvailable, facebookMediaHeaders } = require('./media-mux');
 const ytdlp = require('./yt-dlp');
 const youtubeResolver = require('./youtube-resolver');
-const { sanitizeEntryUrl, entryUrlWasRepaired, isSingleUseTokenUrl } = require('./url-hygiene');
-const { looksLikeAuthWall, sessionExpiredMessage } = require('./auth-wall');
+const { sanitizeEntryUrl, entryUrlWasRepaired, isSingleUseTokenUrl, isGmailAttachmentEntryUrl } = require('./url-hygiene');
+const { looksLikeAuthWall, looksLikeHtmlHead, sessionExpiredMessage, extensionOfFilename, BINARY_EXTENSIONS } = require('./auth-wall');
 const googleDrive = require('./google-drive-resolver');
 const { TorrentEngine, isTorrentUrl, magnetDisplayName } = require('./torrent-engine');
 
@@ -660,6 +660,13 @@ class DownloadManager extends EventEmitter {
 
     this.engine.on('download-complete', (data) => {
       const dl = this.downloads.get(data.id);
+      // Completion-time auth-wall guard (see _guardSavedFile): rows that skip
+      // the probe (Gmail/Drive single-use tokens) never got the probe-time
+      // check, so a sign-in page saved as the PDF must be caught HERE.
+      if (dl && this._guardSavedFile(dl, data.filepath || dl.filepath)) {
+        this._processQueue();
+        return;
+      }
       if (dl) {
         dl.status = 'completed';
         dl.completedAt = Date.now();
@@ -907,9 +914,10 @@ class DownloadManager extends EventEmitter {
       category: finalCategory,
       savePath: finalSavePath,
       filepath: finalPath,
-      segments: transport.singleConnection ? 1 : (segments || this.settings.defaultSegments),
-      singleConnection: transport.singleConnection,
-      resumable: transport.resumable,
+      segments: (isSingleUseTokenUrl(url) || isGmailAttachmentEntryUrl(url)) ? 1 : (transport.singleConnection ? 1 : (segments || this.settings.defaultSegments)),
+      singleConnection: (isSingleUseTokenUrl(url) || isGmailAttachmentEntryUrl(url)) ? true : transport.singleConnection,
+      resumable: (isSingleUseTokenUrl(url) || isGmailAttachmentEntryUrl(url)) ? false : transport.resumable,
+      skipProbe: (isSingleUseTokenUrl(url) || isGmailAttachmentEntryUrl(url)) ? true : false,
       mirrors: Array.isArray(mirrors) ? mirrors : [],
       checksum: checksum || null,
       status: 'queued',
@@ -1347,6 +1355,45 @@ class DownloadManager extends EventEmitter {
    * when a paired audio track is available. Fire-and-forget by design — a
    * probe or a mux can never fail (or delay) a completed download.
    */
+  /**
+   * Completion-time auth-wall guard. Single-use-token rows (Gmail/Drive
+   * attachments) skip the network probe ON PURPOSE - exactly one plain GET
+   * may touch the URL - so the probe-time looksLikeAuthWall check never ran
+   * for them. When Google cannot authenticate that one GET it 302s to
+   * accounts.google.com and serves 200 HTML, which used to be written to
+   * disk as "invoice.pdf": a green completed row holding a login page,
+   * silently. Sniff the finished file instead: a binary-extension file whose
+   * head is an HTML document is deleted and the row failed with the
+   * actionable session message. Returns true when the row was failed.
+   */
+  _guardSavedFile(dl, filepath) {
+    try {
+      if (!dl || !filepath || !fs.existsSync(filepath)) return false;
+      // Only extensions that must never be HTML. A text/csv/svg/xml file can
+      // legitimately look like markup - flagging those would delete real data.
+      const ext = extensionOfFilename(dl.filename || '') ||
+        extensionOfFilename(path.basename(String(filepath)));
+      if (!ext || !BINARY_EXTENSIONS.has(ext)) return false;
+      const fd = fs.openSync(filepath, 'r');
+      let head;
+      try {
+        const buf = Buffer.alloc(512);
+        const read = fs.readSync(fd, buf, 0, 512, 0);
+        head = buf.subarray(0, read);
+      } finally {
+        try { fs.closeSync(fd); } catch (e) { /* already closed */ }
+      }
+      if (!looksLikeHtmlHead(head)) return false;
+      // Confirmed: a sign-in/consent page was saved under the file's name.
+      try { fs.rmSync(filepath, { force: true }); } catch (e) { /* leave it */ }
+      dl.status = 'error';
+      dl.error = sessionExpiredMessage();
+      dl.needsSession = true;
+      this._persistDownloads(true);
+      this.emit('download-error', { id: dl.id, error: dl.error });
+      return true;
+    } catch (e) { /* the guard must never break the completion path */ return false; }
+  }
   _finishRow(dl) {
     try {
       if (!dl || !this.downloads.has(dl.id)) return;
@@ -2467,7 +2514,12 @@ class DownloadManager extends EventEmitter {
     // network probe entirely and let the engine fetch the file in ONE plain
     // connection. The browser (extension intercept) already supplied the real
     // filename; total size is learned live from the response stream.
-    if (!download._nameResolved && isSingleUseTokenUrl(download.url)) {
+    //
+    // Gmail's mail.google.com/mail attachment endpoint joins the same path:
+    // it is the REUSABLE entry point (each request mints a fresh one-shot
+    // redirect target), so it must likewise never be multi-probed — one plain
+    // GET that follows the redirect internally, with cookies + Referer.
+    if (!download._nameResolved && (isSingleUseTokenUrl(download.url) || isGmailAttachmentEntryUrl(download.url))) {
       download.singleConnection = true;
       download.resumable = false;
       // The engine's DownloadTask runs its OWN Range probe in prepare(); that

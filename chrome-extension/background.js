@@ -883,7 +883,16 @@ function normalizeSentUrl(u) {
  * `cookies.getAll({domain: cdnHost})` therefore misses the session cookie and
  * the desktop engine gets 403'd. We match by URL (the way the browser does it)
  * AND walk every parent label down to the registrable domain.
+ *
+ * For major multi-service platforms (Google, Microsoft, Facebook, etc.),
+ * querying `cookies.getAll({domain: 'google.com'})` dumps hundreds of
+ * unrelated cookies across all services and profiles (10KB–30KB+), triggering
+ * HTTP 400 Bad Request from Google Front End (GFE) due to header size limits
+ * and conflicting multi-account (/u/0/ vs /u/1/) session IDs. For these,
+ * `cookies.getAll({ url })` matches the exact URL and account context cleanly.
  */
+const BROAD_DOMAIN_COOKIE_SKIP_RE = /(^|\.)(google\.[a-z.]+|googleusercontent\.com|googleapis\.com|youtube\.com|facebook\.com|fbcdn\.net|instagram\.com|twitter\.com|x\.com|github\.com|microsoft\.com|live\.com|apple\.com|amazon\.com|cloudflare\.com)$/i;
+
 async function collectCookies(hosts) {
   const cookieSet = new Set();
   try {
@@ -897,8 +906,12 @@ async function collectCookies(hosts) {
     for (const h of hosts) {
       try {
         const host = h.startsWith('http') ? new URL(h).hostname : h;
+        if (BROAD_DOMAIN_COOKIE_SKIP_RE.test(host)) continue;
         const parts = host.split('.');
-        for (let i = 0; i < parts.length - 1; i++) domains.add(parts.slice(i).join('.'));
+        for (let i = 0; i < parts.length - 1; i++) {
+          const d = parts.slice(i).join('.');
+          if (!BROAD_DOMAIN_COOKIE_SKIP_RE.test(d)) domains.add(d);
+        }
       } catch (e) {}
     }
     for (const d of domains) {
@@ -1032,6 +1045,44 @@ const initReady = (async () => {
   } catch (e) { /* storage unavailable — run with fresh state */ }
 })();
 
+// ── Single-use signed attachment URLs ──────────────────────────────────────
+// Mirrors src/url-hygiene.js isSingleUseTokenUrl/hasSingleUseTokenParam — keep
+// in sync. A Gmail attachment (mail-attachment.googleusercontent.com/…?saddbat)
+// or Drive usercontent download carries a token the FIRST request spends. The
+// capsule liveness probe (probeStreamUrl, below) would otherwise spend it and
+// the desktop's real download 400s ("works in Chrome, 400s in AiDM").
+const SINGLE_USE_TOKEN_HOST_RE = [
+  /^mail-attachment\.googleusercontent\.com$/i,
+  /^mail\.googleusercontent\.com$/i,
+  /^drive\.usercontent\.googleusercontent\.com$/i,
+  /^drive\.usercontent\.google\.com$/i,
+];
+function hasSingleUseTokenParam(u) {
+  if (typeof u !== 'string' || !u) return false;
+  if (/[?&]saddbat=/.test(u)) return true;
+  if (/[?&]realattid=/.test(u) && /[?&]view=att\b/.test(u)) return true;
+  if (/[?&]export=download\b/.test(u) && /[?&]confirm=/.test(u)) return true;
+  return false;
+}
+function isSingleUseTokenUrl(u) {
+  if (typeof u !== 'string' || !u) return false;
+  try {
+    const x = new URL(u);
+    if (!/^https?:$/i.test(x.protocol)) return false;
+    if (SINGLE_USE_TOKEN_HOST_RE.some((re) => re.test(x.hostname))) return true;
+  } catch (e) { /* fall through to param check */ }
+  return hasSingleUseTokenParam(u);
+}
+function isGmailAttachmentEntryUrl(u) {
+  if (typeof u !== 'string' || !u) return false;
+  let x = null;
+  try { x = new URL(u); } catch (e) { return false; }
+  if (!/^https?:$/i.test(x.protocol)) return false;
+  if (!/^mail\.google\.[a-z.]+$/i.test(x.hostname)) return false;
+  if (!/\/mail\b/i.test(x.pathname)) return false;
+  return /[?&]attid=/.test(u) && /[?&]view=att\b/.test(u);
+}
+
 // ── Capsule link liveness probe ──────────────────────────────────────────────
 // Sites like mydaddy.cc / KVS put TIME-LIMITED CDN links on the page. By the
 // time the user clicks Download the link is dead (HTTP 404) and the desktop
@@ -1050,6 +1101,20 @@ async function probeStreamUrl(url, referrer) {
   if (cached && Date.now() - cached.time < PROBE_TTL_MS) return cached.result;
   let result;
   try {
+    // Single-use signed attachment URLs (Gmail / Drive usercontent): ANY extra
+    // request — including this liveness probe — spends the one-shot token, so
+    // the real download that follows 400s. Report UNKNOWN (not dead, no size)
+    // and let the desktop's own single-GET path have the one request. Gmail's
+    // mail.google.com/mail attachment endpoint joins the same rule: it mints
+    // the one-shot target per request, so never probe it either.
+    try {
+      if (isSingleUseTokenUrl(url) || isGmailAttachmentEntryUrl(url)) {
+        result = { status: 0, size: null, alive: null, dead: false };
+        probeCache.set(url, { result, time: Date.now() });
+        if (probeCache.size > 300) probeCache.delete(probeCache.keys().next().value);
+        return result;
+      }
+    } catch (e) { /* classifier must never break probing */ }
     // NOTE: probes are effectively anonymous. Chrome strips the forbidden
     // request headers (Cookie, User-Agent) from fetch() even in an extension
     // context, so setting them here was a no-op pretense — the browser only
@@ -1306,6 +1371,15 @@ async function sendToAiDM(url, filename, opts = {}) {
         try { hosts.add(new URL(url).hostname); } catch (e) {}
         try { hosts.add(ref); } catch (e) {}
         try { if (ref) hosts.add(new URL(ref).hostname); } catch (e) {}
+        const gm = /(?:mail-attachment\.googleusercontent\.com|mail\.google\.[a-z.]+)\/attachment\/u\/(\d+)/i.exec(url);
+        if (gm) {
+          hosts.add(`https://mail.google.com/mail/u/${gm[1]}/`);
+        } else if (/mail-attachment\.googleusercontent\.com/i.test(url) || /mail\.google\.[a-z.]+/i.test(url)) {
+          hosts.add('https://mail.google.com/mail/u/0/');
+        }
+        if (/drive\.(?:usercontent\.)?google\.com/i.test(url)) {
+          hosts.add('https://drive.google.com/');
+        }
         const all = await collectCookies(hosts);
         if (all.length) body.cookies = all.join('; ');
       } catch (e) { /* cookies API unavailable or blocked */ }
@@ -1577,15 +1651,7 @@ function safeRemoveChromeDownload(id) {
 // ==TEST-EXPORT-END==
 
 function interceptDownload(downloadItem, suggest) {
-  // Keep Chrome's copy alive (paused) until AiDM has really accepted the file.
-  let pausedOk = false;
-  try {
-    chrome.downloads.pause(downloadItem.id, () => { pausedOk = !chrome.runtime.lastError; });
-  } catch (e) { /* may already be complete — fall through */ }
-
   const fallBackToChrome = () => {
-    // Give the download back: resume it and let Chrome use its own filename.
-    if (pausedOk) { try { chrome.downloads.resume(downloadItem.id); } catch (e) {} }
     // Bare suggest(): downloadItem.filename is still empty at determination
     // time on most downloads — suggesting it back would blank the name.
     try { suggest(); } catch (e) { /* determination already closed */ }
@@ -1605,7 +1671,24 @@ function interceptDownload(downloadItem, suggest) {
     // (capsule, popup, context menu) bypass this entirely — only automatic
     // interception of native downloads is gated.
     const targetUrl = downloadItem.finalUrl || downloadItem.url;
-    if (!shouldTakeOver(targetUrl, {
+    // Gmail / Drive attachments: prefer the reusable entry point if available.
+    let gmailDriveOverride = null;
+    try {
+      if (isSingleUseTokenUrl(targetUrl) || isGmailAttachmentEntryUrl(targetUrl)) {
+        const originalUrl = downloadItem.url;
+        if (isGmailAttachmentEntryUrl(originalUrl)) {
+          // Reusable: each request mints a fresh redirect target.
+          gmailDriveOverride = originalUrl;
+        } else if (/drive\.usercontent\.google\.com|drive\.google\.com/i.test(originalUrl)) {
+          // Drive direct endpoint — works with session cookies.
+          gmailDriveOverride = originalUrl;
+        } else {
+          // Both AiDM and browser can download; AiDM handles it with skipProbe + singleConnection.
+          gmailDriveOverride = targetUrl;
+        }
+      }
+    } catch (e) { /* classifier must never break interception */ }
+    if (!gmailDriveOverride && !shouldTakeOver(targetUrl, {
       browserIntegration: settings.browserIntegration,
       interceptAll: settings.interceptAll,
       interceptFileTypes: settings.interceptFileTypes,
@@ -1616,7 +1699,7 @@ function interceptDownload(downloadItem, suggest) {
     })) return fallBackToChrome();
 
     const sent = await sendToAiDM(
-      downloadItem.finalUrl || downloadItem.url,
+      gmailDriveOverride || downloadItem.finalUrl || downloadItem.url,
       downloadItem.filename,
       {
         referrer: downloadItem.referrer,
@@ -1627,9 +1710,6 @@ function interceptDownload(downloadItem, suggest) {
 
     if (sent && (sent.sent || sent.duplicate)) {
       // Handoff complete (or already in AiDM) — drop Chrome's own copy.
-      // safeRemoveChromeDownload guards against an already-gone downloadId
-      // (the "Invalid downloadId" unchecked-lastError spam) and checks
-      // lastError in every callback.
       safeRemoveChromeDownload(downloadItem.id);
       try { suggest(); } catch (e) { /* download already gone */ }
       chrome.notifications.create({

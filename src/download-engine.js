@@ -11,6 +11,7 @@ const { agentFor, destroyAgents, setProxyUrl } = require('./engine/agents');
 const { HostGate } = require('./engine/host-gate');
 const { isRetryableStatus } = require('./engine/errors');
 const { makeH2AwareFetch } = require('./engine/http2-fetch');
+const { isSameRegistrableDomain } = require('./url-hygiene');
 
 /** Unref'd sleep — a probe backoff must never keep the Electron loop alive. */
 function sleep(ms) {
@@ -199,7 +200,23 @@ function robustFetch(url, init = {}) {
           }
           try {
             const next = new URL(res.headers.location, url).href;
-            robustFetch(next, { ...init, redirect: 'follow', _jar: jar, _redirectCount: hops }).then(
+            const nextParsed = new URL(next);
+            const isCrossDomain = !isSameRegistrableDomain(parsed.hostname, nextParsed.hostname);
+            let nextHeaders = { ...(init.headers || {}) };
+            if (isCrossDomain) {
+              // RFC 6265 & Fetch spec §4.4: on cross-domain redirect,
+              // strip sensitive credentials (Cookie, Authorization).
+              for (const k of Object.keys(nextHeaders)) {
+                if (/^(cookie|authorization)$/i.test(k)) delete nextHeaders[k];
+              }
+            }
+            robustFetch(next, {
+              ...init,
+              headers: nextHeaders,
+              redirect: 'follow',
+              _jar: isCrossDomain ? { cookies: '' } : jar,
+              _redirectCount: hops,
+            }).then(
               (v) => settle(resolve, v),
               (e) => settle(reject, e),
             );
@@ -1122,7 +1139,18 @@ class DownloadEngine extends EventEmitter {
       try {
         const loc = new URL(r.headers.location, r.url).href;
         await r.destroy();
-        return this._probePlainGet(loc, extraHeaders, redirectCount + 1, jar);
+        const curHost = new URL(r.url).hostname;
+        const nextHost = new URL(loc).hostname;
+        const isCrossDomain = !isSameRegistrableDomain(curHost, nextHost);
+        let nextHeaders = { ...extraHeaders };
+        let nextJar = jar;
+        if (isCrossDomain) {
+          for (const k of Object.keys(nextHeaders)) {
+            if (/^(cookie|authorization)$/i.test(k)) delete nextHeaders[k];
+          }
+          nextJar = { cookies: '' };
+        }
+        return this._probePlainGet(loc, nextHeaders, redirectCount + 1, nextJar);
       } catch (e) { /* malformed Location — return the response as-is */ }
     }
     return r;
@@ -1247,7 +1275,16 @@ class DownloadEngine extends EventEmitter {
           if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirectsLeft > 0) {
             res.resume();
             try {
-              doFetch(new URL(res.headers.location, currentUrl).toString(), redirectsLeft - 1, allowInsecure);
+              const nextLoc = new URL(res.headers.location, currentUrl).toString();
+              const nextHost = new URL(nextLoc).hostname;
+              const isCrossDomain = !isSameRegistrableDomain(parsed.hostname, nextHost);
+              if (isCrossDomain) {
+                for (const k of Object.keys(headers)) {
+                  if (/^(cookie|authorization)$/i.test(k)) delete headers[k];
+                }
+                jar.cookies = '';
+              }
+              doFetch(nextLoc, redirectsLeft - 1, allowInsecure);
             } catch (e) {
               reject(e);
             }

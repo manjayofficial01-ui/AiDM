@@ -25,7 +25,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const { isSingleUseTokenUrl, hasSingleUseTokenParam } = require('../src/url-hygiene');
+const { isSingleUseTokenUrl, isGmailAttachmentEntryUrl, hasSingleUseTokenParam } = require('../src/url-hygiene');
 const { DownloadManager } = require('../src/download-manager');
 const { DownloadEngine } = require('../src/download-engine');
 const { DownloadTask } = require('../src/engine/task');
@@ -58,6 +58,10 @@ function checkCond(name, cond, extra) {
 const GMAIL_SADDBAT = 'https://mail-attachment.googleusercontent.com/attachment/u/7/?ui=2&ik=376495d32f&attid=0.1&permmsgid=msg-f:1877767227827513920&th=1a0f2b5849876a40&view=att&disp=safe&realattid=f_muo771zz0&zw&saddbat=ANGjdJ-abc123';
 const GMAIL_REALATTID = 'https://mail-attachment.googleusercontent.com/attachment/u/0/?ui=2&ik=x&attid=0.1&view=att&realattid=f_abc&zw';
 const DRIVE_USERCONTENT = 'https://drive.usercontent.google.com/download?id=ABC&export=download&confirm=t';
+// Gmail's pre-redirect attachment endpoint: same token family, reusable entry
+// point (each request mints a fresh one-shot redirect target).
+const GMAIL_ENTRY = 'https://mail.google.com/mail/u/0/?ui=2&ik=x&attid=0.1&permmsgid=msg-a&th=abc&view=att&disp=safe&realattid=f_abc&zw';
+const GMAIL_UI = 'https://mail.google.com/mail/u/0/#inbox';
 
 console.log('── 1. isSingleUseTokenUrl classifier ──');
 check('matches Gmail attachment URL with saddbat token', () => {
@@ -68,6 +72,13 @@ check('matches Gmail attachment realattid + view=att', () => {
 });
 check('matches Drive usercontent download endpoint', () => {
   assert.strictEqual(isSingleUseTokenUrl(DRIVE_USERCONTENT), true);
+});
+check('matches Gmail mail.google.com attachment entry (attid + view=att)', () => {
+  assert.strictEqual(isGmailAttachmentEntryUrl(GMAIL_ENTRY), true);
+});
+check('bare Gmail UI is NOT an attachment entry', () => {
+  assert.strictEqual(isGmailAttachmentEntryUrl(GMAIL_UI), false);
+  assert.strictEqual(isGmailAttachmentEntryUrl('https://example.com/a?attid=1&view=att'), false);
 });
 
 const NEGATIVES = [
@@ -147,6 +158,30 @@ check('ordinary URL still probes (path NOT short-circuited)', () => {
     assert.strictEqual(probeCalled, true, 'probeMeta must be invoked for ordinary URLs');
     assert.strictEqual(download.singleConnection, false, 'ordinary url stays multi-connection');
     assert.notStrictEqual(download.skipProbe, true, 'ordinary url must NOT set skipProbe');
+  });
+});
+check('Gmail mail.google.com entry also skips the network probe', () => {
+  let probeCalled = false;
+  const mgr = {
+    emits: [],
+    emit(ev) { this.emits.push(ev); },
+    engine: {
+      probeMeta() {
+        probeCalled = true;
+        throw new Error('probeMeta must NOT be called for Gmail attachment entries');
+      },
+    },
+  };
+  const download = {
+    id: 'dl-ge', url: GMAIL_ENTRY, filename: 'my-invoice.pdf', status: 'downloading',
+    headers: {}, _nameResolved: false, downloaded: 0, isHls: false, isDash: false,
+    singleConnection: false, resumable: true,
+  };
+  return DownloadManager.prototype._resolveFilename.call(mgr, download, {}).then((meta) => {
+    assert.strictEqual(probeCalled, false, 'probeMeta must not be invoked');
+    assert.strictEqual(download.singleConnection, true, 'row forced to single connection');
+    assert.strictEqual(download.skipProbe, true, 'row flagged skipProbe for the engine');
+    assert.ok(meta && meta.singleConnection === true, 'meta carries singleConnection:true');
   });
 });
 
@@ -247,6 +282,22 @@ function makeTokenServer() {
     await new Promise((r) => server.close(r));
   }
 
+  // 6. shipped extension source: single-use token guard routes Gmail/Drive to
+  // AiDM via the reusable entry URL (not the spent finalUrl) with session
+  // cookies, and only falls back to Chrome for truly non-reusable tokens.
+  {
+    const extSource = fs.readFileSync(path.join(__dirname, '..', 'chrome-extension', 'background.js'), 'utf8');
+    check('intercept guard detects single-use token URLs', () => {
+      assert.ok(extSource.includes('isSingleUseTokenUrl(targetUrl) || isGmailAttachmentEntryUrl(targetUrl)'));
+    });
+    check('Gmail entry URLs routed to AiDM via gmailDriveOverride', () => {
+      assert.ok(extSource.includes('gmailDriveOverride'));
+      assert.ok(extSource.includes('isGmailAttachmentEntryUrl(originalUrl)'));
+    });
+    check('extension defines isGmailAttachmentEntryUrl (mirrors url-hygiene)', () => {
+      assert.ok(extSource.includes('function isGmailAttachmentEntryUrl'));
+    });
+  }
   try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (e) {}
   console.log(`\nsingle-use-token: ${pass} passed, ${fail} failed`);
   // Natural loop drain (see test/range-blocked.js): forcing exit in the same

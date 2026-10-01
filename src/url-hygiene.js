@@ -104,10 +104,16 @@ function entryUrlWasRepaired(raw) {
 // Hosts whose download URLs always carry a one-shot signed token.
 const SINGLE_USE_TOKEN_HOST_RE = [
   /^mail-attachment\.googleusercontent\.com$/i,
+  // Gmail's newer attachment host (same one-shot token family).
+  /^mail\.googleusercontent\.com$/i,
   /^drive\.usercontent\.googleusercontent\.com$/i,
+  /^drive\.usercontent\.google\.com$/i,
 ];
 
 // Query-param signatures of one-shot signed attachment URLs on any host.
+// Mirrored into chrome-extension/background.js (isSingleUseTokenUrl) — keep in
+// sync: the extension must skip its liveness probe for the same URLs the
+// desktop downloads with a single GET, or the probe spends the token first.
 function hasSingleUseTokenParam(url) {
   if (typeof url !== 'string' || !url) return false;
   // Gmail attachment: a batchexecute attachment token, or the attachment-id
@@ -117,6 +123,26 @@ function hasSingleUseTokenParam(url) {
   // Google Drive "download" interstitial that carries a confirm token.
   if (/[?&]export=download\b/.test(url) && /[?&]confirm=/.test(url)) return true;
   return false;
+}
+
+/**
+ * True for Gmail's pre-redirect attachment endpoint: mail.google.com/mail with
+ * attid + view=att. Same token family as the mail-attachment.googleusercontent
+ * form, just one hop earlier — and crucially the REUSABLE entry point: every
+ * request mints a fresh one-shot redirect target, so the desktop must start
+ * here (one plain GET that follows the redirect internally), never re-request
+ * an already-spent finalUrl. Narrow on purpose: the bare Gmail UI has no
+ * attid, so ordinary mail pages still probe normally.
+ * @param {unknown} raw
+ */
+function isGmailAttachmentEntryUrl(raw) {
+  if (typeof raw !== 'string' || !raw) return false;
+  let u = null;
+  try { u = new URL(raw); } catch (e) { return false; }
+  if (!/^https?:$/i.test(u.protocol)) return false;
+  if (!/^mail\.google\.[a-z.]+$/i.test(u.hostname)) return false;
+  if (!/\/mail\b/i.test(u.pathname)) return false;
+  return /[?&]attid=/.test(raw) && /[?&]view=att\b/.test(raw);
 }
 
 /**
@@ -141,10 +167,48 @@ function isSingleUseTokenUrl(raw) {
   return hasSingleUseTokenParam(raw);
 }
 
+/**
+ * True when hostA and hostB share the same registrable domain (e.g.
+ * members.example.com and cdn.example.com share example.com).
+ * Used during HTTP redirects to determine whether credentials (Cookie,
+ * Authorization) may be forwarded according to RFC 6265 and Fetch spec §4.4.
+ * Cross-domain hops (such as mail.google.com -> mail-attachment.googleusercontent.com)
+ * return false so foreign or sensitive cookies are never leaked across origins.
+ * @param {string} hostA
+ * @param {string} hostB
+ * @returns {boolean}
+ */
+function isSameRegistrableDomain(hostA, hostB) {
+  if (!hostA || !hostB) return false;
+  const a = String(hostA).toLowerCase().replace(/:\d+$/, '');
+  const b = String(hostB).toLowerCase().replace(/:\d+$/, '');
+  if (a === b) return true;
+  // googleusercontent.com is an isolated sandbox; never consider it same domain as google.com
+  if (/(^|\.)googleusercontent\.com$/i.test(a) !== /(^|\.)googleusercontent\.com$/i.test(b)) {
+    return false;
+  }
+  const partsA = a.split('.');
+  const partsB = b.split('.');
+  if (partsA.length >= 2 && partsB.length >= 2) {
+    const rootA = partsA.slice(-2).join('.');
+    const rootB = partsB.slice(-2).join('.');
+    if (rootA === rootB) {
+      if (/^(co|com|net|org|gov|edu|ac)\.[a-z]{2}$/i.test(rootA)) {
+        if (partsA.length < 3 || partsB.length < 3) return false;
+        return partsA.slice(-3).join('.') === partsB.slice(-3).join('.');
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
 module.exports = {
   sanitizeEntryUrl,
   decodeAmpEntities,
   entryUrlWasRepaired,
   isSingleUseTokenUrl,
+  isGmailAttachmentEntryUrl,
   hasSingleUseTokenParam,
+  isSameRegistrableDomain,
 };

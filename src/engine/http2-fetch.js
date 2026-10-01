@@ -26,6 +26,7 @@
  */
 const http2 = require('http2');
 const { Readable } = require('stream');
+const { isSameRegistrableDomain } = require('../url-hygiene');
 
 class H2NotNegotiatedError extends Error {
   constructor(message) {
@@ -257,7 +258,19 @@ async function h2fetch(url, init = {}, redirectCount = 0) {
         // resolve/reject so the inner request settles THIS promise.
         settled = true;
         const next = new URL(location, url).href;
-        h2fetch(next, init, redirectCount + 1).then(_resolve, _reject);
+        let nextInit = init;
+        try {
+          const curHost = new URL(url).hostname;
+          const nextHost = new URL(next).hostname;
+          if (!isSameRegistrableDomain(curHost, nextHost) && init && init.headers) {
+            const nextHeaders = { ...init.headers };
+            for (const k of Object.keys(nextHeaders)) {
+              if (/^(cookie|authorization)$/i.test(k)) delete nextHeaders[k];
+            }
+            nextInit = { ...init, headers: nextHeaders };
+          }
+        } catch (e) {}
+        h2fetch(next, nextInit, redirectCount + 1).then(_resolve, _reject);
         return;
       }
       resolve({
