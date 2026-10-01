@@ -1522,6 +1522,60 @@ async function sendVideoDetection(videoData) {
  *    erased AFTER AiDM has accepted it. The old code cancelled first, so a
  *    failed POST silently destroyed the user's download.
  */
+// ==TEST-EXPORT-BEGIN== (do not remove — consumed by test/ext-download-guard.js)
+/**
+ * True when a Chrome download with `id` still exists in Chrome's manager.
+ * Wraps chrome.downloads.search and swallows the lastError the API would
+ * otherwise log as "unchecked". The callback always runs exactly once.
+ * @param {number} id
+ * @param {(exists: boolean) => void} cb
+ */
+function downloadExists(id, cb) {
+  try {
+    chrome.downloads.search({ id }, (items) => {
+      if (chrome.runtime.lastError) { cb(false); return; }
+      cb(Array.isArray(items) && items.length > 0);
+    });
+  } catch (e) {
+    cb(false);
+  }
+}
+
+/**
+ * Drop Chrome's own copy of a download we have handed to AiDM. Chrome's
+ * downloads API sets chrome.runtime.lastError to "Invalid downloadId" when the
+ * id is already gone — e.g. the native download finished or was removed between
+ * onDeterminingFilename and this handoff. The old code called
+ * chrome.downloads.erase WITHOUT a callback, so that lastError was left
+ * UNCHECKED and Chrome logged "Unchecked runtime.lastError: Invalid downloadId".
+ *
+ * Fix: only act when the id still exists, and consume lastError in every
+ * callback so Chrome never logs an unchecked error.
+ * @param {number} id
+ */
+function safeRemoveChromeDownload(id) {
+  if (typeof id !== 'number') return;
+  downloadExists(id, (exists) => {
+    if (!exists) return; // already gone — nothing to do, no error possible
+    try {
+      chrome.downloads.cancel(id, () => {
+        void chrome.runtime.lastError; // consume; we erase regardless below
+        try {
+          chrome.downloads.erase({ id }, () => {
+            void chrome.runtime.lastError; // already gone — ignore
+          });
+        } catch (e) { /* erase unavailable — leave Chrome's copy */ }
+      });
+    } catch (e) {
+      // cancel unavailable — try erase directly so we still clean up.
+      try {
+        chrome.downloads.erase({ id }, () => { void chrome.runtime.lastError; });
+      } catch (e2) { /* give up silently */ }
+    }
+  });
+}
+// ==TEST-EXPORT-END==
+
 function interceptDownload(downloadItem, suggest) {
   // Keep Chrome's copy alive (paused) until AiDM has really accepted the file.
   let pausedOk = false;
@@ -1573,8 +1627,10 @@ function interceptDownload(downloadItem, suggest) {
 
     if (sent && (sent.sent || sent.duplicate)) {
       // Handoff complete (or already in AiDM) — drop Chrome's own copy.
-      try { chrome.downloads.cancel(downloadItem.id); } catch (e) {}
-      try { chrome.downloads.erase({ id: downloadItem.id }); } catch (e) {}
+      // safeRemoveChromeDownload guards against an already-gone downloadId
+      // (the "Invalid downloadId" unchecked-lastError spam) and checks
+      // lastError in every callback.
+      safeRemoveChromeDownload(downloadItem.id);
       try { suggest(); } catch (e) { /* download already gone */ }
       chrome.notifications.create({
         type: 'basic',

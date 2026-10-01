@@ -87,8 +87,64 @@ function entryUrlWasRepaired(raw) {
   return typeof raw === 'string' && sanitizeEntryUrl(raw) !== raw;
 }
 
+// ── Single-use / one-shot signed attachment URLs ─────────────────────────────
+//
+// Why: a Gmail attachment URL (mail-attachment.googleusercontent.com/…?…&
+// saddbat=ANGjdJ-…) and the Drive usercontent endpoint carry a TOKEN that is
+// spent by the first request that touches it. A browser downloads the file
+// with exactly ONE plain GET and succeeds; AiDM's probe issues HEAD → Range →
+// Range → plain GET (up to four requests), the token is consumed by the time
+// the real download fires, and the server answers **HTTP 400** — the exact
+// symptom the user reported ("normal Chrome downloads it, AiDM 400s").
+//
+// The fix lives in the manager (see _resolveFilename): for these URLs we skip
+// the network probe entirely and start a single plain connection, so exactly
+// one GET reaches the server — matching what the browser does.
+
+// Hosts whose download URLs always carry a one-shot signed token.
+const SINGLE_USE_TOKEN_HOST_RE = [
+  /^mail-attachment\.googleusercontent\.com$/i,
+  /^drive\.usercontent\.googleusercontent\.com$/i,
+];
+
+// Query-param signatures of one-shot signed attachment URLs on any host.
+function hasSingleUseTokenParam(url) {
+  if (typeof url !== 'string' || !url) return false;
+  // Gmail attachment: a batchexecute attachment token, or the attachment-id
+  // + view=att pair that appears on the inline "download" link.
+  if (/[?&]saddbat=/.test(url)) return true;
+  if (/[?&]realattid=/.test(url) && /[?&]view=att\b/.test(url)) return true;
+  // Google Drive "download" interstitial that carries a confirm token.
+  if (/[?&]export=download\b/.test(url) && /[?&]confirm=/.test(url)) return true;
+  return false;
+}
+
+/**
+ * True for URLs whose signed token is consumed by every extra request, so the
+ * engine must fetch them with a single plain connection (no HEAD/Range probe,
+ * no segmented Range burst). Conservative on purpose: only the Google
+ * attachment / Drive-usercontent class is matched — ordinary signed CDN links
+ * (Azure SAS, AWS S3 presigned) stay multi-connection because their tokens are
+ * valid for a window, not a single hit.
+ *
+ * @param {unknown} raw
+ * @returns {boolean}
+ */
+function isSingleUseTokenUrl(raw) {
+  if (typeof raw !== 'string' || !raw) return false;
+  let u = null;
+  try { u = new URL(raw); } catch (e) { u = null; }
+  if (u) {
+    if (!/^https?:$/i.test(u.protocol)) return false;
+    if (SINGLE_USE_TOKEN_HOST_RE.some((re) => re.test(u.hostname))) return true;
+  }
+  return hasSingleUseTokenParam(raw);
+}
+
 module.exports = {
   sanitizeEntryUrl,
   decodeAmpEntities,
   entryUrlWasRepaired,
+  isSingleUseTokenUrl,
+  hasSingleUseTokenParam,
 };

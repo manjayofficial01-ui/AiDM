@@ -8,7 +8,7 @@ const { DEFAULT_INTERCEPT_TYPES } = require('./scheduler');
 const { muxAudioVideo, isAvailable: ffmpegAvailable, facebookMediaHeaders } = require('./media-mux');
 const ytdlp = require('./yt-dlp');
 const youtubeResolver = require('./youtube-resolver');
-const { sanitizeEntryUrl, entryUrlWasRepaired } = require('./url-hygiene');
+const { sanitizeEntryUrl, entryUrlWasRepaired, isSingleUseTokenUrl } = require('./url-hygiene');
 const { looksLikeAuthWall, sessionExpiredMessage } = require('./auth-wall');
 const googleDrive = require('./google-drive-resolver');
 const { TorrentEngine, isTorrentUrl, magnetDisplayName } = require('./torrent-engine');
@@ -2457,6 +2457,36 @@ class DownloadManager extends EventEmitter {
   async _resolveFilename(download, extraHeaders = null) {
     if (download._nameResolved) return download._probe || null;
     const probeHeaders = extraHeaders || download.headers || {};
+
+    // Single-use signed attachment URLs (Gmail attachment, Drive usercontent,
+    // one-shot token params): every probe request spends the token, so the
+    // HEAD/Range multi-probe 400s while a browser's single GET works. Skip the
+    // network probe entirely and let the engine fetch the file in ONE plain
+    // connection. The browser (extension intercept) already supplied the real
+    // filename; total size is learned live from the response stream.
+    if (!download._nameResolved && isSingleUseTokenUrl(download.url)) {
+      download.singleConnection = true;
+      download.resumable = false;
+      download._nameResolved = true;
+      const synthetic = {
+        kind: 'file',
+        meta: {
+          status: 200,
+          supportsRange: false,
+          singleConnection: true,
+          rangesBlocked: true,
+          contentLength: 0,
+          suggestedFilename: null,
+          contentType: '',
+          headers: {},
+        },
+        hlsSize: null,
+      };
+      download._probe = synthetic.meta;
+      this.emit('download-updated', download);
+      return synthetic.meta;
+    }
+
     // Share one probe promise per row. A soft 8s race only delays the UI —
     // a late result still lands (name/size/guards) and must NOT be dropped
     // just because the race timed out first.
