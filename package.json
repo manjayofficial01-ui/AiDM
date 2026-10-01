@@ -1,7 +1,7 @@
 {
   "name": "aidm",
-  "version": "5.1.1",
-  "description": "AiDM v5.1.1 - AI-Powered Download Manager with dark glass UI, DASH via yt-dlp, torrent/magnet (WebTorrent), HTTP/2 transport, auth-wall session-resilience guard, single-use-token (Gmail attachment / Drive) single-connection download to kill HTTP 400, and hardened resume + HLS probing",
+  "version": "5.1.2",
+  "description": "AiDM v5.1.2 - AI-Powered Download Manager with dark glass UI, DASH via yt-dlp, torrent/magnet (WebTorrent), HTTP/2 transport, auth-wall session-resilience guard, single-use-token (Gmail attachment / Drive) downloads via ONE plain GET to kill HTTP 400, and hardened resume + HLS probing",
   "main": "main.js",
   "scripts": {
     "start": "electron .",

@@ -1,27 +1,40 @@
 // Single-use / one-shot signed attachment URLs must NOT be multi-probed.
 //
 // A Gmail attachment (mail-attachment.googleusercontent.com/…?…&saddbat=…) and
-// the Drive usercontent endpoint carry a token that the first request spends.
-// The browser fetches the file with ONE plain GET and works; AiDM's HEAD→Range
-// →Range→plain-GET probe (up to four requests) consumes the token first, so the
-// real download 400s — the exact "normal Chrome downloads it, AiDM 400s" bug.
+// the Drive usercontent endpoint carry a token that the FIRST request spends.
+// The browser fetches the file with ONE plain GET and works; AiDM used to send
+// HEAD → Range → Range → plain-GET probes (manager) AND another `Range: bytes=0-0`
+// probe inside DownloadTask.prepare() — the token was long spent by the time the
+// real download fired, so the server answered HTTP 400. That is the exact
+// "normal Chrome downloads it, AiDM 400s" bug.
 //
-// This proves two things:
-//   1. isSingleUseTokenUrl() classifies the Gmail/Drive class correctly and
-//      does NOT false-positive on ordinary / non-Google / non-http URLs.
-//   2. DownloadManager._resolveFilename() SHORT-CIRCUITS for those URLs: it
-//      returns a single-connection synthetic meta and never calls the network
-//      probe (engine.probeMeta), so exactly one GET reaches the server.
+// The fix has three layers, all exercised here:
+//   1. isSingleUseTokenUrl() classifies the Gmail/Drive class (no false positives).
+//   2. DownloadManager._resolveFilename() SHORT-CIRCUITS: single-connection
+//      synthetic meta, no manager probe, and flags skipProbe.
+//   3. DownloadTask with skipProbe skips its OWN Range probe and streams ONE
+//      plain GET — proven against a live mock server that 400s every request
+//      after the first (i.e. a spent one-shot token).
 //
 // Run: node test/single-use-token.js
 'use strict';
 
 const assert = require('assert');
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+
 const { isSingleUseTokenUrl, hasSingleUseTokenParam } = require('../src/url-hygiene');
 const { DownloadManager } = require('../src/download-manager');
+const { DownloadEngine } = require('../src/download-engine');
+const { DownloadTask } = require('../src/engine/task');
+
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'aidm-single-use-'));
 
 let pass = 0, fail = 0;
 const pending = [];
+// Throw-style check: a thrown error (or rejected promise) fails the check.
 function check(name, fn) {
   try {
     const r = fn();
@@ -35,8 +48,13 @@ function check(name, fn) {
     pass++; console.log('  OK  ', name);
   } catch (e) { fail++; console.log('  FAIL', name, '—', e.message); }
 }
+// Boolean-style check (for async server assertions).
+function checkCond(name, cond, extra) {
+  if (cond) { pass++; console.log('  OK  ', name, extra !== undefined ? `(${extra})` : ''); }
+  else { fail++; console.log('  FAIL', name, extra !== undefined ? `(${extra})` : ''); }
+}
 
-// The exact URL the user reported (truncated token, as pasted).
+// The exact URL the user reported (token truncated, as pasted).
 const GMAIL_SADDBAT = 'https://mail-attachment.googleusercontent.com/attachment/u/7/?ui=2&ik=376495d32f&attid=0.1&permmsgid=msg-f:1877767227827513920&th=1a0f2b5849876a40&view=att&disp=safe&realattid=f_muo771zz0&zw&saddbat=ANGjdJ-abc123';
 const GMAIL_REALATTID = 'https://mail-attachment.googleusercontent.com/attachment/u/0/?ui=2&ik=x&attid=0.1&view=att&realattid=f_abc&zw';
 const DRIVE_USERCONTENT = 'https://drive.usercontent.google.com/download?id=ABC&export=download&confirm=t';
@@ -96,10 +114,10 @@ check('Gmail attachment: short-circuits to single-connection, probeMeta never ca
     assert.strictEqual(download._nameResolved, true, 'row marked name-resolved');
     assert.strictEqual(download.singleConnection, true, 'row forced to single connection');
     assert.strictEqual(download.resumable, false, 'row marked non-resumable');
+    assert.strictEqual(download.skipProbe, true, 'row flagged skipProbe for the engine');
     assert.ok(meta && meta.singleConnection === true, 'meta carries singleConnection:true');
     assert.strictEqual(meta.status, 200, 'meta status 200');
     assert.ok(mgr.emits.includes('download-updated'), 'emits download-updated');
-    // The browser (extension) already supplied the real filename; it must be kept.
     assert.strictEqual(download.filename, 'my-invoice.pdf', 'browser-supplied filename preserved');
   });
 });
@@ -128,11 +146,110 @@ check('ordinary URL still probes (path NOT short-circuited)', () => {
   return DownloadManager.prototype._resolveFilename.call(mgr, download, {}).then(() => {
     assert.strictEqual(probeCalled, true, 'probeMeta must be invoked for ordinary URLs');
     assert.strictEqual(download.singleConnection, false, 'ordinary url stays multi-connection');
+    assert.notStrictEqual(download.skipProbe, true, 'ordinary url must NOT set skipProbe');
   });
 });
 
+// ── 3. live mock: a server whose token is spent after the FIRST request ─────
+// Serves the payload on request #1 (whatever its headers); answers HTTP 400 to
+// every later request — exactly how a one-shot Gmail attachment token behaves.
+const payload = Buffer.alloc(128 * 1024);
+for (let i = 0; i < payload.length; i++) payload[i] = (i * 5 + 1) & 0xff;
+
+function makeTokenServer() {
+  let reqCount = 0;
+  const ranges = [];
+  const server = http.createServer((req, res) => {
+    reqCount++;
+    ranges.push(!!req.headers.range);
+    if (reqCount > 1) { res.writeHead(400); res.end('token spent'); return; }
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Length', String(payload.length));
+    res.writeHead(200);
+    res.end(payload);
+  });
+  return { server, stats: () => ({ reqCount, ranges }) };
+}
+
 (async () => {
   await Promise.all(pending);
+
+  console.log('── 3. DownloadTask with skipProbe: exactly one plain GET ──');
+  {
+    const { server, stats } = makeTokenServer();
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    const url = `http://127.0.0.1:${server.address().port}/attachment/u/7/?ui=2&saddbat=ANGjdJ-xyz`;
+    const outDir = path.join(TMP, 'with-skip');
+    fs.mkdirSync(outDir, { recursive: true });
+    const task = new DownloadTask({
+      url, directory: outDir, filename: 'gmail-attachment.pdf',
+      skipProbe: true, singleConnection: true, maxConnections: 8,
+      fetch: globalThis.fetch, onConflict: 'overwrite',
+    });
+    let failed = null;
+    task.on('failed', (e) => { failed = e; });
+    await task.start();
+    const s = stats();
+    let got = null;
+    try { got = fs.readFileSync(path.join(outDir, 'gmail-attachment.pdf')); } catch (e) {}
+    checkCond('skipProbe: exactly ONE request reaches the server', s.reqCount === 1, `reqs=${s.reqCount}`);
+    checkCond('skipProbe: that request is a plain GET (no Range)', s.ranges[0] === false, `range=${s.ranges[0]}`);
+    checkCond('skipProbe: file downloads byte-correct', !failed && !!got && got.equals(payload), got ? `${got.length} B` : 'no file');
+    if (server.closeAllConnections) server.closeAllConnections();
+    await new Promise((r) => server.close(r));
+  }
+
+  console.log('── 4. control (NO skipProbe): the probe spends the token, download 400s ──');
+  {
+    const { server, stats } = makeTokenServer();
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    const url = `http://127.0.0.1:${server.address().port}/attachment/u/7/?saddbat=ANGjdJ-xyz`;
+    const outDir = path.join(TMP, 'no-skip');
+    fs.mkdirSync(outDir, { recursive: true });
+    const task = new DownloadTask({
+      url, directory: outDir, filename: 'gmail-attachment.pdf',
+      maxConnections: 8, fetch: globalThis.fetch, onConflict: 'overwrite',
+    });
+    let failed = null;
+    task.on('failed', (e) => { failed = e; });
+    await task.start();
+    const s = stats();
+    checkCond('control: the probe spends the token so the download fails',
+      !!failed && s.reqCount >= 2, `reqs=${s.reqCount} failed=${!!failed}`);
+    if (server.closeAllConnections) server.closeAllConnections();
+    await new Promise((r) => server.close(r));
+  }
+
+  console.log('── 5. engine forwards skipProbe end-to-end ──');
+  {
+    const { server, stats } = makeTokenServer();
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    const url = `http://127.0.0.1:${server.address().port}/attachment/u/7/?saddbat=ANGjdJ-xyz`;
+    const eng = new DownloadEngine();
+    const outDir = path.join(TMP, 'engine');
+    fs.mkdirSync(outDir, { recursive: true });
+    const fp = path.join(outDir, 'gmail-attachment.pdf');
+    const done = new Promise((resolve) => {
+      eng.on('download-complete', (d) => resolve({ ok: true, d }));
+      eng.on('download-error', (d) => resolve({ ok: false, d }));
+    });
+    await eng.startDownload({
+      id: 'gmail-engine-test', url, filepath: fp, totalSegments: 8,
+      headers: {}, singleConnection: true, skipProbe: true,
+    });
+    const res = await done;
+    const s = stats();
+    let bytes = -1;
+    try { bytes = fs.statSync(res.ok ? (res.d.filepath || fp) : fp).size; } catch (e) {}
+    checkCond('engine.startDownload honours skipProbe: one request, byte-correct',
+      res.ok && s.reqCount === 1 && bytes === payload.length, `reqs=${s.reqCount} bytes=${bytes}`);
+    if (server.closeAllConnections) server.closeAllConnections();
+    await new Promise((r) => server.close(r));
+  }
+
+  try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (e) {}
   console.log(`\nsingle-use-token: ${pass} passed, ${fail} failed`);
-  process.exit(fail ? 1 : 0);
-})();
+  // Natural loop drain (see test/range-blocked.js): forcing exit in the same
+  // tick races undici socket cleanup after mid-stream body cancels.
+  process.exitCode = fail ? 1 : 0;
+})().catch((e) => { console.error('FATAL', e); process.exit(1); });

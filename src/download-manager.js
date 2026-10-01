@@ -2080,6 +2080,9 @@ class DownloadManager extends EventEmitter {
         // both and always starts such a row clean).
         singleConnection,
         resumable,
+        // Single-use-token rows must make exactly ONE request: skip the
+        // engine's own Range probe so only the download's plain GET fires.
+        skipProbe: download.skipProbe === true,
       });
       // Cancelled while the engine was doing its own probe: tear the engine
       // state (and any partial file) back down instead of leaving it running.
@@ -2467,6 +2470,10 @@ class DownloadManager extends EventEmitter {
     if (!download._nameResolved && isSingleUseTokenUrl(download.url)) {
       download.singleConnection = true;
       download.resumable = false;
+      // The engine's DownloadTask runs its OWN Range probe in prepare(); that
+      // request would spend the one-shot token before the real download. Tell
+      // it to skip the probe and stream a single plain GET instead.
+      download.skipProbe = true;
       download._nameResolved = true;
       const synthetic = {
         kind: 'file',

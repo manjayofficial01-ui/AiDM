@@ -71,6 +71,11 @@ function resolveConfig(options, defaults = {}) {
     preserveRemoteTime: merged.preserveRemoteTime ?? true,
     // File-hoster links (team B/F) reject Range: one plain connection, no splits.
     singleConnection: merged.singleConnection === true,
+    // Single-use-token URLs (Gmail attachment / Drive usercontent): ANY extra
+    // request — including this task's own `Range: bytes=0-0` probe — spends the
+    // one-shot token, so the real download 400s. When set, prepare() skips the
+    // network probe entirely and the task streams ONE plain GET.
+    skipProbe: merged.skipProbe === true,
     // Both spellings occur in the wild (`resumeable` in older manager rows).
     resumable: merged.resumable !== false && merged.resumeable !== false,
     fetch: merged.fetch ?? globalThis.fetch.bind(globalThis),
@@ -357,7 +362,29 @@ class DownloadTask extends EventEmitter {
     this.setState('probing');
     await mkdir(this.config.directory, { recursive: true });
 
-    const info = await this.probeWithMirrors(signal);
+    // Single-use-token URLs: skip the network probe entirely. `probeRemote`
+    // sends `GET Range: bytes=0-0`, which spends the one-shot token before the
+    // real download — the server then answers HTTP 400. Synthesize an
+    // unknown-size, range-free descriptor instead: one open-ended segment
+    // streams the file over a single plain GET (no Range), learning the size
+    // as it arrives. A browser does exactly this (one plain GET) and works.
+    let info;
+    if (this.config.skipProbe) {
+      info = {
+        url: this.config.url,
+        finalUrl: this.config.url,
+        etag: null,
+        lastModified: null,
+        contentType: null,
+        filename: this.config.filename ?? null,
+        size: null,
+        acceptRanges: false,
+        rangesBlocked: true,
+        responseCookies: null,
+      };
+    } else {
+      info = await this.probeWithMirrors(signal);
+    }
     const previous = this.info;
     this.info = info;
     this.mirrors.updateUrl(this.mirrors.primary, info.finalUrl);

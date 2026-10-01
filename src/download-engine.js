@@ -579,6 +579,9 @@ class DownloadEngine extends EventEmitter {
     singleConnection = false,
     resumable = null,
     resumeable = null,
+    // Single-use-token URLs: skip the task's own Range probe so exactly one
+    // plain GET reaches the server (see task.js prepare()).
+    skipProbe = false,
   }) {
     // 1. Handle data: URLs directly
     if (typeof url === 'string' && url.startsWith('data:')) {
@@ -627,6 +630,7 @@ class DownloadEngine extends EventEmitter {
       preallocation: this.enginePreallocation,
       onConflict: ['rename', 'overwrite', 'fail'].includes(onConflict) ? onConflict : 'rename',
       singleConnection: wantsSingle,
+      skipProbe: skipProbe === true,
       resumable: resumable === false || resumeable === false ? false : true,
       // NOTE: no speedLimit here — the global bucket is injected via deps
       // below. Passing this.globalSpeedLimit as the per-task rate too made
