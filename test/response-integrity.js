@@ -68,6 +68,8 @@ const PAYLOAD = Buffer.from('AiDM response-integrity payload. '.repeat(64), 'utf
       fs.existsSync(out) ? `${fs.statSync(out).size} B` : 'absent');
   } finally {
     gzipServer.close();
+    gzipServer.closeAllConnections?.();
+    await new Promise(r => gzipServer.once('close', r));
   }
 
   // ── 2. entity validation: absent evidence is not evidence of change ───────
@@ -85,5 +87,8 @@ const PAYLOAD = Buffer.from('AiDM response-integrity payload. '.repeat(64), 'utf
   }
 
   console.log(`\nresponse-integrity: ${pass} passed, ${fail} failed`);
-  process.exit(fail ? 1 : 0);
+  // Set exitCode and let the loop drain (a hard process.exit() here raced the
+  // failed task's engine teardown and tripped libuv's win/async.c assert).
+  process.exitCode = fail ? 1 : 0;
+  setTimeout(() => process.exit(process.exitCode), 2000).unref();
 })().catch((e) => { console.error(e); process.exit(1); });
