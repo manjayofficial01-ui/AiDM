@@ -12,6 +12,7 @@ const { basicAuthHeader, filenameFromUrl, probeRemote, sanitizeFilename, splitCr
 const { TokenBucket } = require('./rate-limiter');
 const { DEFAULT_RETRY_POLICY, backoffDelay } = require('./retry');
 const { SegmentManager } = require('./segments');
+const { RampController, dynamicMinSplitBytes } = require('./ramp-controller');
 const { SpeedMeter } = require('./speed');
 const { DEFAULT_TASK_DEFAULTS } = require('./types');
 const { Deferred, clamp, fileExists, fileSize, uniquePath } = require('./utils');
@@ -99,6 +100,12 @@ class DownloadTask extends EventEmitter {
     this.limiters = deps.globalLimiter ? [deps.globalLimiter, this.taskLimiter] : [this.taskLimiter];
     /** Shared cross-download per-host connection gate (null = ungated). */
     this.hostGate = deps.hostGate || null;
+    /** Shared, persisted per-domain connection-cap store (null = ungated). */
+    this.domainConnCaps = deps.domainConnCaps || null;
+    /** Adaptive ramp controller (FluxDown port); null when not adaptive. */
+    this.ramp = null;
+    /** Live minimum split threshold (lowered as throughput drops). */
+    this.dynamicMinSplit = this.config.minSplitSize;
     this.baseHeaders = this.buildHeaders();
 
     /** @type {'queued' | 'probing' | 'downloading' | 'paused' | 'verifying' | 'completed' | 'failed' | 'cancelled'} */
@@ -514,6 +521,26 @@ class DownloadTask extends EventEmitter {
       : this.config.adaptiveConnections
         ? Math.min(this.config.initialConnections, this.config.maxConnections)
         : this.config.maxConnections;
+
+    // Build the FluxDown-style adaptive ramp controller. A positive per-domain
+    // hint lets us start at the scale that already proved stable; a negative cap
+    // (a past collapse) keeps us below it from the first connection.
+    if (this.config.adaptiveConnections && splitAllowed) {
+      const host = this.hostFromUrl();
+      const hint = this.domainConnCaps ? this.domainConnCaps.getHint(host) : undefined;
+      const negative = this.domainConnCaps ? this.domainConnCaps.getNegative(host) : undefined;
+      this.ramp = new RampController({
+        maxCap: this.config.maxConnections,
+        hint,
+        negativeCap: negative,
+        allowHintUncap: true,
+        now: Date.now(),
+      });
+      this.targetConnections = this.ramp.allowed;
+    } else {
+      this.ramp = null;
+    }
+
     this.lastAdaptSpeed = 0;
     this.lastAdaptAction = 'none';
     this.cooldownUntil = 0;
@@ -856,26 +883,45 @@ class DownloadTask extends EventEmitter {
    * @param {number} now
    */
   adapt(now) {
-    if (!this.config.adaptiveConnections || !this.segments || !this.info?.acceptRanges || this.forceSingleConnection) return;
+    if (!this.config.adaptiveConnections || !this.segments || !this.info?.acceptRanges || this.forceSingleConnection || !this.ramp) return;
     const speed = this.meter.bytesPerSecond();
     if (now < this.cooldownUntil) {
       this.lastAdaptSpeed = speed;
       return;
     }
-    const max = this.config.maxConnections;
-    if (this.lastAdaptSpeed === 0) {
-      if (this.targetConnections < max) this.stepUp();
-    } else if (this.lastAdaptAction === 'up' && speed < this.lastAdaptSpeed * 0.85 && this.targetConnections > 1) {
-      this.targetConnections--;
-      this.lastAdaptAction = 'down';
-      this.cooldownUntil = now + ADAPT_COOLDOWN_MS;
-      this.log('debug', `Throughput dropped; connections -> ${this.targetConnections}`);
-    } else if (speed > this.lastAdaptSpeed * 1.05 && this.targetConnections < max && this.segments.hasWork()) {
-      this.stepUp();
-    } else {
-      this.lastAdaptAction = 'none';
+    const total = this.segments.totalSize ?? this.info.size ?? null;
+    const remaining = this.segments.remainingBytes ?? null;
+    const r = this.ramp.tick({
+      throughputBps: speed,
+      alive: this.active.size,
+      remaining: remaining == null ? Number.POSITIVE_INFINITY : remaining,
+      total: total == null ? Number.POSITIVE_INFINITY : total,
+      now,
+    });
+
+    if (r.action === 'collapse' && r.collapsedTo != null) {
+      const host = this.hostFromUrl();
+      if (this.domainConnCaps) this.domainConnCaps.recordCollapse(host, r.collapsedTo);
+      this.cooldownUntil = now + SERVER_LIMIT_COOLDOWN_MS;
+      this.log('warn', `Throughput cliff — rolled back to ${r.collapsedTo} connections (cap recorded for ${host})`);
     }
+
+    this.targetConnections = r.target;
+
+    // Record a positive hint as we sustain a higher scale without a collapse,
+    // so future tasks on this host start there directly.
+    if (r.action === 'expand' && this.domainConnCaps) {
+      this.domainConnCaps.recordSuccess(this.hostFromUrl(), this.targetConnections);
+    }
+
+    // Lower the min-split threshold as throughput drops so idle workers can join
+    // slow segments (dynamic split sizing, FluxDown port).
+    this.dynamicMinSplit = dynamicMinSplitBytes(speed);
+    if (this.segments) this.segments.opts.dynamicMinSplit = this.dynamicMinSplit;
+
+    if (r.action === 'expand') this.fill();
     this.lastAdaptSpeed = speed;
+    this.lastAdaptAction = r.action === 'collapse' ? 'down' : r.action === 'expand' ? 'up' : 'none';
   }
 
   stepUp() {
@@ -890,10 +936,13 @@ class DownloadTask extends EventEmitter {
   backOffConnections(err) {
     const next = Math.max(1, Math.min(this.targetConnections, this.active.size) - 1);
     if (next < this.targetConnections) {
+      if (this.ramp) this.ramp.markConnSensitive(next);
+      const host = this.hostFromUrl();
+      if (this.domainConnCaps) this.domainConnCaps.recordCollapse(host, next);
       this.targetConnections = next;
       this.lastAdaptAction = 'down';
       this.cooldownUntil = Date.now() + SERVER_LIMIT_COOLDOWN_MS;
-      this.log('warn', `Server pushed back (${err.message}); connections -> ${next}`);
+      this.log('warn', `Server pushed back (${err.message}); connections -> ${next} (cap recorded for ${host})`);
     }
   }
 
@@ -994,7 +1043,18 @@ class DownloadTask extends EventEmitter {
       minSplitSize: this.config.minSplitSize,
       pieceSelection: this.config.pieceSelection,
       allowSplit: info.acceptRanges && info.size !== null && !this.forceSingleConnection,
+      dynamicMinSplit: this.dynamicMinSplit,
+      tailMicroSplit: this.config.adaptiveConnections && !this.forceSingleConnection,
     };
+  }
+
+  /** Host (registrable domain) for per-domain conn-cap hints. */
+  hostFromUrl() {
+    try {
+      return new URL(this.config.url).host;
+    } catch (_) {
+      return String(this.config.url || '').split('/')[0] || 'unknown';
+    }
   }
 
   buildHeaders() {

@@ -152,7 +152,9 @@ function rowSizeStr(dl) {
 
 function segmentSignature(segs) {
   if (!Array.isArray(segs) || segs.length <= 1) return '';
-  return segs.map(s => s.status + ':' + (s.downloaded > 0 ? 1 : 0)).join(',');
+  // Snapshots expose `state` (pending/active/done); include the tail flag and a
+  // progress fraction so the bar re-renders live as segments complete.
+  return segs.map(s => `${s.state || 'pending'}:${s.tail ? 't' : ''}:${s.downloaded || 0}`).join(',');
 }
 
 /** Patch one row's live cells (progress/ETA/size/speed/segments) in place. */
@@ -173,6 +175,15 @@ function patchRow(tr, dl) {
   if (speed) {
     speed.textContent = formatSpeed(dl.speed);
     speed.classList.toggle('zero', !(dl.speed > 0));
+  }
+
+  // Live adaptive-connection chip (FluxDown-style worker count: active / target).
+  const connChip = tr.querySelector('.conn-chip');
+  if (connChip) {
+    const live = (dl.connections != null) ? dl.connections : '—';
+    const target = (dl.targetConnections != null) ? '/' + dl.targetConnections : '';
+    const txt = live + target + '×';
+    if (connChip.textContent !== txt) connChip.textContent = txt;
   }
 
   const sizeCell = tr.querySelector('.col-size');
@@ -515,6 +526,7 @@ function renderDownloadRow(dl) {
       </td>
       <td class="col-status">
         <span class="status-badge ${dl.status}">${formatStatus(dl.status)}</span>
+        ${(dl.connections != null || dl.targetConnections != null) ? `<span class="conn-chip" title="Adaptive connections (live / target)">${dl.connections != null ? dl.connections : '—'}${dl.targetConnections != null ? '/' + dl.targetConnections : ''}×</span>` : ''}
       </td>
       <td class="col-actions">
         <div class="action-btns">
@@ -570,11 +582,16 @@ function renderSegments(segments) {
   // emits progress; only render the bar for a real per-segment array.
   if (!Array.isArray(segments) || segments.length <= 1) return '';
   return `<div class="segments-bar">
-    ${segments.map(s => `
-      <div class="segment ${s.status}" title="Segment ${s.index + 1}: ${s.status}">
-        <div class="segment-fill" style="width:${s.status === 'completed' ? 100 : (s.downloaded > 0 ? 50 : 0)}%"></div>
-      </div>
-    `).join('')}
+    ${segments.map((s, i) => {
+      const state = s.state || 'pending';
+      const len = (s.end != null && s.end >= 0 && s.start != null) ? (s.end - s.start + 1) : 0;
+      const frac = len > 0 ? Math.min(100, Math.round((s.downloaded || 0) / len * 100)) : (state === 'done' ? 100 : 0);
+      const cls = ['segment', state, s.tail ? 'tail' : ''].filter(Boolean).join(' ');
+      const tip = `Segment ${i + 1}: ${state}${s.tail ? ' (tail micro-split)' : ''}${len > 0 ? ' — ' + frac + '%' : ''}`;
+      return `<div class="${cls}" title="${escapeAttr(tip)}">
+        <div class="segment-fill" style="width:${frac}%"></div>
+      </div>`;
+    }).join('')}
   </div>`;
 }
 

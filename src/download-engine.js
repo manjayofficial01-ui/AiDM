@@ -9,6 +9,8 @@ const { URL } = require('url');
 const { EventEmitter } = require('events');
 const { agentFor, destroyAgents, setProxyUrl } = require('./engine/agents');
 const { HostGate } = require('./engine/host-gate');
+const { DomainConnCaps } = require('./engine/ramp-controller');
+const { WebhookManager } = require('./webhooks');
 const { isRetryableStatus } = require('./engine/errors');
 const { makeH2AwareFetch } = require('./engine/http2-fetch');
 const { isSameRegistrableDomain } = require('./url-hygiene');
@@ -522,6 +524,94 @@ class DownloadEngine extends EventEmitter {
     // 16 lets two 8-segment downloads share a host but stops a third from
     // bursting 24 simultaneous connections at one CDN.
     this.hostGate = new HostGate(16);
+    // Shared, persisted per-domain connection-cap learning (FluxDown port):
+    // a host that sustained N connections without a collapse starts future
+    // tasks there; a host that punished extra connections is rolled back.
+    this.domainConnCaps = this._loadConnCaps();
+    // Task-event webhooks (FluxDown-style feature). Best-effort; never blocks
+    // the download it observes.
+    this.webhooks = this._loadWebhooks();
+  }
+
+  /** Path to the persisted webhook endpoint config. */
+  _webhooksPath() {
+    try {
+      const os = require('os');
+      return path.join(os.homedir(), '.aidm_webhooks.json');
+    } catch (_) {
+      return null;
+    }
+  }
+
+  _loadWebhooks() {
+    const p = this._webhooksPath();
+    const mgr = new WebhookManager({ fetchImpl: globalThis.fetch ? globalThis.fetch.bind(globalThis) : null });
+    if (p) {
+      try {
+        const raw = fs.readFileSync(p, 'utf8');
+        mgr.load(JSON.parse(raw));
+      } catch (_) {
+        /* missing/corrupt -> start empty */
+      }
+    }
+    return mgr;
+  }
+
+  /**
+   * Apply webhook config from settings. `config` may be an array of endpoints
+   * or `{ enabled, endpoints }`. Persisted best-effort.
+   * @param {any} config
+   */
+  setWebhooks(config) {
+    if (Array.isArray(config)) this.webhooks.setEndpoints(config);
+    else if (config && typeof config === 'object') this.webhooks.load(config);
+    const p = this._webhooksPath();
+    if (p) {
+      try {
+        fs.writeFile(p, JSON.stringify(this.webhooks.toJSON()), () => {});
+      } catch (_) {
+        /* best-effort */
+      }
+    }
+  }
+
+  /** Fire a webhook event (no-op if disabled / no matching endpoint). */
+  _webhook(kind, payload) {
+    this.webhooks.emit(kind, payload).catch(() => {});
+  }
+
+  /** Path to the persisted per-domain connection-cap store. */
+  _connCapsPath() {
+    try {
+      const os = require('os');
+      return path.join(os.homedir(), '.aidm_conn_caps.json');
+    } catch (_) {
+      return null;
+    }
+  }
+
+  _loadConnCaps() {
+    const p = this._connCapsPath();
+    let seed = null;
+    if (p) {
+      try {
+        const raw = fs.readFileSync(p, 'utf8');
+        seed = JSON.parse(raw);
+      } catch (_) {
+        /* missing/corrupt -> start fresh */
+      }
+    }
+    const self = this;
+    return new DomainConnCaps(seed, {
+      persist: (json) => {
+        if (!p) return;
+        try {
+          fs.writeFile(p, JSON.stringify(json), () => {});
+        } catch (_) {
+          /* best-effort */
+        }
+      },
+    });
   }
 
   /**
@@ -662,7 +752,11 @@ class DownloadEngine extends EventEmitter {
       fetch: this.engineHttp2 ? makeH2AwareFetch(robustFetch) : robustFetch,
     };
 
-    const task = new DownloadTask(taskOptions, { globalLimiter: this.globalLimiter, hostGate: this.hostGate });
+    const task = new DownloadTask(taskOptions, {
+      globalLimiter: this.globalLimiter,
+      hostGate: this.hostGate,
+      domainConnCaps: this.domainConnCaps,
+    });
     this.activeTasks.set(id, task);
 
     const startTime = Date.now();
@@ -716,11 +810,17 @@ class DownloadEngine extends EventEmitter {
           percent: 0,
           segments: [],
         });
+        if (prev !== 'downloading') {
+          // First transition into downloading = the task actually started.
+          this._webhook('download_started', { id, url });
+        }
         if (prev === 'paused') {
           this.emit('download-resumed', { id });
+          this._webhook('download_resumed', { id, url });
         }
       } else if (cur === 'paused') {
         this.emit('download-paused', { id });
+        this._webhook('download_paused', { id, url });
       }
     });
 
@@ -774,6 +874,12 @@ class DownloadEngine extends EventEmitter {
         totalSize: info.bytes || onDisk,
         duration: info.elapsedMs || (Date.now() - startTime),
       });
+      this._webhook('download_completed', {
+        id,
+        filepath: outPath,
+        totalSize: info.bytes || onDisk,
+        url,
+      });
       this._hashFileAsync(id, outPath);
     });
 
@@ -784,6 +890,7 @@ class DownloadEngine extends EventEmitter {
         id,
         error: err.message || 'Download failed',
       });
+      this._webhook('download_error', { id, url, error: err.message || 'Download failed' });
     });
 
     // Start asynchronously
@@ -791,6 +898,7 @@ class DownloadEngine extends EventEmitter {
       this.activeTasks.delete(id);
       this.activeSegments.delete(id);
       this.emit('download-error', { id, error: err.message });
+      this._webhook('download_error', { id, url, error: err.message });
     });
 
     return downloadRecord;
@@ -816,6 +924,7 @@ class DownloadEngine extends EventEmitter {
       }
       hlsDl.segments.forEach((seg) => { seg.status = 'paused'; });
       this.emit('download-paused', { id });
+      this._webhook('download_paused', { id, url: hlsDl.url });
     }
   }
 
@@ -832,6 +941,7 @@ class DownloadEngine extends EventEmitter {
       hlsDl.cancelled = false;
       hlsDl.startTime = Date.now();
       this.emit('download-resumed', { id });
+      this._webhook('download_resumed', { id, url: hlsDl.url });
       this.startHlsDownload({
         id,
         url: hlsDl.url,

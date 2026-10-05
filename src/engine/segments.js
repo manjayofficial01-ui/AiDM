@@ -1,4 +1,13 @@
 // @ts-check
+const { TAIL_MIN_SPLIT_BYTES } = require('./ramp-controller');
+
+// Tail micro-split threshold (FluxDown: 64 KB). Below this there is nothing
+// smaller to split, so the tail micro-split strategy is disabled.
+const TAIL_SPLIT_BYTES = TAIL_MIN_SPLIT_BYTES;
+// Straggler guard: only micro-split when the largest remaining active segment
+// is >= 2x the tail threshold, indicating a genuine imbalance worth rescuing.
+const STAGG_BUILDER = 2 * TAIL_SPLIT_BYTES;
+
 class Segment {
   /**
    * @param {number} id
@@ -14,6 +23,8 @@ class Segment {
     this.downloaded = downloaded;
     /** @type {'pending' | 'active' | 'done'} */
     this.state = 'pending';
+    /** True for a FluxDown-style tail micro-split segment (small straggler slice). */
+    this.tail = false;
     this.attempts = 0;
     this.retryAt = 0;
   }
@@ -41,6 +52,7 @@ class Segment {
       end: this.end,
       downloaded: this.downloaded,
       state: this.state,
+      tail: this.tail,
     };
   }
 }
@@ -53,7 +65,7 @@ class Segment {
 class SegmentManager {
   /**
    * @param {number | null} totalSize
-   * @param {{ minSplitSize: number, pieceSelection: 'largest' | 'inorder', allowSplit: boolean }} opts
+   * @param {{ minSplitSize: number, pieceSelection: 'largest' | 'inorder', allowSplit: boolean, dynamicMinSplit?: number, tailMicroSplit?: boolean }} opts
    */
   constructor(totalSize, opts) {
     this.totalSize = totalSize;
@@ -61,6 +73,18 @@ class SegmentManager {
     /** @type {Segment[]} */
     this.segments = [];
     this.nextId = 1;
+  }
+
+  /**
+   * Effective minimum split size. When the ramp controller has measured a live
+   * throughput it lowers this (512 KB at low speed, 1 MB mid, 2 MB high) so
+   * idle workers can join slow segments without thrashing tiny ranges.
+   * @returns {number}
+   */
+  get currentMinSplit() {
+    return this.opts.dynamicMinSplit && this.opts.dynamicMinSplit > 0
+      ? this.opts.dynamicMinSplit
+      : this.opts.minSplitSize;
   }
 
   /**
@@ -175,7 +199,11 @@ class SegmentManager {
    * @param {number} [now]
    */
   hasWork(now = Date.now()) {
-    return this.segments.some((s) => s.state === 'pending' && s.retryAt <= now) || this.splitCandidate() !== null;
+    return (
+      this.segments.some((s) => s.state === 'pending' && s.retryAt <= now) ||
+      this.splitCandidate() !== null ||
+      this.microSplitCandidate() !== null
+    );
   }
 
   /**
@@ -203,6 +231,11 @@ class SegmentManager {
           : pending.reduce((a, b) => (b.remaining > a.remaining ? b : a));
     } else {
       seg = this.split();
+      // Strategy 3 (FluxDown tail micro-split): when a normal split fails because
+      // the remaining bytes are below the dynamic threshold, retry at the small
+      // tail threshold so an idle worker can help finish a slow tail segment
+      // ~2x faster instead of 15 workers idling on one straggler.
+      if (!seg && this.opts.tailMicroSplit !== false) seg = this.microSplitTagged();
     }
     if (seg) seg.state = 'active';
     return seg;
@@ -246,21 +279,23 @@ class SegmentManager {
    * @returns {Segment | null}
    */
   splitCandidate() {
-    if (!this.opts.allowSplit || this.totalSize === null) return null;
-    const threshold = 2 * this.opts.minSplitSize;
-    const candidates = this.segments.filter((s) => s.state === 'active' && s.remaining >= threshold);
-    if (candidates.length === 0) return null;
-    return this.opts.pieceSelection === 'inorder'
-      ? candidates.reduce((a, b) => (b.start < a.start ? b : a))
-      : candidates.reduce((a, b) => (b.remaining > a.remaining ? b : a));
+    return this.trySplitLargest(2 * this.currentMinSplit);
   }
 
   /**
+   * Find the largest in-flight active segment whose remaining bytes are at
+   * least `threshold`, split it in half, and return the newly-created second
+   * half. Returns null when nothing qualifies (no work-stealing possible).
+   * @param {number} threshold
    * @returns {Segment | null}
    */
-  split() {
-    const victim = this.splitCandidate();
-    if (!victim) return null;
+  trySplitLargest(threshold) {
+    if (!this.opts.allowSplit || this.totalSize === null) return null;
+    const candidates = this.segments.filter((s) => s.state === 'active' && s.remaining >= threshold);
+    if (candidates.length === 0) return null;
+    const victim = this.opts.pieceSelection === 'inorder'
+      ? candidates.reduce((a, b) => (b.start < a.start ? b : a))
+      : candidates.reduce((a, b) => (b.remaining > a.remaining ? b : a));
     const half = Math.floor(victim.remaining / 2);
     const mid = victim.position + half;
     const created = new Segment(this.nextId++, mid, victim.end);
@@ -269,7 +304,62 @@ class SegmentManager {
     this.segments.splice(idx + 1, 0, created);
     return created;
   }
+
+  /**
+   * Perform a tail micro-split at the small tail threshold and mark the
+   * resulting segment so the UI can render it distinctly (a FluxDown-style
+   * "straggler" slice that keeps idle workers busy near EOF).
+   * @returns {Segment | null}
+   */
+  microSplitTagged() {
+    const created = this.microSplit();
+    if (created) created.tail = true;
+    return created;
+  }
+
+  /**
+   * @returns {Segment | null}
+   */
+  split() {
+    return this.trySplitLargest(2 * this.currentMinSplit);
+  }
+
+  /**
+   * Tail micro-split candidate: only when the normal threshold is above the
+   * tail threshold AND the largest remaining active segment is a genuine
+   * straggler (>= 2x tail). Without the straggler guard, equally-tiny tail
+   * segments cascade-split into dust and workers retire en-masse, causing the
+   * visible "99% speed drop".
+   * @returns {Segment | null}
+   */
+  microSplitCandidate() {
+    if (this.opts.tailMicroSplit === false || !this.opts.allowSplit || this.totalSize === null) return null;
+    if (this.currentMinSplit <= TAIL_SPLIT_BYTES) return null;
+    const maxRemaining = this.segments
+      .filter((s) => s.state === 'active')
+      .reduce((m, s) => Math.max(m, s.remaining), 0);
+    if (maxRemaining < STAGG_BUILDER) return null;
+    return this.segments.some((s) => s.state === 'active' && s.remaining >= TAIL_SPLIT_BYTES) ? STAGG_BUILDER_SEG : null;
+  }
+
+  /**
+   * Perform a tail micro-split at the small tail threshold.
+   * @returns {Segment | null}
+   */
+  microSplit() {
+    if (this.opts.tailMicroSplit === false || !this.opts.allowSplit || this.totalSize === null) return null;
+    if (this.currentMinSplit <= TAIL_SPLIT_BYTES) return null;
+    const maxRemaining = this.segments
+      .filter((s) => s.state === 'active')
+      .reduce((m, s) => Math.max(m, s.remaining), 0);
+    if (maxRemaining < STAGG_BUILDER) return null;
+    return this.trySplitLargest(TAIL_SPLIT_BYTES);
+  }
 }
+
+// Sentinel returned by microSplitCandidate to satisfy hasWork() without
+// re-scanning; claim() recomputes the actual victim via microSplit().
+const STAGG_BUILDER_SEG = Symbol('tail-micro-split');
 
 module.exports = {
   Segment,

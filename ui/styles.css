@@ -83,7 +83,10 @@ svg.icon, .btn-icon svg, .cat-icon svg, .empty-icon svg, .modal-header svg, .ctx
   overflow: visible;
 }
 .icon { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-.icon[fill="currentColor"], .icon[fill="none"][stroke="none"] { stroke: none; }
+/* Fill-style icons (fill="currentColor"): the .icon rule above forces fill:none,
+   so it MUST be restored here or the glyph is fill:none + stroke:none = blank. */
+.icon[fill="currentColor"] { fill: currentColor; stroke: none; }
+.icon[fill="none"][stroke="none"] { stroke: none; }
 
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -452,8 +455,12 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
 .segments-bar { display: flex; gap: 1px; margin-top: 3px; }
 .segment { flex: 1; height: 3px; background: var(--progress-bg); border-radius: 1px; overflow: hidden; }
 .segment-fill { height: 100%; background: var(--accent); transition: width .3s; }
-.segment.completed .segment-fill { background: var(--success); }
-.segment.error .segment-fill { background: var(--error); }
+.segment.active .segment-fill { background: var(--accent); }
+.segment.done .segment-fill { background: var(--success); }
+.segment.pending .segment-fill { background: transparent; }
+/* FluxDown tail micro-split: a small straggler slice that keeps idle workers busy */
+.segment.tail { height: 3px; background: rgba(167, 139, 250, .22); }
+.segment.tail .segment-fill { background: #A78BFA; }
 
 .speed-cell { font-family: var(--font-mono); font-size: 11px; color: var(--success); font-variant-numeric: tabular-nums; }
 .speed-cell.zero { color: var(--text-muted); }
@@ -470,6 +477,15 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
 .status-badge.queued-paused { background: rgba(148, 163, 184, .12); color: var(--text-secondary); border: 1px solid var(--border-light); }
 .status-badge.connecting { background: rgba(167, 139, 250, .14); color: #A78BFA; border: 1px solid rgba(167, 139, 250, .35); }
 .status-badge.pending-approval { background: rgba(251, 146, 60, .12); color: #FB923C; border: 1px solid rgba(251, 146, 60, .35); }
+
+/* Live adaptive-connection chip: FluxDown-style worker count (active / target) */
+.conn-chip {
+  display: inline-block; margin-left: 7px; padding: 1px 7px; border-radius: var(--radius-pill);
+  font-size: 10px; font-weight: 600; font-family: var(--font-mono); letter-spacing: .2px;
+  color: var(--accent-soft); background: rgba(59, 130, 246, .10);
+  border: 1px solid rgba(59, 130, 246, .28); vertical-align: middle;
+}
+.col-status { white-space: nowrap; }
 
 .action-btns { display: flex; gap: 4px; }
 .action-btn {
