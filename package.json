@@ -1,7 +1,7 @@
 {
   "name": "aidm",
   "version": "5.3.2",
-  "description": "AiDM v5.3.2 - AI-Powered Download Manager with dark glass UI, DASH via yt-dlp, torrent/magnet (WebTorrent), HTTP/2 transport, auth-wall session-resilience guard, single-use-token (Gmail attachment / Drive) downloads via ONE plain GET to kill HTTP 400, hardened resume + HLS probing, and a FluxDown-derived adaptive download engine (bandwidth-aware segment advisor, improve/freeze/collapse connection ramp with per-domain cap learning + collapse rollback, tail micro-split with straggler guard, dynamic min-split), Plexo multi-network parallelism (Combine networks: spread a download's connections across physical NICs), byte-space BlockGrid segment visualization, SVG throughput chart, HMAC task-event webhooks, live segment/connection visualization, a lean IDM-style Chrome extension that hands links to the desktop app, JavaScript-runtime discovery for yt-dlp's YouTube challenges, and a fixed yt-dlp completion check that no longer reports a saved download as failed",
+  "description": "AiDM - AI-powered download manager with a multi-connection engine, YouTube/DASH via yt-dlp, torrent/magnet, HTTP/2, and an IDM-style Chrome extension.",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
