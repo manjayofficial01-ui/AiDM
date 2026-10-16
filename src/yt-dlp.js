@@ -32,6 +32,7 @@ const os = require('os');
 const crypto = require('crypto');
 const path = require('path');
 const { resolveFfmpeg } = require('./media-mux');
+const jsRuntime = require('./js-runtime');
 
 const IS_WIN = process.platform === 'win32';
 
@@ -178,13 +179,35 @@ function specNeedsMerge(spec) {
  * .frag*). A user file that merely SHARES the title prefix ("Clip.yt 2.mp4",
  * "Clip.youtube-notes.txt") must never match — the old startsWith() check
  * could delete or adopt unrelated files.
+ *
+ * Both helpers below take the REMAINDER of the name after the template prefix
+ * (everything up to `%(ext)s`). That prefix ALWAYS ends with a dot
+ * ("Clip.%(ext)s" → "Clip.", "Clip [1080p].yt%(ext)s" → "Clip [1080p].yt"), so
+ * the remainder of a real output is a BARE extension — "mp4", not ".mp4". The
+ * regexes used to require that leading dot, which meant no real output ever
+ * matched and no raw track was ever cleaned up. Never assume the dot is there.
  */
-const JOB_TEMP_NAME_RE = /\.(part|ytdl|temp|frag)(\.|$)|\.f\d+\./i;
+
+/** `mp4`, or (for a template with no dot before %(ext)s) `.mp4`. */
+function isJobMediaRest(rest) {
+  // One component ("mp4"), or TWO when yt-dlp appended the merge container to
+  // the template's own extension — a merged job lands as "m.ytmp4.mp4" for the
+  // template "m.yt%(ext)s" (template ext + `--merge-output-format mp4`). Both
+  // are real outputs and both must be recognised; that second form is the
+  // normal result of every DASH (1080p and up) download.
+  return /^\.?[A-Za-z0-9]{1,10}(?:\.[A-Za-z0-9]{1,10})?$/.test(rest);
+}
+
+/** A leftover yt-dlp would write alongside the media: `mp4.part`, `f137.mp4`… */
+function isJobTempRest(rest) {
+  return /^(?:[A-Za-z0-9]{1,10}\.)?(?:part|ytdl|temp|frag)(?:\.|$)/i.test(rest) ||
+    /^(?:[A-Za-z0-9]{1,10}\.)?f\d+\./i.test(rest);
+}
 
 function isJobOutputName(name, prefix) {
   if (!name.startsWith(prefix)) return false;
   const rest = name.slice(prefix.length);
-  return /^\.[A-Za-z0-9]{1,10}$/.test(rest) || JOB_TEMP_NAME_RE.test(rest);
+  return isJobMediaRest(rest) || isJobTempRest(rest);
 }
 
 /**
@@ -217,8 +240,14 @@ function producedFileFor(outputTemplate) {
     let best = null;
     let bestSize = -1;
     for (const name of fs.readdirSync(dir)) {
-      if (!isJobOutputName(name, prefix)) continue;
-      if (/\.(part|ytdl|temp)($|\.)/i.test(name) || /\.f\d+\./i.test(name)) continue;
+      if (!name.startsWith(prefix)) continue;
+      const rest = name.slice(prefix.length);
+      // Skip the intermediates by the SAME rule the cleanup uses: a .part /
+      // .ytdl / .temp / .frag leftover, or a raw `.f<id>.<ext>` track. Judging
+      // them on the remainder (not the whole filename) is what makes the
+      // ".yt" templates work — "Clip.ytf137.mp4" has no ".f137." in it.
+      if (isJobTempRest(rest)) continue;
+      if (!isJobMediaRest(rest)) continue;
       const p = path.join(dir, name);
       let st;
       try { st = fs.statSync(p); } catch (e) { continue; }
@@ -274,7 +303,16 @@ function classifyError(raw) {
   const has = (re) => re.test(t);
   if (has(/timed out/i) && !has(/socket/i)) return { code: 'timeout', message: 'The download exceeded the time limit and was stopped.' };
   if (has(/private video|This video is private/i)) return { code: 'private', message: 'This video is private. AiDM only downloads videos you can already watch.' };
-  if (has(/Sign in to confirm you.?re not a bot|not a bot/i)) return { code: 'bot-check', message: 'YouTube asked for a sign-in check before playing this video. AiDM does not bypass that — open the video in your browser first, or update yt-dlp in Settings › YouTube, or export that browser\'s cookies to a cookies.txt file and point Settings › YouTube at it.' };
+  // ── Network-level block. Verified live: an over-used IP is answered with a
+  //    redirect to google.com/sorry ("unusual traffic") and HTTP 429 before
+  //    YouTube ever talks to the extractor. yt-dlp surfaces that as a bare
+  //    "Unable to download webpage: HTTP Error 429", and the follow-up player
+  //    responses come back LOGIN_REQUIRED — which used to be reported as a
+  //    per-video bot check. It is NOT: it hits every video on the network, so
+  //    the fix is to wait / use a session / use a proxy, never "pick another
+  //    quality". Must be tested BEFORE the bot-check line below. ─────────────
+  if (has(/google\.com\/sorry|unusual traffic|HTTP Error 429|Too Many Requests/i)) return { code: 'rate-limited', message: 'YouTube is rate-limiting this network right now (it answered with a CAPTCHA redirect / HTTP 429). This is temporary and affects every video, not just this one. Wait a few minutes and retry; adding a signed-in session in Settings › YouTube, or a proxy under Settings › Network, also avoids it.' };
+  if (has(/Sign in to confirm you.?re not a bot|not a bot/i)) return { code: 'bot-check', message: 'YouTube demanded a sign-in check for this video. A signed-in session normally clears it: open the video with the AiDM browser extension active (it forwards that browser\'s YouTube session), or point Settings › YouTube at an exported cookies.txt. Updating yt-dlp there also helps.' };
   if (has(/age-restricted|age restricted|confirm your age/i)) return { code: 'age', message: 'This video is age-restricted. AiDM does not bypass age verification.' };
   if (has(/members-only|Join this channel|member-only/i)) return { code: 'members', message: 'This video is members-only. AiDM does not bypass paid access.' };
   // ── Added after real failures: these four used to fall through to the
@@ -503,6 +541,43 @@ function cookieArgs(o) {
 }
 
 /**
+ * `--extractor-args` for the YouTube extractor.
+ *
+ * YouTube now answers the default clients with SABR-only (URL-less) formats and
+ * refuses to mint a PO token without visitor data:
+ *
+ *   WARNING: Unable to fetch GVS PO Token for web client: Missing required
+ *   Visitor Data. You may need to pass Visitor Data with
+ *   --extractor-args "youtube:visitor_data=XXX"
+ *
+ * so the extractor's own knobs have to be reachable. Accepts a raw
+ * `key=value&key2=value2` string (the part after `youtube:`) OR a full
+ * `youtube:…` spec. The value is validated against the character set real
+ * extractor args use and REFUSED outright if anything else appears, so a pasted
+ * value can never smuggle a second argv entry or a flag.
+ *
+ * @param {string} raw
+ * @returns {string[]} ready to spread into argv (empty when nothing usable)
+ */
+function extractorArgs(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return [];
+  // Strip a leading "youtube:" if the user pasted the whole spec.
+  const body = (/^youtube:/i.test(s) ? s.slice('youtube:'.length) : s).trim();
+  if (!body) return [];
+  // yt-dlp reads `youtube:<k=v[&k=v…]>`. Accept ONLY the characters that
+  // appear in real values (`_`, `.`, `-`, `,`, `=`, `&`, `:`). Anything else —
+  // a space, a quote, a newline — means the input is not a plain pair list, so
+  // REFUSE the whole value instead of quietly mangling it into something that
+  // is neither what the user typed nor a flag. Refusing keeps the guarantee
+  // simple: whatever AiDM emits is exactly one argv entry and can never be a
+  // second one.
+  if (!/^[A-Za-z0-9_.\-=,&:]+$/.test(body)) return [];
+  if (!body.includes('=')) return [];
+  return ['--extractor-args', 'youtube:' + body];
+}
+
+/**
  * Network proxy argument for the yt-dlp subprocess. Pure.
  * Only well-formed http(s)/socks5 URLs pass — anything else is dropped so a
  * stray settings value can never smuggle an option into argv.
@@ -588,9 +663,13 @@ function buildSubtitleArgs(o) {
  * @param {string} [opts.proxy]    http(s)/socks5 proxy URL (empty = direct)
  * @returns {Promise<object>} parsed info dict
  */
-async function probe(url, { timeoutMs = 60000, cookies = null, referer = null, cookiesFromBrowser = null, cookieFile = null, proxy = null } = {}) {
+async function probe(url, { timeoutMs = 60000, cookies = null, referer = null, cookiesFromBrowser = null, cookieFile = null, proxy = null, jsRuntimePath = null, extractorArgsRaw = null } = {}) {
   const runner = await detectRunner();
   if (!runner) throw Object.assign(new Error(ytdlpMissingMessage()), { code: 'missing' });
+  // YouTube's JS challenge / PO-token step needs an external runtime. Absent
+  // one, yt-dlp still runs but warns that extraction "has been deprecated, and
+  // some formats may be missing" — so find one before building argv.
+  const jsrt = await jsRuntime.detectJsRuntime(false, { explicit: jsRuntimePath });
   // A private/members-only video cannot even be LISTED without the session,
   // so the picker must carry cookies too — not just the download.
   const tempCookieFile = cookies ? writeCookieFile(url, cookies) : null;
@@ -610,6 +689,8 @@ async function probe(url, { timeoutMs = 60000, cookies = null, referer = null, c
     '--socket-timeout', '20',
     '--retries', '2',
     '--extractor-retries', '2',
+    ...jsRuntime.jsRuntimeArgs(jsrt),
+    ...extractorArgs(extractorArgsRaw),
     ...cookieArgs({ cookieFiles, referer, cookiesFromBrowser }),
     ...proxyArgs({ proxy }),
     '--',
@@ -724,14 +805,20 @@ function download(o) {
     // live in an async executor — any early rejection there would hang the
     // caller instead of surfacing. Explicit .then/.catch keeps the outer
     // promise settled on every path.
-    detectRunner().then((runner) => {
+    // The JS runtime is resolved alongside yt-dlp: YouTube's JS challenge and
+    // PO-token step cannot run without one, and finding it here keeps the argv
+    // builder synchronous (see downloadWithRunner).
+    Promise.all([
+      detectRunner(),
+      jsRuntime.detectJsRuntime(false, { explicit: o && o.jsRuntimePath }).catch(() => null),
+    ]).then(([runner, jsrt]) => {
       if (!runner) {
         const err = new Error(ytdlpMissingMessage());
         err.code = 'missing';
         reject(err);
         return;
       }
-      return downloadWithRunner(o, runner, resolve, reject);
+      return downloadWithRunner({ ...o, _jsRuntime: jsrt }, runner, resolve, reject);
     }).catch(reject);
   });
 }
@@ -825,6 +912,12 @@ function downloadWithRunner(o, runner, resolve, reject) {
     const tempCookieFile = cookies ? writeCookieFile(url, cookies) : null;
     const userCookieFile = resolveUserCookieFile(o.cookieFile);
     const cookieFiles = [tempCookieFile, userCookieFile].filter(Boolean);
+    // YouTube's JS challenge / PO-token step needs an external JS runtime.
+    // Without one yt-dlp still runs, but warns that YouTube extraction "has
+    // been deprecated, and some formats may be missing" — which is exactly how
+    // a job that used to work starts failing or saving a degraded stream.
+    args.push(...jsRuntime.jsRuntimeArgs(o._jsRuntime));
+    args.push(...extractorArgs(o.extractorArgs));
     args.push(...cookieArgs({ cookieFiles, referer, cookiesFromBrowser }));
     args.push(...proxyArgs({ proxy }));
 
@@ -1042,6 +1135,7 @@ module.exports = {
   // Cookie / Referer plumbing (pure helpers are regression-tested).
   BROWSERS,
   cookieArgs,
+  extractorArgs,
   resolveUserCookieFile,
   buildSubtitleArgs,
   cookieDomainFor,

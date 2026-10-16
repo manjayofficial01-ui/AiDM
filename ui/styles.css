@@ -811,6 +811,18 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
+/* Shown only when the metadata probe was blocked (bot check / rate limit), so
+   the picker's single "Best available" row is explained instead of looking
+   like a broken quality list. */
+.quality-page-note {
+  margin-top: 8px; padding: 7px 9px;
+  font-size: 11px; line-height: 1.45; color: var(--text-secondary, #cbd5e1);
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 6px;
+}
+.quality-page-note[hidden] { display: none; }
+
 .quality-list { display: flex; flex-direction: column; gap: 8px; }
 .quality-option {
   display: flex; align-items: center; gap: 12px;

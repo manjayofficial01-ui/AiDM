@@ -488,7 +488,9 @@ function toPickerVideos(info, { canonicalUrl, id, title } = {}) {
 // no auth, no alternative client — the same yt-dlp call runs at start).
 // Genuine access failures (private, members-only, age, removed, live) are NOT
 // retried: they cannot succeed, so they stay errors.
-const RETRYABLE_PROBE_CODES = new Set(['bot-check', 'timeout', 'extract', 'parse']);
+// `rate-limited` IS retried: YouTube throttling an over-used network is
+// temporary, so the user keeps a row and can retry once it clears.
+const RETRYABLE_PROBE_CODES = new Set(['bot-check', 'timeout', 'extract', 'parse', 'rate-limited']);
 
 /** Minimal payload used when the probe is blocked but the video may still work. */
 function fallbackPayload(canonical, id, reason) {
@@ -551,6 +553,11 @@ async function resolveYouTubeVideos(url, opts = {}) {
       referer: opts.referer || null,
       cookiesFromBrowser: opts.cookiesFromBrowser || null,
       cookieFile: opts.cookieFile || null,
+      // YouTube's JS challenge / PO-token step needs an external runtime, and
+      // the extractor's own knobs (visitor data, player client) have to be
+      // reachable — otherwise the probe returns SABR-only, URL-less formats.
+      jsRuntimePath: opts.jsRuntimePath || null,
+      extractorArgsRaw: opts.extractorArgsRaw || null,
     });
   } catch (e) {
     if (RETRYABLE_PROBE_CODES.has(e && e.code)) return fallbackPayload(canonical, id, e && e.message);

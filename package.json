@@ -1,7 +1,7 @@
 {
   "name": "aidm",
-  "version": "5.3.1",
-  "description": "AiDM v5.3.0 - AI-Powered Download Manager with dark glass UI, DASH via yt-dlp, torrent/magnet (WebTorrent), HTTP/2 transport, auth-wall session-resilience guard, single-use-token (Gmail attachment / Drive) downloads via ONE plain GET to kill HTTP 400, hardened resume + HLS probing, and a FluxDown-derived adaptive download engine (bandwidth-aware segment advisor, improve/freeze/collapse connection ramp with per-domain cap learning + collapse rollback, tail micro-split with straggler guard, dynamic min-split), Plexo multi-network parallelism (Combine networks: spread a download's connections across physical NICs), byte-space BlockGrid segment visualization, SVG throughput chart, HMAC task-event webhooks, live segment/connection visualization, and a lean IDM-style Chrome extension that hands links to the desktop app",
+  "version": "5.3.2",
+  "description": "AiDM v5.3.2 - AI-Powered Download Manager with dark glass UI, DASH via yt-dlp, torrent/magnet (WebTorrent), HTTP/2 transport, auth-wall session-resilience guard, single-use-token (Gmail attachment / Drive) downloads via ONE plain GET to kill HTTP 400, hardened resume + HLS probing, and a FluxDown-derived adaptive download engine (bandwidth-aware segment advisor, improve/freeze/collapse connection ramp with per-domain cap learning + collapse rollback, tail micro-split with straggler guard, dynamic min-split), Plexo multi-network parallelism (Combine networks: spread a download's connections across physical NICs), byte-space BlockGrid segment visualization, SVG throughput chart, HMAC task-event webhooks, live segment/connection visualization, a lean IDM-style Chrome extension that hands links to the desktop app, JavaScript-runtime discovery for yt-dlp's YouTube challenges, and a fixed yt-dlp completion check that no longer reports a saved download as failed",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -32,6 +32,7 @@
     "test:twitter-resolver": "node test/twitter-resolver.js",
     "test:youtube": "node test/youtube-resolver.js",
     "test:youtube-extension": "node test/youtube-extension.js",
+    "test:youtube-js-runtime": "node test/youtube-js-runtime.js",
     "test:media-probe": "node test/media-probe.js",
     "test:filehost-resolver": "node test/filehost-resolver.js",
     "test:youtube-audio": "node test/youtube-audio.js",
@@ -48,6 +49,7 @@
     "test": "node test/run-all.js",
     "test:extension-dimensions": "node test/extension-dimensions.js",
     "test:yt-dlp-cookies": "node test/yt-dlp-cookies.js",
+    "test:yt-dlp-output": "node test/yt-dlp-output.js",
     "test:main-boot": "node test/main-boot.js",
     "test:jev-classify": "node test/jev-classify.js",
     "test:engine-agents": "node test/engine-agents.js",

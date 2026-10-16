@@ -56,6 +56,26 @@ function sanitizeHeaders(input) {
   return out;
 }
 
+/** Copy API data while stripping live credentials from download records. */
+function sanitizeApiPayload(value) {
+  if (Array.isArray(value)) return value.map(sanitizeApiPayload);
+  if (!value || typeof value !== 'object') return value;
+  const out = Object.create(null);
+  for (const [key, item] of Object.entries(value)) {
+    if (/^cookies?$/i.test(key)) continue;
+    if (key.toLowerCase() === 'headers' && item && typeof item === 'object') {
+      const headers = Object.create(null);
+      for (const [name, headerValue] of Object.entries(item)) {
+        if (String(name).toLowerCase() !== 'cookie') headers[name] = sanitizeApiPayload(headerValue);
+      }
+      out[key] = headers;
+    } else {
+      out[key] = sanitizeApiPayload(item);
+    }
+  }
+  return out;
+}
+
 /**
  * Origin gate. The 127.0.0.1 bind alone is NOT a security boundary: any web
  * page the user visits can fetch() the local port, and reflected CORS made
@@ -192,6 +212,24 @@ class IPCServer {
     } catch (e) { return null; }
   }
 
+  /**
+   * JavaScript runtime override for yt-dlp (Settings › YouTube). Empty means
+   * auto-detect — src/js-runtime.js searches deno/bun/node/quickjs and verifies
+   * the one it picks, so the default needs no configuration.
+   */
+  _youtubeJsRuntime() {
+    try {
+      return String((this.dm && this.dm.getSettings().youtubeJsRuntime) || '').trim() || null;
+    } catch (e) { return null; }
+  }
+
+  /** Extra `--extractor-args` for the YouTube extractor (validated downstream). */
+  _youtubeExtractorArgs() {
+    try {
+      return String((this.dm && this.dm.getSettings().youtubeExtractorArgs) || '').trim() || null;
+    } catch (e) { return null; }
+  }
+
   _readBody(req, maxBytes = MAX_BODY_BYTES) {
     return new Promise((resolve, reject) => {
       const chunks = [];
@@ -300,7 +338,7 @@ class IPCServer {
       // GET /api/downloads — list all downloads
       if (req.method === 'GET' && req.url === '/api/downloads') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(this.dm.getAllDownloads()));
+        res.end(JSON.stringify(sanitizeApiPayload(this.dm.getAllDownloads())));
         return;
       }
 
@@ -317,7 +355,7 @@ class IPCServer {
             const data = JSON.parse(body);
             const r = await this._routeDownload(data);
             res.writeHead(r.statusCode, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify(r.body));
+            res.end(JSON.stringify(sanitizeApiPayload(r.body)));
           } catch (err) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: err.message }));
@@ -400,6 +438,8 @@ class IPCServer {
               referer: referer || null,
               cookiesFromBrowser: this._youtubeCookiesFromBrowser(),
               cookieFile: this._youtubeCookieFile(),
+              jsRuntimePath: this._youtubeJsRuntime(),
+              extractorArgsRaw: this._youtubeExtractorArgs(),
             });
             respond(200, { success: true, ...resolved });
           } catch (err) {
@@ -518,14 +558,20 @@ class IPCServer {
               return;
             }
             const { url, pageTitle, cookies, referer } = JSON.parse(body || '{}');
-            // The extension sends only the page URL, so the session has to come
-            // from the opt-in browser cookie store here — without it a private /
-            // members-only video is reported as unavailable to a signed-in user.
+            // The extension may forward its YouTube-only session to this local
+            // resolver. Bound it before both yt-dlp and the renderer handoff;
+            // the HTTP response below deliberately never contains it.
+            const sessionCookies = typeof cookies === 'string' && cookies.length <= 262144
+              ? cookies : null;
+            // Without a session, a private / members-only video may be reported
+            // as unavailable to a signed-in browser user (see bot-check errors).
             const r = await resolvers.resolveMedia(url, {
-              cookies: cookies || null,
+              cookies: sessionCookies,
               referer: referer || null,
               cookiesFromBrowser: this._youtubeCookiesFromBrowser(),
               cookieFile: this._youtubeCookieFile(),
+              jsRuntimePath: this._youtubeJsRuntime(),
+              extractorArgsRaw: this._youtubeExtractorArgs(),
             });
 
             const payload = {
@@ -535,6 +581,14 @@ class IPCServer {
               provider: 'youtube',
               thumbnail: r.thumbnail || undefined,
               duration: r.duration || undefined,
+              // Transient only: the renderer needs this to start the selected
+              // format with the same session. Never put it in the HTTP response.
+              cookies: sessionCookies || undefined,
+              // Set when the metadata probe was blocked (bot check / rate limit)
+              // and the single "Best" row is a retryable fallback rather than a
+              // real quality list. Without this the picker silently shows one
+              // row and the user cannot tell why.
+              probeError: r.probeError || undefined,
               videos: r.pickerVideos || [],
             };
             this.dm.emit('video-detected', payload);
@@ -565,7 +619,7 @@ class IPCServer {
             }
             const dl = this.dm.approveDownload(id, savePath);
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ success: true, download: dl }));
+            res.end(JSON.stringify({ success: true, download: sanitizeApiPayload(dl) }));
           } catch (err) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: err.message }));
@@ -610,7 +664,7 @@ class IPCServer {
             if (!id || typeof id !== 'string') throw new Error('Missing id');
             const dl = this.dm.cancelDownload(id);
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ success: true, download: dl }));
+            res.end(JSON.stringify({ success: true, download: sanitizeApiPayload(dl) }));
           } catch (err) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: err.message }));
@@ -669,8 +723,8 @@ class IPCServer {
                 const r = await this._routeDownload({ url, headers: batchHeaders, cookies: parsed.cookies });
                 // Surface the URL alongside non-success results so the caller
                 // can tell which entry failed.
-                if (r.body && r.body.success === false) return { url, ...r.body };
-                return { url, ...r.body };
+                if (r.body && r.body.success === false) return { url, ...sanitizeApiPayload(r.body) };
+                return { url, ...sanitizeApiPayload(r.body) };
               } catch (err) {
                 return { url, error: (err && err.message) || String(err) };
               }
@@ -756,6 +810,8 @@ class IPCServer {
         referer: pageUrl,
         cookiesFromBrowser: this._youtubeCookiesFromBrowser(),
         cookieFile: this._youtubeCookieFile(),
+        jsRuntimePath: this._youtubeJsRuntime(),
+        extractorArgsRaw: this._youtubeExtractorArgs(),
       });
       const payload = {
         url: r.canonicalUrl || pageUrl,
@@ -764,6 +820,9 @@ class IPCServer {
         provider: 'youtube',
         thumbnail: r.thumbnail || undefined,
         duration: r.duration || undefined,
+        // See the /api/resolve-youtube note: a blocked probe yields one
+        // retryable row, and the reason has to travel with it.
+        probeError: r.probeError || undefined,
         videos: r.pickerVideos || [],
       };
       this.dm.emit('video-detected', payload);
@@ -784,6 +843,8 @@ class IPCServer {
             referer: (data.meta && data.meta.pageUrl) || data.url,
             cookiesFromBrowser: this._youtubeCookiesFromBrowser(),
             cookieFile: this._youtubeCookieFile(),
+            jsRuntimePath: this._youtubeJsRuntime(),
+            extractorArgsRaw: this._youtubeExtractorArgs(),
           });
           if (!resolved.pickerVideos || !resolved.pickerVideos.length) {
             return { statusCode: 200, body: {
@@ -845,4 +906,5 @@ module.exports = {
   youtubePageUrlFor,
   sanitizeHeaders,
   isTrustedOrigin,
+  sanitizeApiPayload,
 };

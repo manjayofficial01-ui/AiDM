@@ -459,8 +459,10 @@ function maybeResolveFacebook(url) {
 // So the extension hands the WATCH PAGE to the desktop instead, which
 // resolves it with yt-dlp into real, merged qualities (with sound).
 //
-// No cookies are attached: AiDM does not bypass login walls or bot checks.
-// A video that needs sign-in is reported as an error, never worked around.
+// When the user is signed in, forward only cookies Chrome would send to the
+// primary YouTube origin, and only to AiDM's loopback resolver. This lets
+// yt-dlp use the same session for bot/login checks; the resolver response does
+// not echo cookies and the extension never sends them to a third-party host.
 // Any *.youtube.com host — www / m / music / gaming … — plus youtube-nocookie
 // embeds and youtu.be short links. The host must be followed by a path that
 // pins ONE video: watch?v=…, /shorts/, /embed/, /live/, /v/, /e/, or /clip/
@@ -495,10 +497,23 @@ function maybeResolveYouTube(url) {
 
     (async () => {
       try {
+        // Use the primary YouTube origin even for youtu.be / youtube-nocookie
+        // pages: the session cookies belong to .youtube.com, not those hosts.
+        // collectCookies uses getAll({url}) for this exact origin, avoiding a
+        // broad google.com cookie dump or any unrelated browser credentials.
+        let cookies = null;
+        try {
+          const all = await collectCookies(new Set(['https://www.youtube.com/']));
+          if (all.length) {
+            const header = all.join('; ');
+            // Never truncate a credential header; omit it if unexpectedly huge.
+            if (header.length <= 262144) cookies = header;
+          }
+        } catch (e) { /* resolve without browser session */ }
         const resp = await fetch(`${AIDM_API_BASE}/api/resolve-youtube`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url }),
+          body: JSON.stringify({ url, cookies }),
         });
         const data = await resp.json().catch(() => null);
         if (!data || data.success === false) {

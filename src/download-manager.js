@@ -192,9 +192,15 @@ function findProducedFile(dir, stem) {
     const scored = names.map((n) => {
       let size = 0, mtime = 0;
       try { const st = fs.statSync(path.join(dir, n)); size = st.size; mtime = st.mtimeMs; } catch (e) { /* ignore */ }
+      // A raw DASH track is "<stem>.ytf137.mp4" — the template's ".yt" sits
+      // BETWEEN the stem and the ".f<id>" marker, so the obvious /\.f\d+\./
+      // test against the WHOLE name never matches it and a picture-only track
+      // could be ranked as if it were the merged file. Judge the remainder
+      // after the template prefix instead.
+      const rest = n.slice(prefix.length);
       return {
         n, size, mtime,
-        merged: /\.f\d+\./i.test(n) ? 0 : 1,          // merged beats raw track
+        merged: /^f\d+\./i.test(rest) ? 0 : 1,        // merged beats raw track
         mp4: /\.mp4$/i.test(n) ? 1 : 0,               // MP4 beats webm/mkv
       };
     });
@@ -571,6 +577,20 @@ const DEFAULT_SETTINGS = {
   // off; the path is verified to exist at use time, so a stale setting can
   // never break every YouTube download.
   youtubeCookiesFile: '',
+  // JavaScript runtime for yt-dlp's YouTube extractor. Current yt-dlp builds
+  // no longer carry a built-in JS interpreter: they delegate YouTube's stream
+  // signature challenge and PO-token ("proof of origin") generation to an
+  // external runtime, and warn "YouTube extraction without a JS runtime has
+  // been deprecated, and some formats may be missing" when there is none.
+  // EMPTY = auto-detect (deno → bun → node → quickjs, verified by running
+  // --version). Set to a runtime name ("deno"), "name:path", or a full path to
+  // pin one. AiDM always passes what it finds; this only overrides the search.
+  youtubeJsRuntime: '',
+  // Extra `--extractor-args` for the YouTube extractor, e.g.
+  // "player_client=web_safari" or "visitor_data=Cg…". Empty = none. Validated
+  // before use (see extractorArgs in src/yt-dlp.js) so a pasted value can
+  // never become a second argv entry.
+  youtubeExtractorArgs: '',
   // Post-download actions (v4.8.0, IDM/AntDM style): run a command on every
   // finished download. `postDownloadCmd` may contain {file} — replaced with
   // the finished file's path. Typical antivirus usage:
@@ -1867,6 +1887,11 @@ class DownloadManager extends EventEmitter {
         // machines, so this file is the reliable path. Verified to exist at
         // use time — a stale setting must never break every download.
         cookieFile: ytdlp.resolveUserCookieFile(this.settings.youtubeCookiesFile),
+        // YouTube's JS challenge / PO-token step needs an external JS runtime;
+        // without one yt-dlp silently degrades ("some formats may be missing").
+        // Empty setting = auto-detect. Same for the extractor's own knobs.
+        jsRuntimePath: String(this.settings.youtubeJsRuntime || '').trim() || null,
+        extractorArgs: String(this.settings.youtubeExtractorArgs || '').trim() || null,
         // With video+audio the per-track total is only half the job; the
         // resolver's combined size makes the percentage honest.
         expectedBytes: (choice && choice.size) || download.totalSize || 0,

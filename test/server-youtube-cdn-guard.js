@@ -24,7 +24,8 @@ function check(name, cond, extra) {
 }
 
 const server = require('../src/server.js');
-const { isYouTubeMediaUrl, youtubePageUrlFor } = server;
+const resolvers = require('../src/resolvers');
+const { isYouTubeMediaUrl, youtubePageUrlFor, sanitizeApiPayload } = server;
 
 // ── isYouTubeMediaUrl ───────────────────────────────────────────────────────
 console.log('── isYouTubeMediaUrl ──');
@@ -75,7 +76,11 @@ const stubDm = {
   downloads: new Map(),
   getSettings: () => ({}),
   emit: (event, payload) => { emitted.push({ event, payload }); },
-  addDownload: (opts) => { added.push(opts); return { id: 'stub', duplicate: false }; },
+  getAllDownloads: () => [{
+    id: 'private-row', cookies: 'COOKIE_SECRET', headers: { Cookie: 'HEADER_SECRET', Referer: 'https://youtube.com/' },
+    meta: { cookies: 'META_SECRET', headers: { cookie: 'META_HEADER_SECRET', Referer: 'https://youtube.com/' } },
+  }],
+  addDownload: (opts) => { added.push(opts); return { id: 'stub', duplicate: false, cookies: 'ROW_SECRET' }; },
 };
 
 function post(port, payload) {
@@ -90,7 +95,7 @@ function post(port, payload) {
       res.on('end', () => {
         let parsed = null;
         try { parsed = JSON.parse(out); } catch (e) { /* non-JSON */ }
-        resolve({ status: res.statusCode, body: parsed });
+        resolve({ status: res.statusCode, body: parsed, raw: out });
       });
     });
     req.on('error', reject);
@@ -189,6 +194,12 @@ function rawGet(port, path, headers) {
     check('a normal url still downloads', r2.body && r2.body.success === true);
     check('exactly one row was added', added.length === 1, 'added=' + added.length);
     check('it is the normal url', added[0] && added[0].url === 'https://cdn.example.com/video.mp4');
+    check('download API response never exposes row cookies',
+      !/ROW_SECRET|\"cookies\"/i.test(r2.raw || ''));
+    const listed = await rawGet(srv.port, '/api/downloads', { Host: `127.0.0.1:${srv.port}` });
+    check('download-list API strips cookie fields and Cookie headers',
+      listed.status === 200 && !/COOKIE_SECRET|HEADER_SECRET|META_SECRET|META_HEADER_SECRET|\"cookies\"|\"Cookie\"/i.test(listed.raw || '') &&
+      (listed.raw || '').includes('https://youtube.com/'));
 
     // ── Page URL routing (closes the "two dialogs for one click" gap) ──────
     // The HTTP API must route a YouTube page URL through the resolver
@@ -199,7 +210,7 @@ function rawGet(port, path, headers) {
 
     // Mark the existing rows/emits so the page-URL assertions are local.
     const baseAdded = added.length;
-    const baseEmits = emitted.length;
+    let baseEmits = emitted.length;
     const lastEmitted = (name) => {
       for (let i = emitted.length - 1; i >= 0; i--) {
         if (emitted[i].event === name) return emitted[i].payload;
@@ -208,10 +219,44 @@ function rawGet(port, path, headers) {
     };
 
     // Page URL without ytFormat → resolve + emit video-detected, NO row.
-    // We mock the resolver by temporarily hijacking it: not easy without
-    // touching internals. Instead, use a URL that the resolver registry
-    // recognises but that resolveMedia can't extract — the empty-qualities
-    // branch.
+    // The extension's YouTube-only session must reach the resolver and the
+    // transient picker event, but neither the HTTP response nor download-list
+    // APIs may expose it. Stub just the provider function; no network needed.
+    const originalResolveMedia = resolvers.resolveMedia;
+    const resolverCalls = [];
+    resolvers.resolveMedia = async (url, opts) => {
+      resolverCalls.push({ url, opts });
+      return {
+        id: 'youtube-session-test', canonicalUrl: url, title: 'Session test',
+        pickerVideos: [{ url, filename: 'Session test.mp4', quality: '720p' }],
+      };
+    };
+    try {
+      const secret = 'YOUTUBE_SESSION_COOKIE_SECRET';
+      const yt = await postJson(srv.port, '/api/resolve-youtube', {
+        url: 'https://www.youtube.com/watch?v=feWb9vUUlKU', cookies: secret,
+      });
+      const ytEvent = lastEmitted('video-detected');
+      check('YouTube endpoint forwards supplied session to resolver',
+        resolverCalls.length === 1 && resolverCalls[0].opts.cookies === secret);
+      check('resolver session is attached to transient picker event',
+        ytEvent && ytEvent.cookies === secret && ytEvent.provider === 'youtube');
+      check('YouTube resolve response never echoes the session',
+        yt.status === 200 && !yt.raw.includes(secret) && yt.body && yt.body.success === true);
+
+      const tooLarge = 'c'.repeat(262145);
+      await postJson(srv.port, '/api/resolve-youtube', {
+        url: 'https://www.youtube.com/watch?v=feWb9vUUlKU', cookies: tooLarge,
+      });
+      check('oversized resolver session is dropped before yt-dlp',
+        resolverCalls.length === 2 && resolverCalls[1].opts.cookies === null);
+    } finally {
+      resolvers.resolveMedia = originalResolveMedia;
+    }
+    // Exclude the intentional YouTube test event from the Twitter/page-url
+    // dedupe assertions below.
+    baseEmits = emitted.length;
+
     const r3 = await post(srv.port, {
       url: 'https://twitter.com/whatever/status/1234567890123456789',
       filename: 'tweet.html',
@@ -286,6 +331,8 @@ function rawGet(port, path, headers) {
       added.length === batchBeforeAdded + 2, 'added delta=' + (added.length - batchBeforeAdded));
     check('batch success is reported at the envelope level',
       rb.body && rb.body.success === true);
+    check('batch response never exposes row cookie secrets',
+      !JSON.stringify(rb.body || {}).includes('ROW_SECRET'));
 
     // ── /api/video-detected must filter googlevideo variants ────────────────
     // The extension forwards raw variant lists here. A googlevideo entry in

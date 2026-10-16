@@ -1434,6 +1434,14 @@ function setupEventListeners() {
   });
   const btnYtdlpUpdate = document.getElementById('btn-ytdlp-update');
   if (btnYtdlpUpdate) btnYtdlpUpdate.addEventListener('click', updateYtDlp);
+  // Re-detect the JavaScript runtime after the user installs one (Settings ›
+  // YouTube). detectJsRuntime(true) forces a fresh probe and drops the cache.
+  const btnYtJsRescan = document.getElementById('btn-yt-js-rescan');
+  if (btnYtJsRescan) btnYtJsRescan.addEventListener('click', async () => {
+    const jsInput = document.getElementById('yt-js-runtime');
+    if (jsInput) jsInput.value = 'Detecting…';
+    await refreshYtDlpStatus();
+  });
   // Live progress of the in-app yt-dlp update ("Downloading yt-dlp.exe…").
   if (window.aidm.onYtDlpUpdateStatus) {
     window.aidm.onYtDlpUpdateStatus(({ stage, message }) => {
@@ -1639,10 +1647,29 @@ function showQualityPicker(data) {
     cookies: data.cookies || null,
   };
 
-  if (qualityVideos.length === 0) return;
+  if (qualityVideos.length === 0) {
+    qualityContext = null;
+    qualityShownForPageUrl = null;
+    return;
+  }
 
   document.getElementById('quality-page-title').textContent = data.pageTitle || 'Video detected';
   document.getElementById('quality-page-url').textContent = data.pageUrl || '';
+
+  // A blocked metadata probe (bot check / rate limit) yields ONE retryable
+  // "Best" row instead of a real quality list. Say so — otherwise the picker
+  // just looks broken ("where are my 1080p options?").
+  const noteEl = document.getElementById('quality-page-note');
+  if (noteEl) {
+    const note = String(data.probeError || '').trim();
+    if (note) {
+      noteEl.textContent = 'Could not read the full quality list: ' + note + ' You can still try “Best available”.';
+      noteEl.hidden = false;
+    } else {
+      noteEl.textContent = '';
+      noteEl.hidden = true;
+    }
+  }
 
   const list = document.getElementById('quality-list');
   list.innerHTML = '';
@@ -1858,6 +1885,9 @@ function hideQualityPicker() {
   closeOverlay('quality-overlay');
   qualityVideos = [];
   qualitySelectedIdx = -1;
+  // Drop the transient session as soon as the picker closes; it is needed only
+  // to resolve/start this one choice and must not linger in renderer memory.
+  qualityContext = null;
   // A cancelled/closed picker must not permanently suppress the same pageUrl —
   // the sticky dedupe guard only matters while one pick session is alive.
   qualityShownForPageUrl = null;
@@ -2007,6 +2037,9 @@ async function showSettingsModal() {
   // YouTube signed-in access (v5.3.1) — exported cookies.txt + engine status.
   const ytCookieFile = document.getElementById('setting-yt-cookies-file');
   if (ytCookieFile) ytCookieFile.value = String(settings.youtubeCookiesFile || '');
+  // Advanced extractor args (v5.3.2). Empty = none.
+  const ytExtractorArgs = document.getElementById('setting-yt-extractor-args');
+  if (ytExtractorArgs) ytExtractorArgs.value = String(settings.youtubeExtractorArgs || '');
   refreshYtDlpStatus();
 
   // Category paths
@@ -2035,8 +2068,11 @@ let ytdlpUpdateNote = '';
 async function refreshYtDlpStatus() {
   const input = document.getElementById('ytdlp-version');
   const hint = document.getElementById('ytdlp-update-hint');
+  const jsInput = document.getElementById('yt-js-runtime');
+  const jsHint = document.getElementById('yt-js-runtime-hint');
   if (!input || !window.aidm || !window.aidm.getYtDlpStatus) return;
   input.value = 'Checking…';
+  if (jsInput) jsInput.value = 'Detecting…';
   try {
     const st = await window.aidm.getYtDlpStatus();
     if (st && st.found) {
@@ -2046,8 +2082,25 @@ async function refreshYtDlpStatus() {
       input.value = 'not installed';
       if (hint) hint.textContent = 'yt-dlp is not installed yet — YouTube links cannot be extracted. Click “Update yt-dlp” to install the official build into this user\'s folder (no admin rights needed).';
     }
+    // The JS runtime is a SEPARATE requirement from yt-dlp itself: without one
+    // YouTube extraction silently degrades, so report it next to the version.
+    const js = st && st.jsRuntime;
+    if (jsInput) {
+      jsInput.value = js && js.found
+        ? `${js.name} ${js.version}`
+        : 'not found';
+      jsInput.title = (js && js.describe) || '';
+    }
+    if (jsHint) {
+      if (js && js.found) {
+        jsHint.textContent = `Using ${js.describe}. YouTube's JavaScript challenge and PO-token step run through this runtime, so full quality lists are available.`;
+      } else {
+        jsHint.textContent = 'No JavaScript runtime found. yt-dlp can still extract, but YouTube warns that this is deprecated and “some formats may be missing”. Install Deno, Bun, Node.js or QuickJS (Node.js is the usual choice), then click “Re-detect”.';
+      }
+    }
   } catch (e) {
     input.value = 'unknown';
+    if (jsInput) jsInput.value = 'unknown';
   }
 }
 
@@ -2159,6 +2212,7 @@ async function saveSettings() {
     },
     youtubeCookiesFromBrowser: (document.getElementById('setting-yt-cookies-browser')?.value || '').trim(),
     youtubeCookiesFile: (document.getElementById('setting-yt-cookies-file')?.value || '').trim(),
+    youtubeExtractorArgs: (document.getElementById('setting-yt-extractor-args')?.value || '').trim(),
     postDownloadCmd: document.getElementById('setting-post-download-cmd').value.trim(),
     aiEnabled: document.getElementById('setting-ai-enabled').checked,
     aiBaseURL: document.getElementById('setting-ai-baseurl').value.trim() || 'https://tokenharbor.ai/v1',

@@ -296,6 +296,7 @@
         <div class="quality-page-info">
           <div class="quality-page-title" id="quality-page-title"></div>
           <div class="quality-page-url" id="quality-page-url"></div>
+          <div class="quality-page-note" id="quality-page-note" hidden></div>
         </div>
         <div class="quality-list" id="quality-list">
           <!-- Quality options populated by JS -->
@@ -522,6 +523,19 @@
                 <button type="button" class="tool-btn small" id="btn-ytdlp-update" title="Download and install the latest nightly yt-dlp build">Update yt-dlp</button>
               </div>
               <div class="settings-hint" id="ytdlp-update-hint">YouTube changes its player weekly and signs its streams — a stale yt-dlp is the usual cause of “Sign in to confirm you’re not a bot”. One click installs the current nightly build (checksum-verified) into this user's folder; no admin rights needed.</div>
+            </div>
+            <div class="form-group">
+              <label>JavaScript runtime</label>
+              <div class="path-input">
+                <input type="text" id="yt-js-runtime" readonly placeholder="Detecting…" />
+                <button type="button" class="tool-btn small" id="btn-yt-js-rescan" title="Search for a JavaScript runtime again">Re-detect</button>
+              </div>
+              <div class="settings-hint" id="yt-js-runtime-hint">YouTube signs its streams and hides them behind a JavaScript challenge. yt-dlp no longer carries its own JS engine — it needs an external one (Deno, Bun, Node or QuickJS), or it warns that extraction “has been deprecated, and some formats may be missing”. AiDM finds one automatically and verifies it by running <code>--version</code>; nothing is installed without your say-so.</div>
+            </div>
+            <div class="form-group">
+              <label>Advanced extractor args (optional)</label>
+              <input type="text" id="setting-yt-extractor-args" placeholder="e.g. player_client=web_safari" />
+              <div class="settings-hint">Passed to yt-dlp as <code>--extractor-args "youtube:…"</code>. Leave empty unless you are working around a specific YouTube change (a different <code>player_client</code>, or a <code>visitor_data</code> value). Anything that is not a plain <code>key=value&amp;key=value</code> pair is ignored entirely, so this can never inject a command-line flag.</div>
             </div>
           </section>
 

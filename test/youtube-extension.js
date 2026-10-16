@@ -13,10 +13,10 @@
 //   • maybeResolveYouTube is hooked into BOTH navigation listeners
 //     (tabs.onUpdated and the SPA history listener — YouTube is an SPA, so
 //     without the history hook in-app navigation would never resolve)
-//   • it posts to /api/resolve-youtube, retries after a failure, and sends NO
-//     cookies (AiDM does not bypass login walls or bot checks)
+//   • it posts to /api/resolve-youtube, retries after a failure, and forwards
+//     only a bounded YouTube-origin cookie header to the local app
 //   • the desktop endpoint is rate-limited, emits video-detected with the
-//     canonical page url, and reports failure instead of hanging
+//     canonical page url and transient session, and never echoes cookies
 //
 // Run: node test/youtube-extension.js
 'use strict';
@@ -34,6 +34,8 @@ const SRC = path.join(__dirname, '..', 'chrome-extension', 'background.js');
 const bg = fs.readFileSync(SRC, 'utf8');
 const SRV = path.join(__dirname, '..', 'src', 'server.js');
 const srv = fs.readFileSync(SRV, 'utf8');
+const appSrc = fs.readFileSync(path.join(__dirname, '..', 'ui', 'app.js'), 'utf8');
+const dmSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'download-manager.js'), 'utf8');
 
 // ── 1. Page-URL detection (the shipped regex, evaluated) ─────────────────────
 
@@ -111,10 +113,17 @@ if (!m) {
   check('app not running allows a retry (catch deletes key)',
     !!fn && /catch \(e\) \{\s*\n?\s*resolvedYtPages\.delete\(key\)/.test(fn[1]));
 
-  // No cookies: resolving with a session cookie would be an access-control
-  // bypass, which this engine deliberately does not do.
-  check('sends no cookies with a YouTube resolve',
-    !!fn && !/cookies/i.test(fn[1]));
+  // Cookies are taken from the primary YouTube origin only, never from the
+  // broad Google domain set or unrelated sites, and travel only to loopback.
+  check('collects cookies only from the primary YouTube origin',
+    !!fn && /collectCookies\(new Set\(\['https:\/\/www\.youtube\.com\/'\]\)\)/.test(fn[1]));
+  check('bounds the captured Cookie header without truncating it',
+    !!fn && /header\.length <= 262144/.test(fn[1]) && /cookies = header/.test(fn[1]));
+  check('forwards cookies only to local YouTube resolver',
+    !!fn && /fetch\(`\$\{AIDM_API_BASE\}\/api\/resolve-youtube`/.test(fn[1]) &&
+      /body: JSON\.stringify\(\{ url, cookies \}\)/.test(fn[1]));
+  check('does not query a broad Google cookie domain',
+    !!fn && !/cookies\.getAll\(\{\s*domain/i.test(fn[1]));
 
   // ── 3. Desktop endpoint ───────────────────────────────────────────────────
 
@@ -133,12 +142,28 @@ if (!m) {
     // list a signed-in user's own private/members-only video — but they must
     // never land on the row that gets persisted, nor be echoed to the caller.
     const payloadBlock = (/const payload = \{([\s\S]*?)\n\s*\};/.exec(ep[0]) || [])[1] || '';
-    check('never attaches cookies to the row', !!payloadBlock && !/cookies:/.test(payloadBlock));
+    check('keeps cookies separate from the picker video variants',
+      !!payloadBlock && /cookies: sessionCookies \|\| undefined/.test(payloadBlock) &&
+      !/videos:.*cookies/i.test(payloadBlock));
     const okResponse = /res\.end\(JSON\.stringify\(\{ success: true, provider: 'youtube'[\s\S]*?\)\);/.exec(ep[0]);
     check('never returns cookies to the caller', !!okResponse && !/cookies:/.test(okResponse[0]));
-    check('forwards the session to the resolver (not onto the row)',
-      /resolveMedia\(url,[\s\S]{0,240}cookies:/.test(ep[0]));
+    check('bounds and forwards the session to yt-dlp resolver',
+      /sessionCookies = typeof cookies === 'string' && cookies\.length <= 262144/.test(ep[0]) &&
+      /resolveMedia\(url,[\s\S]{0,240}cookies: sessionCookies/.test(ep[0]));
+    check('includes cookies only in the transient renderer event',
+      /cookies: sessionCookies \|\| undefined/.test(payloadBlock));
+    check('quality picker carries resolver cookies into the selected download',
+      /cookies: data\.cookies \|\| null/.test(appSrc) &&
+      /cookies: qualityContext\?\.cookies \|\| null/.test(appSrc));
+    const hidePicker = /function hideQualityPicker\(\) \{([\s\S]*?)\n\}/.exec(appSrc);
+    check('picker clears transient session cookies when dismissed',
+      !!hidePicker && /qualityContext = null/.test(hidePicker[1]));
   }
+
+  const persistBlock = /_persistDownloads\(force = false\) \{([\s\S]*?)\n  \}/.exec(dmSrc);
+  check('download JSON persistence strips the in-memory cookie field',
+    !!persistBlock && /const \{ cookies, headers, meta,/.test(persistBlock[1]) &&
+      !/cookies,/.test(persistBlock[1].slice(persistBlock[1].indexOf('return {'), persistBlock[1].indexOf('status:'))));
 
   // ── 4. Hiding the player's own CDN urls on a YouTube page ─────────────────
 

@@ -731,9 +731,23 @@ ipcMain.handle('select-cookie-file', async () => {
 ipcMain.handle('yt-dlp-status', async () => {
   try {
     const { detectRunner } = require('./src/yt-dlp.js');
+    const jsRuntime = require('./src/js-runtime.js');
     const runner = await detectRunner(true);
-    if (!runner) return { found: false, version: null, source: null, path: null };
-    return { found: true, version: runner.version, source: runner.source, path: runner.argv[0] };
+    // The JS runtime is reported alongside the binary: YouTube's JS challenge
+    // and PO-token step cannot run without one, so "yt-dlp installed" alone is
+    // not enough to know YouTube extraction is healthy.
+    let js = null;
+    try { js = await jsRuntime.detectJsRuntime(true); } catch (e) { js = null; }
+    const jsStatus = {
+      found: !!js,
+      name: js ? js.runtime : null,
+      version: js ? js.version : null,
+      path: js ? js.path : null,
+      describe: jsRuntime.describeJsRuntime(js),
+      installDir: jsRuntime.installDir(),
+    };
+    if (!runner) return { found: false, version: null, source: null, path: null, jsRuntime: jsStatus };
+    return { found: true, version: runner.version, source: runner.source, path: runner.argv[0], jsRuntime: jsStatus };
   } catch (e) {
     return { found: false, version: null, source: null, path: null, error: String(e && e.message || e) };
   }
