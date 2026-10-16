@@ -30,6 +30,7 @@ contextBridge.exposeInMainWorld('aidm', {
   // Settings
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (settings) => ipcRenderer.invoke('save-settings', settings),
+  getNetworkInterfaces: () => ipcRenderer.invoke('get-network-interfaces'),
 
   // AI (TokenHarbor: mimo-v2.5:free + deepseek-v4-flash:free)
   aiStatus: () => ipcRenderer.invoke('ai-status'),

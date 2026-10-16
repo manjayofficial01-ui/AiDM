@@ -759,6 +759,18 @@ ipcMain.handle('get-settings', async () => {
   return downloadManager.getSettings();
 });
 
+ipcMain.handle('get-network-interfaces', async () => {
+  // "Combine networks" availability for the Settings UI: the eligible physical
+  // NICs plus whether the app will actually combine (>=2 up). Never throws.
+  try {
+    return downloadManager.getNetworkInterfaceInfo();
+  } catch (e) {
+    const { listActiveInterfaces, eligibleForCombine } = require('./src/network-interfaces');
+    const pool = eligibleForCombine(listActiveInterfaces());
+    return { interfaces: pool, canCombine: pool.length >= 2 };
+  }
+});
+
 ipcMain.handle('save-settings', async (event, settings) => {
   const saved = downloadManager.saveSettings(settings);
   syncAiConfig();

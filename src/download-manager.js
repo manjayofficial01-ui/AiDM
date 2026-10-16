@@ -12,6 +12,7 @@ const { sanitizeEntryUrl, entryUrlWasRepaired, isSingleUseTokenUrl, isGmailAttac
 const { looksLikeAuthWall, looksLikeHtmlHead, sessionExpiredMessage, extensionOfFilename, BINARY_EXTENSIONS } = require('./auth-wall');
 const googleDrive = require('./google-drive-resolver');
 const { TorrentEngine, isTorrentUrl, magnetDisplayName } = require('./torrent-engine');
+const { listActiveInterfaces, eligibleForCombine } = require('./network-interfaces');
 
 // Team A's real geometry reader (width/height/duration/audio-track presence
 // proven from the container bytes). Required defensively: a missing or broken
@@ -509,6 +510,11 @@ const DEFAULT_SETTINGS = {
   browserIntegration: true,
   notifications: true,
   askLocationEveryTime: false,
+  // "Combine networks" (Plexo multi-NIC, integrated): when ON and two or more
+  // physical networks are up, spread a download's parallel connections across
+  // them (each connection's source address bound to one NIC) to beat a single
+  // connection's ceiling. Inert on a single-interface host.
+  combineNetworks: false,
   // Download scheduler (v4.3.0): one-time/daily/weekly queue runs.
   schedules: [],
   // Timetabled speed limits, one rule per line: "HH:MM-HH:MM=KBPS".
@@ -825,6 +831,43 @@ class DownloadManager extends EventEmitter {
       }
     }
     return null;
+  }
+
+  /**
+   * "Combine networks" (Plexo multi-NIC): resolve the eligible physical NIC
+   * pool this task should spread its connections across. Returns
+   * { netInterfaces, networkSpread }; networkSpread is true only when the
+   * user enabled it AND two or more distinct interfaces are actually up, so a
+   * single-network host silently keeps the ordinary default route. The list is
+   * cached briefly: os.networkInterfaces() is cheap, but a burst of simultaneous
+   * downloads shouldn't each re-enumerate.
+   * @returns {{ netInterfaces: Array<{id:string,name:string,address:string,family:4|6}>, networkSpread: boolean }}
+   */
+  _networkCombine() {
+    const now = Date.now();
+    if (this._netIfaceCache && now - this._netIfaceCache.at < 1500) {
+      return this._netIfaceCache.value;
+    }
+    let pool = [];
+    if (this.settings.combineNetworks) {
+      try { pool = eligibleForCombine(listActiveInterfaces()); } catch (e) { pool = []; }
+    }
+    const value = pool.length >= 2
+      ? { netInterfaces: pool, networkSpread: true }
+      : { netInterfaces: [], networkSpread: false };
+    this._netIfaceCache = { at: now, value };
+    return value;
+  }
+
+  /**
+   * "Combine networks" info for the Settings UI: the eligible physical NICs and
+   * whether the app will actually combine them (two or more up). Read-only.
+   * @returns {{ interfaces: Array<{id:string,name:string,address:string,family:4|6,kind:string}>, canCombine: boolean }}
+   */
+  getNetworkInterfaceInfo() {
+    let pool = [];
+    try { pool = eligibleForCombine(listActiveInterfaces()); } catch (e) { pool = []; }
+    return { interfaces: pool, canCombine: pool.length >= 2 };
   }
 
   /**
@@ -2130,6 +2173,10 @@ class DownloadManager extends EventEmitter {
         // Single-use-token rows must make exactly ONE request: skip the
         // engine's own Range probe so only the download's plain GET fires.
         skipProbe: download.skipProbe === true,
+        // "Combine networks": spread this download's connections across the
+        // eligible physical NICs (Plexo). Gated off for one-connection rows
+        // (nothing to spread). SpreadAuto=0 keeps the default route.
+        ...(singleConnection ? {} : this._networkCombine()),
       });
       // Cancelled while the engine was doing its own probe: tear the engine
       // state (and any partial file) back down instead of leaving it running.

@@ -213,8 +213,20 @@ svg.icon, .btn-icon svg, .cat-icon svg, .empty-icon svg, .modal-header svg, .ctx
   width: 72px; height: 22px; display: block;
   border-radius: 6px;
   background: rgba(0, 0, 0, .18);
+  overflow: visible;
 }
 html[data-theme="light"] .speed-sparkline { background: rgba(15, 27, 45, .05); }
+/* Plexo ThroughputChart (mini): area + line, live head dot, idle = accent */
+.spark-grad-top { stop-color: var(--success); stop-opacity: .38; }
+.spark-grad-bottom { stop-color: var(--success); stop-opacity: 0; }
+.spark-line { stroke: var(--success); }
+.spark-head { fill: var(--success); }
+#speed-sparkline.idle .spark-grad-top { stop-color: var(--accent); }
+#speed-sparkline.idle .spark-grad-bottom { stop-color: var(--accent); }
+#speed-sparkline.idle .spark-line { stroke: var(--accent); }
+#speed-sparkline.idle .spark-head { fill: var(--accent); }
+#speed-sparkline:not(.idle) .spark-head { animation: spark-pulse 1.6s ease-in-out infinite; }
+@keyframes spark-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
 
 /* ── Main Content ──────────────────────────────────────────────────────────── */
 
@@ -383,7 +395,7 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
 .col-dims { width: 96px; }
 .col-progress { min-width: 130px; }
 .col-speed { width: 84px; }
-.col-status { width: 96px; }
+.col-status { width: 116px; }
 .col-actions { width: 108px; }
 
 .file-info { display: flex; align-items: center; gap: 10px; }
@@ -462,6 +474,29 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
 .segment.tail { height: 3px; background: rgba(167, 139, 250, .22); }
 .segment.tail .segment-fill { background: #A78BFA; }
 
+/* Plexo BlockGrid: the segment map in byte space — a wide chunk is a wide
+   block (flex-basis is set inline from its share of the file), and each
+   block is filled by its own progress, so the bar reads as the file itself. */
+.block-grid { height: 5px; gap: 1px; }
+.block {
+  min-width: 2px; height: 100%;
+  background: var(--progress-bg);
+  border-radius: 1px; overflow: hidden;
+  transition: flex-basis .4s cubic-bezier(.22, 1, .36, 1);
+}
+.block-fill { height: 100%; width: 0; background: var(--accent); transition: width .35s ease; position: relative; }
+.block.active .block-fill { background: var(--accent); }
+.block.active .block-fill::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,.35) 50%, transparent 100%);
+  animation: shimmer 1.6s linear infinite;
+}
+.block.done .block-fill { background: var(--success); }
+.block.pending .block-fill { background: transparent; }
+/* Tail micro-split (FluxDown): straggler slice that keeps idle workers busy */
+.block.tail { background: rgba(167, 139, 250, .22); }
+.block.tail .block-fill { background: #A78BFA; }
+
 .speed-cell { font-family: var(--font-mono); font-size: 11px; color: var(--success); font-variant-numeric: tabular-nums; }
 .speed-cell.zero { color: var(--text-muted); }
 
@@ -485,7 +520,19 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
   color: var(--accent-soft); background: rgba(59, 130, 246, .10);
   border: 1px solid rgba(59, 130, 246, .28); vertical-align: middle;
 }
-.col-status { white-space: nowrap; }
+/* "Combine networks" chip (Plexo multi-NIC): connections spread across
+   several physical networks — purple, distinct from the blue conn chip. */
+.net-chip {
+  display: inline-block; margin-left: 5px; padding: 1px 7px; border-radius: var(--radius-pill);
+  font-size: 10px; font-weight: 600; font-family: var(--font-mono); letter-spacing: .2px;
+  color: #A78BFA; background: rgba(167, 139, 250, .12);
+  border: 1px solid rgba(167, 139, 250, .35); vertical-align: middle;
+}
+/* Status badge + live chips (connections / multi-network) stack on two lines
+   so the fixed-width column never clips them */
+.col-status { white-space: normal; }
+.col-status .status-badge { display: inline-block; }
+.col-status .conn-chip, .col-status .net-chip { margin-left: 0; margin-top: 3px; }
 
 .action-btns { display: flex; gap: 4px; }
 .action-btn {
@@ -869,3 +916,16 @@ input[type="checkbox"] { accent-color: var(--accent); width: 14px; height: 14px;
 
 /* AI filename sparkle button */
 .ai-filename-btn { min-width: 36px; padding: 4px 8px; }
+
+/* ── Reduced motion ─────────────────────────────────────────────────────────
+   Plexo's a11y contract: when the OS asks for reduced motion, every looping
+   animation (shimmer sweeps, the sparkline head-dot pulse, the row icon
+   pulse) stops instead of deleting the information itself. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

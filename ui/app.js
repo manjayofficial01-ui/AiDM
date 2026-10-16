@@ -178,12 +178,27 @@ function patchRow(tr, dl) {
   }
 
   // Live adaptive-connection chip (FluxDown-style worker count: active / target).
+  // The chip may also appear mid-download — the first engine tick can arrive
+  // after the row was created — so create it in place then.
   const connChip = tr.querySelector('.conn-chip');
   if (connChip) {
     const live = (dl.connections != null) ? dl.connections : '—';
     const target = (dl.targetConnections != null) ? '/' + dl.targetConnections : '';
     const txt = live + target + '×';
     if (connChip.textContent !== txt) connChip.textContent = txt;
+  } else if (dl.connections != null || dl.targetConnections != null) {
+    const badge = tr.querySelector('.status-badge');
+    if (badge) badge.insertAdjacentHTML('afterend', connChipHtml(dl));
+  }
+
+  // Live "Combine networks" chip — appears when the spread engages, removed
+  // again if the NIC pool drops below two (e.g. Wi-Fi dropped mid-download).
+  const netChip = tr.querySelector('.net-chip');
+  if (dl.networkSpread && !netChip) {
+    const anchor = tr.querySelector('.conn-chip') || tr.querySelector('.status-badge');
+    if (anchor) anchor.insertAdjacentHTML('afterend', netChipHtml(dl));
+  } else if (!dl.networkSpread && netChip) {
+    netChip.remove();
   }
 
   const sizeCell = tr.querySelector('.col-size');
@@ -526,7 +541,8 @@ function renderDownloadRow(dl) {
       </td>
       <td class="col-status">
         <span class="status-badge ${dl.status}">${formatStatus(dl.status)}</span>
-        ${(dl.connections != null || dl.targetConnections != null) ? `<span class="conn-chip" title="Adaptive connections (live / target)">${dl.connections != null ? dl.connections : '—'}${dl.targetConnections != null ? '/' + dl.targetConnections : ''}×</span>` : ''}
+        ${(dl.connections != null || dl.targetConnections != null) ? connChipHtml(dl) : ''}
+        ${dl.networkSpread ? netChipHtml(dl) : ''}
       </td>
       <td class="col-actions">
         <div class="action-btns">
@@ -581,6 +597,13 @@ function renderSegments(segments) {
   // Fresh downloads carry a plain segment COUNT (number) until the engine
   // emits progress; only render the bar for a real per-segment array.
   if (!Array.isArray(segments) || segments.length <= 1) return '';
+  // Plexo BlockGrid: byte-space cells (a wide chunk is a wide block), each
+  // filled by its own progress. Falls through to the equal-width bar when
+  // the viz module is unavailable.
+  if (window.DownloadViz && typeof window.DownloadViz.blockGridHtml === 'function') {
+    const grid = window.DownloadViz.blockGridHtml(segments, escapeAttr);
+    if (grid) return grid;
+  }
   return `<div class="segments-bar">
     ${segments.map((s, i) => {
       const state = s.state || 'pending';
@@ -593,6 +616,25 @@ function renderSegments(segments) {
       </div>`;
     }).join('')}
   </div>`;
+}
+
+/** Live adaptive-connection chip: active workers / target (FluxDown-style). */
+function connChipHtml(dl) {
+  const live = dl.connections != null ? dl.connections : '—';
+  const target = dl.targetConnections != null ? '/' + dl.targetConnections : '';
+  return `<span class="conn-chip" title="Adaptive connections (live / target)">${live}${target}×</span>`;
+}
+
+/**
+ * "Combine networks" chip (Plexo multi-network): shows how many physical
+ * NICs this download is spreading its connections across. The names live in
+ * the tooltip so the row stays compact.
+ */
+function netChipHtml(dl) {
+  const names = Array.isArray(dl.networkNames) ? dl.networkNames : [];
+  const n = dl.networkCount || names.length || 2;
+  const label = names.length ? names.join(' + ') : `${n} networks`;
+  return `<span class="net-chip" title="Combining ${escapeAttr(label)} — connections spread across ${n} networks">NET ${n}×</span>`;
 }
 
 function formatStatus(status) {
@@ -1020,6 +1062,14 @@ function setupIPCListeners() {
       dl.speed = data.speed; dl.percent = data.percent;
       // `segments` is the count; the live per-segment array is `segmentDetails`
       if (Array.isArray(data.segments)) dl.segmentDetails = data.segments;
+      // Engine enrichment: live/target worker counts, the engine's own ETA and
+      // the "Combine networks" (multi-NIC) spread state.
+      if (data.connections != null) dl.connections = data.connections;
+      if (data.targetConnections != null) dl.targetConnections = data.targetConnections;
+      if (typeof data.etaSeconds === 'number') dl.eta = data.etaSeconds;
+      dl.networkSpread = data.networkSpread === true;
+      if (Array.isArray(data.networkNames)) dl.networkNames = data.networkNames;
+      if (typeof data.networkCount === 'number') dl.networkCount = data.networkCount;
       // Same overridable-status guard as the manager: a stale 500ms tick from
       // the old run must not flip a row the user just paused back to
       // "Downloading".
@@ -1832,6 +1882,10 @@ async function showSettingsModal() {
   document.getElementById('setting-preallocation').value = settings.preallocation === 'full' ? 'full' : 'sparse';
   document.getElementById('setting-per-host-connections').value =
     Number.isFinite(settings.perHostMaxConnections) ? settings.perHostMaxConnections : 16;
+  // "Combine networks" (Plexo multi-NIC): opt-in; the hint shows whether this
+  // machine actually has two or more eligible networks right now.
+  document.getElementById('setting-combine-networks').checked = settings.combineNetworks === true;
+  refreshCombineHint();
   document.getElementById('setting-savepath').value = settings.defaultSavePath;
   document.getElementById('setting-speed-limit').value = Math.round((settings.speedLimit || 0) / 1024);
   document.getElementById('setting-speed-rules').value = settings.speedRules || '';
@@ -1888,6 +1942,26 @@ async function showSettingsModal() {
 
 function hideSettingsModal() { closeOverlay('settings-overlay'); }
 
+/**
+ * Tell the user whether this machine can actually combine networks: two or
+ * more eligible NICs are required, otherwise the toggle stays inert.
+ */
+async function refreshCombineHint() {
+  const hint = document.getElementById('combine-net-hint');
+  if (!hint) return;
+  try {
+    const info = await window.aidm.getNetworkInterfaces();
+    if (info && info.canCombine) {
+      const names = (info.interfaces || []).map(i => i.name).join(' + ');
+      hint.textContent = `${info.interfaces.length} networks available: ${names}.`;
+    } else {
+      hint.textContent = 'Only one usable network detected — combining needs two or more (Wi-Fi + Ethernet, two NICs, a phone tether…).';
+    }
+  } catch (e) {
+    hint.textContent = 'Network detection unavailable.';
+  }
+}
+
 async function saveSettings() {
   const cats = ['video', 'audio', 'document', 'pdf', 'archive', 'software', 'image'];
   const categoryPaths = {};
@@ -1912,6 +1986,7 @@ async function saveSettings() {
     engineMinSplitKB: intField('setting-engine-min-split-kb', 1, 1024 * 1024 * 1024, 1024),
     preallocation: document.getElementById('setting-preallocation').value === 'full' ? 'full' : 'sparse',
     perHostMaxConnections: intField('setting-per-host-connections', 0, 64, 16),
+    combineNetworks: document.getElementById('setting-combine-networks').checked,
     defaultSavePath: document.getElementById('setting-savepath').value,
     speedLimit: (parseInt(document.getElementById('setting-speed-limit').value, 10) || 0) * 1024,
     speedRules: document.getElementById('setting-speed-rules').value,
@@ -2330,41 +2405,38 @@ function updateStats() {
   updateSpeedDisplay();
 }
 
-// ── Live speed sparkline ──────────────────────────────────────────────────────
+// ── Live speed sparkline (Plexo ThroughputChart, miniaturised) ───────────────
 
 let speedHistory = [];
+const SPARK_W = 72, SPARK_H = 22, SPARK_PAD = 1.5;
 
 function drawSparkline() {
-  const c = document.getElementById('speed-sparkline');
-  if (!c || typeof c.getContext !== 'function') return;
-  let ctx;
-  try { ctx = c.getContext('2d'); } catch (e) { return; }
-  if (!ctx) return;
-  const w = c.width || 72, h = c.height || 22;
-  ctx.clearRect(0, 0, w, h);
-  if (speedHistory.length < 2) return;
+  const svg = document.getElementById('speed-sparkline');
+  const line = document.getElementById('spark-line');
+  const area = document.getElementById('spark-area');
+  const head = document.getElementById('spark-head');
+  if (!svg || !line || !area) return;
+  if (speedHistory.length < 2 || !window.DownloadViz ||
+      typeof window.DownloadViz.areaPath !== 'function') {
+    line.setAttribute('d', '');
+    area.setAttribute('d', '');
+    if (head) head.setAttribute('cx', -10); // park off-canvas
+    return;
+  }
+  // One source of truth: the same geometry the Node tests assert on.
+  const p = window.DownloadViz.areaPath(speedHistory, SPARK_W, SPARK_H, SPARK_PAD);
+  line.setAttribute('d', p.line);
+  area.setAttribute('d', p.area);
+  // Live head dot at the newest sample (mirrors areaPath's point math).
   const max = Math.max(...speedHistory, 1);
-  const step = w / Math.max(speedHistory.length - 1, 1);
-  // filled area
-  const css = getComputedStyle(document.documentElement);
-  const accent = (css && css.getPropertyValue && css.getPropertyValue('--accent').trim()) || '#3B82F6';
-  const success = (css && css.getPropertyValue && css.getPropertyValue('--success').trim()) || '#34D399';
-  ctx.beginPath();
-  speedHistory.forEach((v, i) => {
-    const x = i * step;
-    const y = h - (v / max) * (h - 3) - 1.5;
-    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-  });
-  ctx.strokeStyle = speedHistory[speedHistory.length - 1] > 0 ? success : accent;
-  ctx.lineWidth = 1.5;
-  ctx.lineJoin = 'round';
-  ctx.stroke();
-  // soft fill under the line
-  ctx.lineTo(w, h);
-  ctx.lineTo(0, h);
-  ctx.closePath();
-  ctx.fillStyle = 'rgba(59, 130, 246, .15)';
-  ctx.fill();
+  const v = speedHistory[speedHistory.length - 1];
+  const y = SPARK_H - SPARK_PAD - (v / max) * (SPARK_H - SPARK_PAD * 2);
+  if (head) {
+    head.setAttribute('cx', SPARK_W);
+    head.setAttribute('cy', y.toFixed(1));
+    head.style.display = v > 0 ? '' : 'none';
+  }
+  svg.classList.toggle('idle', !(v > 0));
 }
 
 function updateSpeedDisplay() {

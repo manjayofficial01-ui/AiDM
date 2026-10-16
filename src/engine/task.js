@@ -17,6 +17,7 @@ const { SpeedMeter } = require('./speed');
 const { DEFAULT_TASK_DEFAULTS } = require('./types');
 const { Deferred, clamp, fileExists, fileSize, uniquePath } = require('./utils');
 const { runSegmentWorker } = require('./worker');
+const { assignInterfaces } = require('../../ui/download-viz.js');
 
 const TICK_MS = 500;
 const SAVE_INTERVAL_MS = 2000;
@@ -80,6 +81,20 @@ function resolveConfig(options, defaults = {}) {
     // Both spellings occur in the wild (`resumeable` in older manager rows).
     resumable: merged.resumable !== false && merged.resumeable !== false,
     fetch: merged.fetch ?? globalThis.fetch.bind(globalThis),
+    // "Combine networks" (Plexo multi-NIC): the eligible physical interfaces and
+    // whether to spread this task's connections across them. Sanitised: only
+    // real {address, family} pairs survive, so a bad row can never crash a task.
+    netInterfaces: Array.isArray(merged.netInterfaces)
+      ? merged.netInterfaces
+          .filter((i) => i && typeof i.address === 'string' && i.address.length > 0)
+          .map((i) => ({
+            id: String(i.id || i.name || i.address),
+            name: String(i.name || i.id || i.address),
+            address: String(i.address),
+            family: Number(i.family) === 6 ? 6 : 4,
+          }))
+      : [],
+    networkSpread: merged.networkSpread === true,
   };
 }
 
@@ -147,6 +162,11 @@ class DownloadTask extends EventEmitter {
     /** @type {Map<number, Promise<void>>} */
     this.active = new Map();
     this.targetConnections = 1;
+    // "Combine networks": the eligible NIC pool (>=2 to engage) and the
+    // round-robin cursor. Null pool => every connection uses the default route.
+    /** @type {Array<{id:string,name:string,address:string,family:4|6}>} */
+    this._ifacePool = this.config.networkSpread ? this.config.netInterfaces : [];
+    this._ifaceTick = 0;
     /** @type {NodeJS.Timeout | null} */
     this.ticker = null;
     /** @type {NodeJS.Timeout | null} */
@@ -337,6 +357,12 @@ class DownloadTask extends EventEmitter {
       resumable: Boolean(this.info?.acceptRanges) && this.config.resumable && !this.forceSingleConnection,
       segments: this.segments?.snapshot() ?? [],
       mirrors: this.mirrors.snapshot(),
+      // "Combine networks": how many physical NICs this task is spreading
+      // across (>1 when it actually combines), their names, and the live set of
+      // distinct interfaces the current in-flight connections are bound to.
+      networkSpread: this._ifacePool.length > 1,
+      networkNames: this._ifacePool.length > 1 ? this._ifacePool.map((i) => i.name) : [],
+      networkCount: this._ifacePool.length > 1 ? this._ifacePool.length : 0,
       elapsedMs: elapsed,
       error: this.errorValue?.toJSON() ?? null,
     };
@@ -724,6 +750,22 @@ class DownloadTask extends EventEmitter {
     const gated = !!this.hostGate && this.hostGate.acquire(mirror.host);
     this.log('debug', `Connection #${segment.id} -> ${mirror.host} [${segment.position}-${segment.end < 0 ? '' : segment.end}]`);
 
+    // "Combine networks": pin this connection to the next physical interface's
+    // source address (round-robin). Fewer than two eligible interfaces leaves
+    // segment._net null and the connection rides the default route.
+    let localAddress;
+    let family;
+    if (this._ifacePool.length > 1) {
+      const iface = assignInterfaces(this._ifacePool, this._ifaceTick++);
+      if (iface) {
+        localAddress = iface.address;
+        family = iface.family;
+        segment._net = iface;
+      }
+    } else {
+      segment._net = null;
+    }
+
     const run = runSegmentWorker(segment, mirror, {
       fetchImpl: this.config.fetch,
       headers: this.baseHeaders,
@@ -736,6 +778,8 @@ class DownloadTask extends EventEmitter {
       readTimeoutMs: this.config.readTimeoutMs,
       lowestSpeedLimit: this.config.lowestSpeedLimit,
       canDropSlow: () => this.active.size > 1,
+      localAddress,
+      family,
       onBytes: (n) => {
         this.meter.add(n);
         this.sessionBytes += n;
@@ -782,6 +826,20 @@ class DownloadTask extends EventEmitter {
   onWorkerError(segment, mirror, err) {
     // Cancel/pause already returned above via stopping / CANCELLED / PAUSED.
     if (this.stopping || err.code === 'CANCELLED' || err.code === 'PAUSED') return;
+
+    // A bound interface that cannot carry this connection (cable unplugged,
+    // Wi-Fi dropped, no route to that address right now) must never stall the
+    // download: drop the binding so the retry rides the default route. Without
+    // this, a dead NIC in the round-robin would spin every Nth connection into
+    // a connect failure forever.
+    if (
+      segment._net &&
+      (err.code === 'NETWORK' ||
+        /unreachable|not available|cannot assign|ENETUNREACH|EADDRNOTAVAIL|EHOSTUNREACH|EADDRINUSE/i.test(String(err.message || err.error || '')))
+    ) {
+      this.log('debug', `Interface ${segment._net.name} (${segment._net.address}) cannot carry this connection \u2014 falling back to the default route`);
+      segment._net = null;
+    }
 
     if (err.code === 'RESOURCE_CHANGED') {
       this.fail(err);

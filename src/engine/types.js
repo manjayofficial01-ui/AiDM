@@ -37,6 +37,11 @@ const DEFAULT_TASK_DEFAULTS = {
   onResourceChange: 'restart',
   resumeValidation: 'lenient',
   preserveRemoteTime: true,
+  // "Combine networks" (Plexo multi-NIC): when >=2 eligible interfaces are
+  // supplied and networkSpread is true, each new connection binds its source
+  // address to one interface. Inert (default route) otherwise.
+  netInterfaces: [],
+  networkSpread: false,
 };
 
 module.exports = {

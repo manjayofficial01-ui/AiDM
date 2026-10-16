@@ -46,6 +46,8 @@ function abortError(signal) {
  *   readTimeoutMs: number,
  *   lowestSpeedLimit: number,
  *   canDropSlow: () => boolean,
+ *   localAddress?: string,   // "Combine networks": bind this connection's source address
+ *   family?: 4 | 6,
  *   onBytes: (bytes: number) => void
  * }} ctx
  * @returns {Promise<{ bytes: number, elapsedMs: number }>}
@@ -86,7 +88,12 @@ async function runSegmentWorker(segment, mirror, ctx) {
     arm(ctx.connectTimeoutMs, 'Connection');
     let res;
     try {
-      res = await ctx.fetchImpl(mirror.url, { method: 'GET', headers, redirect: 'follow', signal });
+      // `localAddress`/`family` (set for "Combine networks") bind the source
+      // address so the OS routes this connection over a specific physical
+      // network. Absent on the default single-interface route.
+      const init = { method: 'GET', headers, redirect: 'follow', signal };
+      if (ctx.localAddress) { init.localAddress = ctx.localAddress; init.family = ctx.family === 6 ? 6 : 4; }
+      res = await ctx.fetchImpl(mirror.url, init);
     } catch (err) {
       if (signal.aborted) throw abortError(signal);
       throw toDownloadError(err);

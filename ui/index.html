@@ -75,7 +75,17 @@
       <div class="speed-display">
         <span class="speed-label">Speed:</span>
         <span class="speed-value" id="total-speed">0 B/s</span>
-        <canvas id="speed-sparkline" class="speed-sparkline" width="72" height="22" title="Live total speed"></canvas>
+        <svg id="speed-sparkline" class="speed-sparkline" width="72" height="22" viewBox="0 0 72 22" preserveAspectRatio="none" aria-hidden="true">
+          <defs>
+            <linearGradient id="spark-grad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" class="spark-grad-top" />
+              <stop offset="100%" class="spark-grad-bottom" />
+            </linearGradient>
+          </defs>
+          <path id="spark-area" class="spark-area" d="" fill="url(#spark-grad)" />
+          <path id="spark-line" class="spark-line" d="" fill="none" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" />
+          <circle id="spark-head" class="spark-head" r="1.8" cx="-10" cy="0" />
+        </svg>
       </div>
       <div class="status-display">
         <span class="status-label">Active:</span>
@@ -410,6 +420,12 @@
               <input type="number" id="setting-per-host-connections" min="0" max="64" value="16" />
               <div class="settings-hint">Total simultaneous connections to one host across all downloads (0 = unlimited).</div>
             </div>
+            <div class="form-group toggle">
+              <label>Combine networks (multi-NIC)</label>
+              <input type="checkbox" id="setting-combine-networks" />
+            </div>
+            <div class="settings-hint" id="combine-net-hint">Detecting networks…</div>
+            <p class="settings-hint">When two or more physical networks are up (Wi-Fi + Ethernet, two NICs, Wi-Fi + phone tethering), each download's parallel connections are bound to a different one — a single connection's ceiling no longer caps the whole download. Off or single-network = ordinary default route.</p>
           </section>
 
           <section class="settings-pane" data-settings-pane="paths">
@@ -747,6 +763,7 @@
 
   <div class="toast-stack" id="toast-stack"></div>
 
+  <script src="download-viz.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -141,7 +141,11 @@ function abortErrorFor(signal) {
  * that worked with http.request silently started failing after the V4 rewrite.
  *
  * @param {string} url
- * @param {{ method?: string, headers?: Record<string,string>, signal?: AbortSignal, redirect?: string }} [init]
+ * @param {{ method?: string, headers?: Record<string,string>, signal?: AbortSignal, redirect?: string,
+ *           localAddress?: string, family?: 4|6 }} [init] `localAddress` (with `family`) binds the
+ *   connection's SOURCE address, so the OS routes the socket via the interface that owns it — this
+ *   is how "Combine networks" puts different connections on different physical NICs (Plexo's
+ *   headline technique; Windows/macOS route by source address, no SO_BINDTODEVICE needed).
  * @returns {Promise<Response>}
  */
 function robustFetch(url, init = {}) {
@@ -188,6 +192,14 @@ function robustFetch(url, init = {}) {
         rejectUnauthorized: !insecure,
         lookup: dohFallbackLookup,
         agent: agentFor(parsed, { insecure }),
+        // Source-address binding for "Combine networks" (spread connections
+        // across physical NICs). Left undefined on the default route; the
+        // pooled Agent keys sockets by source address, so each interface keeps
+        // its own connection. A dead interface fails the connect and the task
+        // falls back to the unbound default route (see onWorkerError).
+        ...(init.localAddress
+          ? { localAddress: init.localAddress, family: init.family === 6 ? 6 : 4 }
+          : {}),
       }, (res) => {
         responded = true;
         // Follow redirects manually so we can re-apply DoH/TLS on the next hop.
@@ -829,9 +841,11 @@ class DownloadEngine extends EventEmitter {
       const segs = (prog.segments || []).map((s) => ({
         index: s.id - 1,
         status: s.state === 'done' ? 'completed' : s.state === 'active' ? 'downloading' : 'pending',
+        state: s.state,             // raw pending | active | done (BlockGrid source)
         downloaded: s.downloaded,
         start: s.start,
         end: s.end,
+        tail: s.tail === true,      // FluxDown tail micro-split flag
       }));
 
       this.emit('download-progress', {
@@ -842,6 +856,14 @@ class DownloadEngine extends EventEmitter {
         speed: prog.speed,
         percent: prog.percent !== null ? Number(prog.percent).toFixed(1) : 0,
         segments: segs,
+        // Live connection / network state for the row's chips and BlockGrid:
+        // adaptive worker count, ETA, and the "Combine networks" spread.
+        connections: prog.connections,
+        targetConnections: prog.targetConnections,
+        etaSeconds: prog.etaSeconds,
+        networkSpread: prog.networkSpread === true,
+        networkNames: Array.isArray(prog.networkNames) ? prog.networkNames : [],
+        networkCount: Number(prog.networkCount) || 0,
       });
     });
 
@@ -2114,4 +2136,5 @@ module.exports = {
   sumHlsDuration,
   filenameFromContentDisposition,
   extFromMime,
+  robustFetch,
 };
