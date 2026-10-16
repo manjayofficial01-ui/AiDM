@@ -438,6 +438,20 @@ function youtubeCookiesFromBrowser() {
   } catch (e) { return null; }
 }
 
+/**
+ * Opt-in: a user-exported Netscape cookies.txt for yt-dlp (Settings ›
+ * YouTube). Chromium browsers now encrypt their cookie stores (app-bound
+ * encryption), which defeats --cookies-from-browser on many machines, so an
+ * exported file is the reliable path. Only returned when the file EXISTS —
+ * a stale setting must never break every YouTube download.
+ */
+function youtubeCookieFile() {
+  try {
+    const p = String((downloadManager && downloadManager.getSettings().youtubeCookiesFile) || '').trim();
+    return p && fs.existsSync(p) ? p : null;
+  } catch (e) { return null; }
+}
+
 function fileHostCredentials() {
   try {
     const hosts = (downloadManager && downloadManager.getSettings().fileHosts) || {};
@@ -473,6 +487,7 @@ ipcMain.handle('add-download', async (event, opts) => {
         cookies: (opts && opts.cookies) || null,
         referer: (opts && opts.pageUrl) || null,
         cookiesFromBrowser: youtubeCookiesFromBrowser(),
+        cookieFile: youtubeCookieFile(),
       });
       // The quality picker replays pageUrl as Referer when downloading. For
       // embed providers (mydaddy/hqporner) the CDN only honours the PLAYER
@@ -495,6 +510,7 @@ ipcMain.handle('add-download', async (event, opts) => {
                 cookies: (opts && opts.cookies) || null,
                 referer: (opts && opts.pageUrl) || null,
                 cookiesFromBrowser: youtubeCookiesFromBrowser(),
+                cookieFile: youtubeCookieFile(),
               });
               if (again && again.pickerVideos && again.pickerVideos.length) {
                 const pageUrl2 = again.canonicalUrl || opts.url;
@@ -685,6 +701,63 @@ ipcMain.handle('select-folder', async () => {
   // Owned by the topmost location dialog when one is open, otherwise by a
   // temporary topmost owner (created and destroyed inside pickFolder).
   return locationDialog.pickFolder();
+});
+
+/**
+ * Pick a Netscape cookies.txt for yt-dlp (Settings › YouTube). Chromium's
+ * app-bound encryption defeats --cookies-from-browser on many machines, so an
+ * exported file is the reliable way to pass a signed-in YouTube session.
+ */
+ipcMain.handle('select-cookie-file', async () => {
+  try {
+    const r = await dialog.showOpenDialog(mainWindow, {
+      title: 'Choose a cookies.txt file (exported from your browser)',
+      properties: ['openFile'],
+      filters: [
+        { name: 'Cookies', extensions: ['txt'] },
+        { name: 'All files', extensions: ['*'] },
+      ],
+    });
+    if (r.canceled || !r.filePaths || !r.filePaths[0]) return null;
+    return r.filePaths[0];
+  } catch (e) { return null; }
+});
+
+// ── yt-dlp engine management (Settings › YouTube) ───────────────────────────
+// AiDM never BUNDLES yt-dlp: it installs per-user (no elevation) with
+// src/yt-dlp-install.js — the very module tools/fetch-yt-dlp.js wraps. These
+// handlers give the UI the detected version and a one-click update.
+
+ipcMain.handle('yt-dlp-status', async () => {
+  try {
+    const { detectRunner } = require('./src/yt-dlp.js');
+    const runner = await detectRunner(true);
+    if (!runner) return { found: false, version: null, source: null, path: null };
+    return { found: true, version: runner.version, source: runner.source, path: runner.argv[0] };
+  } catch (e) {
+    return { found: false, version: null, source: null, path: null, error: String(e && e.message || e) };
+  }
+});
+
+ipcMain.handle('update-yt-dlp', async () => {
+  const send = (stage, message) => {
+    try {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('yt-dlp-update-status', { stage, message });
+      }
+    } catch (e) { /* window gone mid-update */ }
+  };
+  try {
+    const { installYtDlp } = require('./src/yt-dlp-install.js');
+    send('start', 'Checking the yt-dlp nightly channel…');
+    const res = await installYtDlp({ channel: 'nightly', log: (m) => send('progress', m) });
+    send('done', 'Installed ' + res.version);
+    return { ok: true, version: res.version, tag: res.tag, verified: res.verified, channel: res.channel };
+  } catch (e) {
+    const message = String(e && e.message || e);
+    send('error', message);
+    return { ok: false, error: message };
+  }
 });
 
 ipcMain.handle('window-minimize', () => mainWindow.minimize());

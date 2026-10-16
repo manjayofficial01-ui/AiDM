@@ -84,14 +84,92 @@ Exports (used by the renderer as `window.DownloadViz`, by tests via
 
 ## Tests
 
-- `test/download-viz.js` — 49 checks (incl. `blockGridHtml` markup).
+- `test/download-viz.js` — 76 checks (incl. `blockGridHtml` markup; the
+  byte-map and flow-band sections arrived with the v5.3.1 update below).
 - `test/network-interfaces.js` — 40 checks.
 - `test/engine-network-bind.js` — 9 checks, including a real multi-connection
   spread download (1.5 MB) that completes byte-correct (sha256), proof that
   `localAddress` is honored, and `EADDRNOTAVAIL` for an unassigned address.
-- `test/plexo-ui-wiring.js` — 38 checks over the shipped files: the viz
+- `test/plexo-ui-wiring.js` — 65 checks over the shipped files (the viz
   module loads before `app.js`, the sparkline is the SVG (no canvas left),
-  BlockGrid/chips/settings/bridge wiring, and the manager's gating.
+  BlockGrid/chips/settings/bridge wiring, and the manager's gating; the
+  YouTube pane + engine wiring arrived with the v5.3.1 update below).
+
+## Update — v5.3.1: every active row animates + the yt-dlp path
+
+User feedback after the first integration: *"I have not got the Plexo style
+download animation"* — the BlockGrid only rendered for multi-segment HTTP
+downloads, so yt-dlp rows, torrents, single-connection HTTP and any row in the
+connecting phase showed the old flat bar (or nothing). Two changes close it.
+
+### Universal animated row map (`ui/download-viz.js` + `ui/app.js`)
+
+`renderRowMap(dl)` now picks the most honest representation:
+
+1. `segments ≥ 2` → the byte-space BlockGrid (multi-connection HTTP).
+2. byte truth (`totalSize > 0`, or an engine fragment `percent`) → a
+   **single-chunk byte map**: the whole file as one block, filled to the real
+   percent (the 6% in-flight sliver floor extends to this map — an active row
+   never reads as 0). Fragment-only rows are labeled "byte count unknown".
+3. in flight with no truth yet → the **indeterminate flow band**: a sliding
+   accent stripe over the empty track. It never invents a percent.
+4. otherwise nothing (idle/queued rows stay quiet).
+
+New exports: `byteBlockState(d)`, `byteBlockHtml(d, esc)`,
+`flowBandHtml(esc, mm)`. States map to `done` (green), `active` (accent +
+shimmer), `paused` (dimmed accent), `stalled` (muted, errors).
+
+Updates: `rowMapSig(dl)` keys the map by **kind**
+(`seg:<sig>` | `byte:<status>:b|f` | `flow` | `''`), so `patchRow` only
+re-renders when the representation kind changes; byte-map fills are patched
+**in place** (same DOM node) so the CSS width transition stays smooth instead
+of rebuilding the cell every tick. The flow band animates purely via CSS.
+Reduced motion degrades the band to a static wash, same gate as before.
+
+### YouTube: yt-dlp freshness + user cookies (`src/yt-dlp-install.js`)
+
+Root cause of the YouTube regression was two-fold: the shipped stable yt-dlp
+(2026.08.19) lags weekly YouTube changes, and since ~Oct 2026 extraction
+requires a sign-in ("Sign in to confirm you're not a bot") **even on the
+nightly** — `--cookies-from-browser` is defeated by Chromium's app-bound
+encryption (DPAPI) on typical machines.
+
+- `src/yt-dlp-install.js` (new, zero deps) — shared installer used by the CLI
+  tool and the in-app updater: `nightly` is the default channel
+  (`yt-dlp/yt-dlp-nightly-builds`; the last main-repo prerelease was 2022, and
+  the stable tag `yt-dlp/yt-dlp` lags weeks — Oct-2026 bot-wall fixes land on
+  the nightly first), SHA2-256SUMS verification, staged `.new` write →
+  `--version` probe → atomic rename (Windows EBUSY keeps the stage and leaves
+  the old binary working). AiDM still never bundles yt-dlp: it installs
+  per-user at `%LOCALAPPDATA%\AiDM\bin\` (no elevation).
+- `tools/fetch-yt-dlp.js` is now a thin CLI wrapper over the installer
+  (`--stable` opts out, `--check` verifies, `--dir` overrides).
+- Settings → YouTube: detected yt-dlp version display, an **Update yt-dlp**
+  button with live progress, and a **cookies.txt** path (Get cookies.txt with
+  the "LOCALLY" browser-export flow). The path is plumbed at every probe and
+  download site: `main.js` `youtubeCookieFile()`,
+  `server.js` `_youtubeCookieFile()`, `download-manager.js` →
+  `ytdlp.resolveUserCookieFile(setting)` → `cookieArgs()`'s `cookieFiles`
+  (temp captured cookies + user file are merged; only AiDM's own temp file is
+  ever deleted — the user's cookies.txt is never touched). Secrets stay in
+  Netscape files (`--cookies <path>`), never on argv.
+- Error copy for shipped users now points at **Settings › YouTube** (update
+  engine / add cookies.txt) instead of dev-only paths.
+
+## Tests
+
+- `test/download-viz.js` — 76 checks (byte map + flow band sections).
+- `test/yt-dlp-install.js` — 30 checks (channel choice, sums parsing, digest
+  matching, asset picking, per-user dir).
+- `test/yt-dlp-cookies.js` — 61 checks (`cookieFiles[]` merging,
+  `resolveUserCookieFile`, "the user cookies.txt is never deleted", manager
+  wiring).
+- `test/youtube-resolver.js` — 206 checks (Settings › YouTube error copy).
+- `test/plexo-ui-wiring.js` — 65 checks over the shipped files (map kinds,
+  in-place patching, flow/paused/stalled styles, YouTube pane + engine
+  wiring, the 4 server cookie sites).
+- `test/main-boot.js` — invokes `yt-dlp-status` / `select-cookie-file` for
+  real. Full suite: **64 suites**.
 
 ## Deliberately conservative
 
@@ -102,3 +180,5 @@ Exports (used by the renderer as `window.DownloadViz`, by tests via
 - The chunk→NIC mapping is per-connection round-robin, not per-chunk
   scheduling; Plexo's traffic-shaping polish (per-network ETA weighting) is a
   possible follow-up, not a correctness requirement.
+- The flow band never renders a fake percent — unknown size stays visually
+  indeterminate, and fragment-only rows are labeled as such.

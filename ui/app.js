@@ -227,17 +227,31 @@ function patchRow(tr, dl) {
       etaEl.remove();
     }
 
-    const segs = dl.segmentDetails || dl.segments;
-    const sig = segmentSignature(segs);
+    const sig = rowMapSig(dl);
     if (tr.dataset.segSig !== sig) {
       tr.dataset.segSig = sig;
       const old = cell.querySelector('.segments-bar');
       if (old) old.remove();
-      const segHtml = renderSegments(segs);
-      if (segHtml) {
+      const mapHtml = renderRowMap(dl);
+      if (mapHtml) {
         const wrap = document.createElement('div');
-        wrap.innerHTML = segHtml;
+        wrap.innerHTML = mapHtml;
         if (wrap.firstElementChild) cell.appendChild(wrap.firstElementChild);
+      }
+    } else if (sig.indexOf('byte:') === 0) {
+      // The byte map's kind is stable across ticks — patch its fill in place
+      // so the width transition animates instead of snapping on re-create.
+      const map = cell.querySelector('.byte-map');
+      if (map && window.DownloadViz && window.DownloadViz.byteBlockState) {
+        const st = window.DownloadViz.byteBlockState(dl);
+        const block = map.querySelector('.block');
+        const fill = map.querySelector('.block-fill');
+        if (st && block && fill) {
+          const wantCls = 'block ' + st.state;
+          if (block.className !== wantCls) block.className = wantCls;
+          if (fill.style.width !== st.pct + '%') fill.style.width = st.pct + '%';
+          if (map.title !== st.tip) map.title = st.tip;
+        }
       }
     }
   }
@@ -500,7 +514,7 @@ function renderDownloadRow(dl) {
     const sizeStr = rowSizeStr(dl);
     const downloadedStr = formatBytes(dl.downloaded);
     const etaStr = formatEta(dl.eta);
-    tr.dataset.segSig = segmentSignature(dl.segmentDetails || dl.segments);
+    tr.dataset.segSig = rowMapSig(dl);
 
     // Quality badge (from video detection) — label only, never a resolution
     const qualityBadge = qualityBadgeHtml(dl);
@@ -534,7 +548,7 @@ function renderDownloadRow(dl) {
           <span class="progress-text">${percent}%</span>
         </div>
         ${etaStr ? `<div class="eta-text">ETA ${etaStr}</div>` : ''}
-        ${renderSegments(dl.segmentDetails || dl.segments)}
+        ${renderRowMap(dl)}
       </td>
       <td class="col-speed">
         <span class="speed-cell ${dl.speed > 0 ? '' : 'zero'}">${speedStr}</span>
@@ -616,6 +630,47 @@ function renderSegments(segments) {
       </div>`;
     }).join('')}
   </div>`;
+}
+
+/**
+ * The row's download map — the one visual language for every row, whatever
+ * its transport. Picks the most honest representation available:
+ *   1. segments >= 2 → the byte-space BlockGrid (multi-connection HTTP).
+ *   2. byte truth (totalSize, or the engine's fragment percent) → the
+ *      single-chunk byte map: one wide block filled to the real percent.
+ *      Covers yt-dlp rows, torrents and plain single-connection HTTP.
+ *   3. in flight with no truth yet (connecting / hidden Content-Length) →
+ *      the indeterminate flow band: alive, but never a fake percent.
+ * Nothing (queued / paused / unknown) leaves the plain progress bar alone.
+ */
+function renderRowMap(dl) {
+  const segs = dl.segmentDetails || dl.segments;
+  if (Array.isArray(segs) && segs.length > 1) return renderSegments(segs);
+  if (!window.DownloadViz) return '';
+  const DV = window.DownloadViz;
+  if (DV.byteBlockState && DV.byteBlockState(dl)) {
+    return DV.byteBlockHtml(dl, escapeAttr);
+  }
+  const status = dl.status || '';
+  const inFlight = status === 'downloading' || status === 'connecting';
+  if (inFlight && typeof DV.flowBandHtml === 'function') return DV.flowBandHtml(escapeAttr);
+  return '';
+}
+
+/**
+ * Signature of the row's map KIND (not its live fill — that is patched in
+ * place so the width transition stays smooth). Re-renders the map only when
+ * the kind changes: segments ↔ byte map ↔ flow band ↔ none.
+ */
+function rowMapSig(dl) {
+  const segs = dl.segmentDetails || dl.segments;
+  if (Array.isArray(segs) && segs.length > 1) return 'seg:' + segmentSignature(segs);
+  if (window.DownloadViz && window.DownloadViz.byteBlockState && window.DownloadViz.byteBlockState(dl)) {
+    return 'byte:' + (dl.status || '') + ':' + ((Number(dl.totalSize) || 0) > 0 ? 'b' : 'f');
+  }
+  const status = dl.status || '';
+  if (status === 'downloading' || status === 'connecting') return 'flow';
+  return '';
 }
 
 /** Live adaptive-connection chip: active workers / target (FluxDown-style). */
@@ -1356,6 +1411,9 @@ function setupEventListeners() {
       document.querySelectorAll('[data-settings-pane]').forEach(p => {
         p.classList.toggle('active', p.dataset.settingsPane === id);
       });
+      // The YouTube pane shows the LIVE yt-dlp version — refresh it every
+      // time the tab opens (the user may have updated it elsewhere).
+      if (id === 'youtube') refreshYtDlpStatus();
     });
   });
 
@@ -1367,6 +1425,23 @@ function setupEventListeners() {
       if (f) document.getElementById(`cat-path-${cat}`).value = f;
     });
   });
+
+  // YouTube: cookies.txt picker + the one-click yt-dlp updater
+  const btnYtCookiesBrowse = document.getElementById('btn-yt-cookies-browse');
+  if (btnYtCookiesBrowse) btnYtCookiesBrowse.addEventListener('click', async () => {
+    const f = await window.aidm.selectCookieFile();
+    if (f) document.getElementById('setting-yt-cookies-file').value = f;
+  });
+  const btnYtdlpUpdate = document.getElementById('btn-ytdlp-update');
+  if (btnYtdlpUpdate) btnYtdlpUpdate.addEventListener('click', updateYtDlp);
+  // Live progress of the in-app yt-dlp update ("Downloading yt-dlp.exe…").
+  if (window.aidm.onYtDlpUpdateStatus) {
+    window.aidm.onYtDlpUpdateStatus(({ stage, message }) => {
+      if (!ytdlpUpdateInFlight) return;
+      const hint = document.getElementById('ytdlp-update-hint');
+      if (hint && message) hint.textContent = message;
+    });
+  }
 
   // AI Assistant modal
   document.getElementById('ai-close').addEventListener('click', hideAiModal);
@@ -1929,6 +2004,10 @@ async function showSettingsModal() {
   // YouTube signed-in access (v4.5.0) — opt-in browser cookie store.
   const ytBrowserSelect = document.getElementById('setting-yt-cookies-browser');
   if (ytBrowserSelect) ytBrowserSelect.value = String(settings.youtubeCookiesFromBrowser || '');
+  // YouTube signed-in access (v5.3.1) — exported cookies.txt + engine status.
+  const ytCookieFile = document.getElementById('setting-yt-cookies-file');
+  if (ytCookieFile) ytCookieFile.value = String(settings.youtubeCookiesFile || '');
+  refreshYtDlpStatus();
 
   // Category paths
   const cats = ['video', 'audio', 'document', 'pdf', 'archive', 'software', 'image'];
@@ -1943,11 +2022,77 @@ async function showSettingsModal() {
 function hideSettingsModal() { closeOverlay('settings-overlay'); }
 
 /**
+ * Show the yt-dlp build AiDM detected (Settings › YouTube › yt-dlp engine).
+ * A stale build is the usual cause of YouTube bot-wall failures, so the
+ * version is on screen next to the one-click updater.
+ *
+ * `ytdlpUpdateNote` carries the last update result across a status refresh —
+ * without it the refresh in updateYtDlp's finally would overwrite the
+ * "Installed …" message with the default blurb.
+ */
+let ytdlpUpdateInFlight = false;
+let ytdlpUpdateNote = '';
+async function refreshYtDlpStatus() {
+  const input = document.getElementById('ytdlp-version');
+  const hint = document.getElementById('ytdlp-update-hint');
+  if (!input || !window.aidm || !window.aidm.getYtDlpStatus) return;
+  input.value = 'Checking…';
+  try {
+    const st = await window.aidm.getYtDlpStatus();
+    if (st && st.found) {
+      input.value = `${st.version}  (${st.source})`;
+      if (hint && ytdlpUpdateNote) hint.textContent = ytdlpUpdateNote;
+    } else {
+      input.value = 'not installed';
+      if (hint) hint.textContent = 'yt-dlp is not installed yet — YouTube links cannot be extracted. Click “Update yt-dlp” to install the official build into this user\'s folder (no admin rights needed).';
+    }
+  } catch (e) {
+    input.value = 'unknown';
+  }
+}
+
+/**
+ * One-click yt-dlp update (Settings › YouTube). Downloads the latest nightly
+ * build, verifies its checksum, installs it into this user's folder and
+ * re-reports the detected version. Reports progress through the shared hint.
+ */
+async function updateYtDlp() {
+  const btn = document.getElementById('btn-ytdlp-update');
+  const hint = document.getElementById('ytdlp-update-hint');
+  if (!btn || !window.aidm || !window.aidm.updateYtDlp) return;
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Updating…';
+  ytdlpUpdateInFlight = true;
+  ytdlpUpdateNote = '';
+  if (hint) hint.textContent = 'Downloading the latest nightly yt-dlp build…';
+  try {
+    const res = await window.aidm.updateYtDlp();
+    ytdlpUpdateInFlight = false;
+    if (res && res.ok) {
+      ytdlpUpdateNote = `Installed yt-dlp ${res.version}${res.verified ? ' (checksum verified)' : ''} — new downloads use it immediately.`;
+      if (hint) hint.textContent = ytdlpUpdateNote;
+      showNotification('yt-dlp updated to ' + res.version);
+    } else {
+      ytdlpUpdateNote = 'Update failed: ' + ((res && res.error) || 'unknown error') + ' — you can retry, or install yt-dlp manually into this user\'s bin folder.';
+      if (hint) hint.textContent = ytdlpUpdateNote;
+    }
+  } catch (e) {
+    ytdlpUpdateInFlight = false;
+    ytdlpUpdateNote = 'Update failed: ' + (e && e.message || e);
+    if (hint) hint.textContent = ytdlpUpdateNote;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+    refreshYtDlpStatus();
+  }
+}
+
+/**
  * Tell the user whether this machine can actually combine networks: two or
  * more eligible NICs are required, otherwise the toggle stays inert.
  */
-async function refreshCombineHint() {
-  const hint = document.getElementById('combine-net-hint');
+async function refreshCombineHint() {  const hint = document.getElementById('combine-net-hint');
   if (!hint) return;
   try {
     const info = await window.aidm.getNetworkInterfaces();
@@ -2013,6 +2158,7 @@ async function saveSettings() {
       },
     },
     youtubeCookiesFromBrowser: (document.getElementById('setting-yt-cookies-browser')?.value || '').trim(),
+    youtubeCookiesFile: (document.getElementById('setting-yt-cookies-file')?.value || '').trim(),
     postDownloadCmd: document.getElementById('setting-post-download-cmd').value.trim(),
     aiEnabled: document.getElementById('setting-ai-enabled').checked,
     aiBaseURL: document.getElementById('setting-ai-baseurl').value.trim() || 'https://tokenharbor.ai/v1',

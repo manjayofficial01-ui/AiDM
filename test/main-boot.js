@@ -146,9 +146,39 @@ console.log('── add-download IPC respects meta.ytFormat ──');
   }
 }
 
-// ── Cleanup ─────────────────────────────────────────────────────────────────
-Object.keys(savedEnv).forEach(k => { process.env[k] = savedEnv[k]; });
-try { fs.rmSync(scratch, { recursive: true, force: true }); } catch (e) {}
+// ── yt-dlp engine IPC handlers (Settings › YouTube) ────────────────────────
+// Invoked for real: yt-dlp-status wraps detectRunner(true), which shells out
+// to the installed binary's --version. In this scratch env there is none, so
+// the assertion is the payload SHAPE (a throw or a malformed object would
+// break the Settings pane); the positive path is covered by the live install.
+console.log('── yt-dlp engine IPC ──');
+(async () => {
+  for (const ch of ['yt-dlp-status', 'update-yt-dlp', 'select-cookie-file']) {
+    check(`handler: ${ch}`, ipcHandlers.has(ch));
+  }
+  try {
+    const st = await ipcHandlers.get('yt-dlp-status')();
+    check('yt-dlp-status returns a well-formed payload',
+      !!st && typeof st === 'object' && typeof st.found === 'boolean',
+      JSON.stringify(st));
+    if (st && st.found) {
+      check('reports the detected version', typeof st.version === 'string' && st.version.length > 0, st.version);
+      check('reports where it came from', typeof st.source === 'string' && st.source.length > 0, st.source);
+    }
+  } catch (e) {
+    check('yt-dlp-status does not throw', false, e && e.message);
+  }
+  try {
+    const picked = await ipcHandlers.get('select-cookie-file')();
+    check('select-cookie-file resolves (cancelled dialog → null)', picked === null);
+  } catch (e) {
+    check('select-cookie-file does not throw', false, e && e.message);
+  }
 
-console.log(`\nmain-boot: ${pass} passed, ${fail} failed`);
-process.exit(fail ? 1 : 0);
+  // ── Cleanup ────────────────────────────────────────────────────────────────
+  Object.keys(savedEnv).forEach(k => { process.env[k] = savedEnv[k]; });
+  try { fs.rmSync(scratch, { recursive: true, force: true }); } catch (e) {}
+
+  console.log(`\nmain-boot: ${pass} passed, ${fail} failed`);
+  process.exit(fail ? 1 : 0);
+})();

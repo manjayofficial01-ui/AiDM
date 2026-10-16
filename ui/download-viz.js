@@ -10,6 +10,11 @@
  *     each sized by its share of the file and filled by its own progress. The
  *     fill floor (a started chunk floors to a 6% sliver) is Plexo's rule: a
  *     ~12px cell would otherwise round the first bytes to an invisible 0 width.
+ *   • ByteMap    → byteBlockHtml(): the SAME map for downloads with no
+ *     per-segment breakdown (yt-dlp, torrent, single-connection HTTP) — one
+ *     wide block filled to the honest percent. flowBandHtml() covers the
+ *     in-flight-but-size-unknown case with an indeterminate stripe, so every
+ *     active row animates, none of them fake a percent.
  *   • ThroughputChart → areaPath(): the area+line SVG geometry for the live
  *     speed chart (fixed time axis, newest at the right edge).
  *   • prefersReducedMotion(): the single a11y gate every animation checks.
@@ -75,7 +80,8 @@
    *   • state  : pending | active | done; tail marks a FluxDown micro-split.
    * More than `maxBlocks` segments coalesce (smallest first) so the DOM stays
    * bounded on a many-connection download; merged cells report their range.
-   * Returns [] for a single/absent segment so callers fall back to the plain bar.
+   * Returns [] for a single/absent segment so callers fall back to the
+   * single-chunk byte map (byteBlockHtml) or the flow band.
    */
   function blocksFromSegments(segs, totalBytes, opts) {
     const o = opts || {};
@@ -179,6 +185,83 @@
   }
 
   /**
+   * State of the single-chunk byte map: the whole file as ONE wide block,
+   * filled to the real percent. This is the Plexo look for every download
+   * that has honest truth but no per-segment breakdown — yt-dlp rows,
+   * torrents, and plain single-connection HTTP.
+   *   `d` is a row-like object: { downloaded, totalSize, percent, status }
+   *   • byte truth (totalSize) always wins over the engine's percent.
+   *   • percent alone is FRAGMENT truth (HLS/DASH yt-dlp emits a fragment
+   *     fraction while the exact byte count is unknown) — honest, but the
+   *     tooltip must say so.
+   *   • an active row at literally 0 bytes floors to the 6% sliver (Plexo's
+   *     rule: a started chunk must never read as 0 while it is in flight).
+   * Returns null when there is nothing honest to draw yet.
+   */
+  function byteBlockState(d) {
+    if (!d) return null;
+    const status = d.status || '';
+    const done = status === 'completed';
+    const state = done ? 'done'
+      : (status === 'downloading' || status === 'connecting') ? 'active'
+      : (status === 'paused') ? 'paused' : 'stalled';
+    const bytes = Number(d.totalSize) || 0;
+    const pctField = Number(d.percent);
+    let pct = 0;
+    let kind = 'bytes';
+    if (bytes > 0) {
+      pct = blockFillPercent(d.downloaded, d.totalSize, done ? 'done' : undefined);
+    } else if (isFinite(pctField) && pctField > 0) {
+      pct = Math.max(6, Math.min(100, Math.round(pctField)));
+      kind = 'frags';
+    } else if (done) {
+      pct = 100;
+      kind = 'frags';
+    } else {
+      return null;
+    }
+    if (pct === 0 && state === 'active') pct = 6;
+    const label = kind === 'bytes' ? 'Byte map' : 'Fragment progress';
+    const tip = done ? label + ' \u2014 complete'
+      : label + ' \u2014 ' + pct + '%' +
+        (kind === 'frags' ? ' (byte count unknown)' : '') +
+        (status === 'paused' ? ' (paused)' : '');
+    return { pct: pct, state: state, tip: tip };
+  }
+
+  /**
+   * Markup for the single-chunk byte map (see byteBlockState). Reuses the
+   * BlockGrid's cell CSS — one cell at 100% width, its own fill percent —
+   * so the whole download list shares one visual language. '' when there is
+   * no honest truth (caller falls back to the flow band or nothing).
+   */
+  function byteBlockHtml(d, esc) {
+    const st = byteBlockState(d);
+    if (!st) return '';
+    const e = typeof esc === 'function' ? esc : function (s) { return String(s); };
+    return '<div class="segments-bar block-grid byte-map" title="' + e(st.tip) + '">' +
+      '<div class="block ' + st.state + '" style="flex:0 0 100%">' +
+      '<div class="block-fill" style="width:' + st.pct + '%"></div></div></div>';
+  }
+
+  /**
+   * Indeterminate flow band: for rows in flight with NO honest byte truth
+   * yet (connecting, or a server that hides Content-Length). A soft stripe
+   * slides across the empty track so the row reads as alive without claiming
+   * a fake percent. Under prefers-reduced-motion it degrades to a static
+   * low-opacity wash (the animation is decoration, never the information).
+   */
+  function flowBandHtml(esc, mm) {
+    const e = typeof esc === 'function' ? esc : function (s) { return String(s); };
+    const still = prefersReducedMotion(mm);
+    const fillCls = 'block-fill flow-fill' + (still ? ' still' : '');
+    return '<div class="segments-bar block-grid byte-map flow-band" title="' +
+      e('Downloading \u2014 size unknown') + '">' +
+      '<div class="block active" style="flex:0 0 100%">' +
+      '<div class="' + fillCls + '"></div></div></div>';
+  }
+
+  /**
    * Plexo distributes chunks across physical networks round-robin. Fewer than
    * two networks can't be combined, so this returns null and the engine keeps
    * its ordinary default-route behaviour.
@@ -196,6 +279,9 @@
     blockFillPercent: blockFillPercent,
     blocksFromSegments: blocksFromSegments,
     blockGridHtml: blockGridHtml,
+    byteBlockState: byteBlockState,
+    byteBlockHtml: byteBlockHtml,
+    flowBandHtml: flowBandHtml,
     areaPath: areaPath,
     assignInterfaces: assignInterfaces
   };

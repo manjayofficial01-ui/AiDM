@@ -81,6 +81,7 @@ async function resolveGenericVideo(url, opts = {}) {
       cookies: opts.cookies || null,
       referer: opts.referer || pageUrl,
       cookiesFromBrowser: opts.cookiesFromBrowser || null,
+      cookieFile: opts.cookieFile || null,
       proxy: opts.proxy || null,
     });
   } catch (e) {

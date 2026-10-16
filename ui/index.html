@@ -505,7 +505,24 @@
                 <option value="vivaldi">Vivaldi</option>
               </select>
             </div>
-            <div class="settings-hint">Cookies the browser extension captures are always forwarded, whatever you pick here.</div>
+            <div class="settings-hint">Cookies the browser extension captures are always forwarded, whatever you pick here. Browsers now encrypt their cookie stores, so this often fails on Windows — use a cookies file below instead.</div>
+            <div class="form-group">
+              <label>Cookies file (cookies.txt)</label>
+              <div class="path-input">
+                <input type="text" id="setting-yt-cookies-file" placeholder="Not using a cookies file" />
+                <button type="button" class="tool-btn small" id="btn-yt-cookies-browse" title="Choose a cookies.txt file">Browse…</button>
+              </div>
+              <div class="settings-hint" id="yt-cookies-hint">Export a <strong>Netscape cookies.txt</strong> from your signed-in browser (e.g. the “Get cookies.txt LOCALLY” extension) and pick it here. AiDM passes it to yt-dlp whenever the extension did not capture a session for the row. The file is read at download time — it never leaves this machine.</div>
+            </div>
+            <h4>yt-dlp engine</h4>
+            <div class="form-group">
+              <label>Installed version</label>
+              <div class="path-input">
+                <input type="text" id="ytdlp-version" readonly placeholder="Checking…" />
+                <button type="button" class="tool-btn small" id="btn-ytdlp-update" title="Download and install the latest nightly yt-dlp build">Update yt-dlp</button>
+              </div>
+              <div class="settings-hint" id="ytdlp-update-hint">YouTube changes its player weekly and signs its streams — a stale yt-dlp is the usual cause of “Sign in to confirm you’re not a bot”. One click installs the current nightly build (checksum-verified) into this user's folder; no admin rights needed.</div>
+            </div>
           </section>
 
           <section class="settings-pane" data-settings-pane="ai">

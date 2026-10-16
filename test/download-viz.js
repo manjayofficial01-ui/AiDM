@@ -12,7 +12,7 @@ function check(name, cond, extra) {
 // download-viz.js ships as a UMD bundle (browser global + module.exports); it
 // must export every primitive the renderer relies on.
 console.log('\u2500\u2500 download-viz export surface \u2500\u2500');
-for (const fn of ['prefersReducedMotion', 'fmtEta', 'blockFillPercent', 'blocksFromSegments', 'areaPath', 'assignInterfaces']) {
+for (const fn of ['prefersReducedMotion', 'fmtEta', 'blockFillPercent', 'blocksFromSegments', 'areaPath', 'assignInterfaces', 'byteBlockState', 'byteBlockHtml', 'flowBandHtml']) {
   check('exports ' + fn, typeof viz[fn] === 'function');
 }
 
@@ -95,6 +95,38 @@ check('active block carries the glow class', grid.indexOf('block active') !== -1
 check('titles are escaped through the injected escaper', typeof viz.blockGridHtml([{ start: 0, end: 9, downloaded: 0, state: 'pending', tail: true }], esc) === 'string');
 check('missing escaper still renders (no crash)', viz.blockGridHtml([{ start: 0, end: 9, state: 'done' }, { start: 10, end: 19, state: 'pending' }]).indexOf('block done') !== -1);
 check('markup has no unescaped raw ampersand in a title', grid.indexOf('title="&') === -1);
+
+console.log('\u2500\u2500 byteBlockState (single-chunk byte map) \u2500\u2500');
+check('byte truth wins: half of the file', (() => { const s = viz.byteBlockState({ downloaded: 500, totalSize: 1000, status: 'downloading' }); return s.pct === 50 && s.state === 'active'; })());
+check('completed row is a full done block', (() => { const s = viz.byteBlockState({ downloaded: 1000, totalSize: 1000, status: 'completed' }); return s.pct === 100 && s.state === 'done' && s.tip.indexOf('complete') !== -1; })());
+check('an in-flight row never reads as 0 (6% sliver)', viz.byteBlockState({ downloaded: 0, totalSize: 999, status: 'downloading' }).pct === 6);
+check('a barely-started file still gets the in-flight sliver', viz.byteBlockState({ downloaded: 1, totalSize: 1024 * 1024, status: 'downloading' }).pct === 6);
+check('fragment percent is honest but labelled', (() => { const s = viz.byteBlockState({ totalSize: 0, percent: 45, status: 'downloading' }); return s.pct === 45 && s.tip.indexOf('Fragment progress') !== -1 && s.tip.indexOf('byte count unknown') !== -1; })());
+check('completed without any size still completes', viz.byteBlockState({ status: 'completed' }).pct === 100);
+check('paused holds its fill and says so', (() => { const s = viz.byteBlockState({ downloaded: 250, totalSize: 1000, status: 'paused' }); return s.pct === 25 && s.state === 'paused' && s.tip.indexOf('(paused)') !== -1; })());
+check('error row reads stalled', viz.byteBlockState({ downloaded: 250, totalSize: 1000, status: 'error' }).state === 'stalled');
+check('no truth and not done -> null (caller uses the flow band)', viz.byteBlockState({ status: 'downloading' }) === null && viz.byteBlockState({ totalSize: 0, percent: 0, status: 'downloading' }) === null);
+check('null row is safe', viz.byteBlockState(null) === null);
+
+console.log('\u2500\u2500 byteBlockHtml (single-block markup) \u2500\u2500');
+const byteMap = viz.byteBlockHtml({ downloaded: 500, totalSize: 1000, status: 'downloading' }, esc);
+check('renders the byte-map container', byteMap.indexOf('segments-bar block-grid byte-map') !== -1, byteMap.slice(0, 90));
+check('exactly one 100%-width block cell', byteMap.indexOf('flex:0 0 100%') !== -1 && (byteMap.match(/class="block /g) || []).length === 1);
+check('fill follows the real percent', byteMap.indexOf('width:50%') !== -1);
+check('in-flight block carries the glow class', byteMap.indexOf('block active') !== -1);
+check('title is escaped through the injected escaper', (() => { let calls = 0; viz.byteBlockHtml({ downloaded: 5, totalSize: 10, status: 'downloading' }, function (s) { calls++; return String(s); }); return calls === 1; })());
+check('no truth -> empty markup (fall back to the flow band)', viz.byteBlockHtml({ status: 'downloading' }, esc) === '');
+check('missing escaper still renders (no crash)', viz.byteBlockHtml({ downloaded: 10, totalSize: 10, status: 'completed' }).indexOf('block done') !== -1);
+
+console.log('\u2500\u2500 flowBandHtml (indeterminate in-flight band) \u2500\u2500');
+const band = viz.flowBandHtml(esc);
+check('renders the flow-band container', band.indexOf('byte-map flow-band') !== -1);
+check('carries the sliding flow fill', band.indexOf('flow-fill') !== -1);
+check('no percent is claimed anywhere', band.indexOf('width:') === -1, band.slice(0, 120));
+check('title says the size is unknown', band.indexOf('Downloading \u2014 size unknown') !== -1);
+check('reduced motion degrades to the static wash', viz.flowBandHtml(esc, { matches: true }).indexOf('flow-fill still') !== -1);
+check('no reduced-motion handle -> animated', viz.flowBandHtml(esc, null).indexOf('flow-fill"') !== -1);
+check('missing escaper still renders (no crash)', viz.flowBandHtml().indexOf('flow-band') !== -1);
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

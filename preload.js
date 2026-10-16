@@ -26,11 +26,17 @@ contextBridge.exposeInMainWorld('aidm', {
   openDownloadLog: (id) => ipcRenderer.invoke('open-download-log', { id }),
   openFolder: (folderPath) => ipcRenderer.invoke('open-folder', { folderPath }),
   selectFolder: () => ipcRenderer.invoke('select-folder'),
+  /** Netscape cookies.txt picker for yt-dlp (Settings › YouTube). */
+  selectCookieFile: () => ipcRenderer.invoke('select-cookie-file'),
 
   // Settings
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (settings) => ipcRenderer.invoke('save-settings', settings),
   getNetworkInterfaces: () => ipcRenderer.invoke('get-network-interfaces'),
+
+  // yt-dlp engine (Settings › YouTube): detected version + one-click update
+  getYtDlpStatus: () => ipcRenderer.invoke('yt-dlp-status'),
+  updateYtDlp: () => ipcRenderer.invoke('update-yt-dlp'),
 
   // AI (TokenHarbor: mimo-v2.5:free + deepseek-v4-flash:free)
   aiStatus: () => ipcRenderer.invoke('ai-status'),
@@ -78,4 +84,6 @@ contextBridge.exposeInMainWorld('aidm', {
   onDownloadAskLocation: (cb) => ipcRenderer.on('download-ask-location', (_, data) => cb(data)),
   onVideoDetected: (cb) => ipcRenderer.on('video-detected', (_, data) => cb(data)),
   onSchedulerEvent: (cb) => ipcRenderer.on('scheduler-event', (_, data) => cb(data)),
+  /** Live progress of the in-app yt-dlp update (Settings › YouTube). */
+  onYtDlpUpdateStatus: (cb) => ipcRenderer.on('yt-dlp-update-status', (_, data) => cb(data)),
 });

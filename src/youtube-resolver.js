@@ -550,6 +550,7 @@ async function resolveYouTubeVideos(url, opts = {}) {
       cookies: opts.cookies || null,
       referer: opts.referer || null,
       cookiesFromBrowser: opts.cookiesFromBrowser || null,
+      cookieFile: opts.cookieFile || null,
     });
   } catch (e) {
     if (RETRYABLE_PROBE_CODES.has(e && e.code)) return fallbackPayload(canonical, id, e && e.message);

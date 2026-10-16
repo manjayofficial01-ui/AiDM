@@ -564,6 +564,13 @@ const DEFAULT_SETTINGS = {
   // to let yt-dlp read that browser's own cookie store; it is opt-in and only
   // ever used for the site being downloaded.
   youtubeCookiesFromBrowser: '',
+  // A user-exported Netscape cookies.txt for yt-dlp (Settings › YouTube).
+  // Chromium browsers now encrypt their cookie stores (app-bound encryption),
+  // which defeats --cookies-from-browser on many machines, so an exported
+  // file is the reliable way to pass a signed-in YouTube session. Empty =
+  // off; the path is verified to exist at use time, so a stale setting can
+  // never break every YouTube download.
+  youtubeCookiesFile: '',
   // Post-download actions (v4.8.0, IDM/AntDM style): run a command on every
   // finished download. `postDownloadCmd` may contain {file} — replaced with
   // the finished file's path. Typical antivirus usage:
@@ -1854,6 +1861,12 @@ class DownloadManager extends EventEmitter {
         cookies: download.cookies || (download.meta && download.meta.cookies) || null,
         referer: (download.meta && download.meta.pageUrl) || null,
         cookiesFromBrowser: String(this.settings.youtubeCookiesFromBrowser || '').trim() || null,
+        // The user's exported cookies.txt (Settings › YouTube) is the fallback
+        // when the extension captured no session for this row. Chromium's
+        // app-bound encryption defeats --cookies-from-browser on many
+        // machines, so this file is the reliable path. Verified to exist at
+        // use time — a stale setting must never break every download.
+        cookieFile: ytdlp.resolveUserCookieFile(this.settings.youtubeCookiesFile),
         // With video+audio the per-track total is only half the job; the
         // resolver's combined size makes the percentage honest.
         expectedBytes: (choice && choice.size) || download.totalSize || 0,

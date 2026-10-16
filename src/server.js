@@ -179,6 +179,19 @@ class IPCServer {
     } catch (e) { return null; }
   }
 
+  /**
+   * Opt-in user-exported cookies.txt (Settings › YouTube). Verified to exist
+   * — a stale path must never break the extension's resolve endpoints.
+   */
+  _youtubeCookieFile() {
+    try {
+      const p = String((this.dm && this.dm.getSettings().youtubeCookiesFile) || '').trim();
+      if (!p) return null;
+      const fs = require('fs');
+      return fs.existsSync(p) ? p : null;
+    } catch (e) { return null; }
+  }
+
   _readBody(req, maxBytes = MAX_BODY_BYTES) {
     return new Promise((resolve, reject) => {
       const chunks = [];
@@ -386,6 +399,7 @@ class IPCServer {
               cookies: cookies || null,
               referer: referer || null,
               cookiesFromBrowser: this._youtubeCookiesFromBrowser(),
+              cookieFile: this._youtubeCookieFile(),
             });
             respond(200, { success: true, ...resolved });
           } catch (err) {
@@ -511,6 +525,7 @@ class IPCServer {
               cookies: cookies || null,
               referer: referer || null,
               cookiesFromBrowser: this._youtubeCookiesFromBrowser(),
+              cookieFile: this._youtubeCookieFile(),
             });
 
             const payload = {
@@ -740,6 +755,7 @@ class IPCServer {
         cookies: typeof data.cookies === 'string' ? data.cookies : null,
         referer: pageUrl,
         cookiesFromBrowser: this._youtubeCookiesFromBrowser(),
+        cookieFile: this._youtubeCookieFile(),
       });
       const payload = {
         url: r.canonicalUrl || pageUrl,
@@ -767,6 +783,7 @@ class IPCServer {
             cookies: typeof data.cookies === 'string' ? data.cookies : null,
             referer: (data.meta && data.meta.pageUrl) || data.url,
             cookiesFromBrowser: this._youtubeCookiesFromBrowser(),
+            cookieFile: this._youtubeCookieFile(),
           });
           if (!resolved.pickerVideos || !resolved.pickerVideos.length) {
             return { statusCode: 200, body: {

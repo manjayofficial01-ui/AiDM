@@ -151,8 +151,8 @@ function ytdlpMissingMessage() {
     ? (process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'AiDM', 'bin') : '%LOCALAPPDATA%\\AiDM\\bin')
     : '~/.local/share/aidm/bin';
   return 'yt-dlp was not found, so this YouTube link cannot be extracted. ' +
-    'Install it with: node tools/fetch-yt-dlp.js  (downloads the official ' +
-    'release into ' + dir + '), or grab yt-dlp from ' +
+    'Install it from Settings › YouTube › "Update yt-dlp" (it downloads the ' +
+    'official build into ' + dir + '), or grab yt-dlp from ' +
     'github.com/yt-dlp/yt-dlp/releases/latest and drop the binary there ' +
     'yourself, or set AIDM_YTDLP to its full path — then restart AiDM.';
 }
@@ -274,13 +274,13 @@ function classifyError(raw) {
   const has = (re) => re.test(t);
   if (has(/timed out/i) && !has(/socket/i)) return { code: 'timeout', message: 'The download exceeded the time limit and was stopped.' };
   if (has(/private video|This video is private/i)) return { code: 'private', message: 'This video is private. AiDM only downloads videos you can already watch.' };
-  if (has(/Sign in to confirm you.?re not a bot|not a bot/i)) return { code: 'bot-check', message: 'YouTube asked for a sign-in check before playing this video. AiDM does not bypass that — open the video in your browser first.' };
+  if (has(/Sign in to confirm you.?re not a bot|not a bot/i)) return { code: 'bot-check', message: 'YouTube asked for a sign-in check before playing this video. AiDM does not bypass that — open the video in your browser first, or update yt-dlp in Settings › YouTube, or export that browser\'s cookies to a cookies.txt file and point Settings › YouTube at it.' };
   if (has(/age-restricted|age restricted|confirm your age/i)) return { code: 'age', message: 'This video is age-restricted. AiDM does not bypass age verification.' };
   if (has(/members-only|Join this channel|member-only/i)) return { code: 'members', message: 'This video is members-only. AiDM does not bypass paid access.' };
   // ── Added after real failures: these four used to fall through to the
   //    generic "Extraction failed" line, which tells the user nothing and is
   //    the literal "it shows failed again" complaint. ──────────────────────
-  if (has(/nsig|Unable to extract .*(?:signature|player)|Signature extraction failed|throttling/i)) return { code: 'outdated', message: 'YouTube changed its player and this yt-dlp build can no longer read the stream. Update yt-dlp with: node tools/fetch-yt-dlp.js' };
+  if (has(/nsig|Unable to extract .*(?:signature|player)|Signature extraction failed|throttling/i)) return { code: 'outdated', message: 'YouTube changed its player and this yt-dlp build can no longer read the stream. Update yt-dlp from Settings › YouTube (one click — it fetches the nightly build).' };
   if (has(/HTTP Error 403|403 Forbidden|Forbidden\b/i)) return { code: 'forbidden', message: 'YouTube refused the stream request (HTTP 403). Retry, or open the video in your browser first so AiDM can reuse that session.' };
   if (has(/Sign in to confirm|sign in to|registered users|Sign in if you/i)) return { code: 'signin', message: 'YouTube wants a signed-in session for this video. Open it in your browser (or enable "Use browser cookies" in Settings › YouTube) and try again.' };
   if (has(/Video unavailable|unavailable|has been removed|deleted/i)) return { code: 'unavailable', message: 'This video is unavailable or has been removed.' };
@@ -289,7 +289,7 @@ function classifyError(raw) {
   if (has(/Postprocessing|ffmpeg|Error opening output|Conversion failed|Merger/i)) return { code: 'merge', message: 'The video and audio tracks could not be merged. Nothing was left in your folder as a silent video — try again or pick a different quality.' };
   if (has(/File is larger than|max-filesize/i)) return { code: 'too-large', message: 'The file is larger than the configured size limit.' };
   if (has(/Permission denied|Read-only file system|No space left/i)) return { code: 'disk', message: 'The file could not be written — check the save folder, its permissions and free space.' };
-  return { code: 'extract', message: 'Extraction failed. The video may be unavailable, restricted, or need an updated yt-dlp (run node tools/fetch-yt-dlp.js).' };
+  return { code: 'extract', message: 'Extraction failed. The video may be unavailable, restricted, or need an updated yt-dlp (Settings › YouTube › "Update yt-dlp").' };
 }
 
 /**
@@ -459,11 +459,29 @@ function sweepStaleCookieFiles(maxAgeMs = 3600 * 1000) {
 }
 
 /**
+ * A user-supplied Netscape cookies.txt (Settings › YouTube). Verified to
+ * exist at use time — a stale setting must never break every YouTube
+ * download. Chromium browsers now encrypt their cookie stores (app-bound
+ * encryption), which defeats --cookies-from-browser on many machines, so an
+ * exported file is the reliable path.
+ * @param {string} [p] path from settings
+ * @returns {string|null} the path when it is a readable file, else null
+ */
+function resolveUserCookieFile(p) {
+  const s = String(p || '').trim();
+  if (!s) return null;
+  try {
+    return fs.statSync(s).isFile() ? s : null;
+  } catch (e) { return null; }
+}
+
+/**
  * Build the yt-dlp cookie/referer arguments. Pure — the test suite asserts it
  * without ever running yt-dlp.
  *
  * @param {object} o
  * @param {string} [o.cookieFile] Netscape file from writeCookieFile()
+ * @param {string[]} [o.cookieFiles] several Netscape files (yt-dlp merges them)
  * @param {string} [o.cookiesFromBrowser] e.g. 'chrome' (opt-in; empty = off)
  * @param {string} [o.referer] page URL some CDNs require
  * @returns {string[]} ready to spread into argv
@@ -473,7 +491,12 @@ function cookieArgs(o) {
   if (!o) return out;
   const browser = String(o.cookiesFromBrowser || '').trim().toLowerCase();
   if (browser && BROWSERS.includes(browser)) out.push('--cookies-from-browser', browser);
-  if (o.cookieFile) out.push('--cookies', String(o.cookieFile));
+  const files = [];
+  if (o.cookieFile) files.push(String(o.cookieFile));
+  if (Array.isArray(o.cookieFiles)) {
+    for (const f of o.cookieFiles) if (f) files.push(String(f));
+  }
+  for (const f of files) out.push('--cookies', f);
   const ref = String(o.referer || '').trim();
   if (ref && /^https?:\/\//i.test(ref)) out.push('--referer', ref);
   return out;
@@ -561,15 +584,21 @@ function buildSubtitleArgs(o) {
  * @param {string} [opts.cookies]    `Cookie:` header value for this job
  * @param {string} [opts.referer]    page URL to send as Referer
  * @param {string} [opts.cookiesFromBrowser] opt-in browser cookie store
+ * @param {string} [opts.cookieFile] user-supplied Netscape cookies.txt (Settings)
  * @param {string} [opts.proxy]    http(s)/socks5 proxy URL (empty = direct)
  * @returns {Promise<object>} parsed info dict
  */
-async function probe(url, { timeoutMs = 60000, cookies = null, referer = null, cookiesFromBrowser = null, proxy = null } = {}) {
+async function probe(url, { timeoutMs = 60000, cookies = null, referer = null, cookiesFromBrowser = null, cookieFile = null, proxy = null } = {}) {
   const runner = await detectRunner();
   if (!runner) throw Object.assign(new Error(ytdlpMissingMessage()), { code: 'missing' });
   // A private/members-only video cannot even be LISTED without the session,
   // so the picker must carry cookies too — not just the download.
-  const cookieFile = cookies ? writeCookieFile(url, cookies) : null;
+  const tempCookieFile = cookies ? writeCookieFile(url, cookies) : null;
+  // The row's own captured cookies are the freshest, so they win; the user's
+  // exported file (Settings › YouTube) is the fallback. yt-dlp merges every
+  // --cookies file, and merges them with --cookies-from-browser too.
+  const userCookieFile = resolveUserCookieFile(cookieFile);
+  const cookieFiles = [tempCookieFile, userCookieFile].filter(Boolean);
   const args = [
     '--dump-json',
     '--no-warnings',
@@ -581,7 +610,7 @@ async function probe(url, { timeoutMs = 60000, cookies = null, referer = null, c
     '--socket-timeout', '20',
     '--retries', '2',
     '--extractor-retries', '2',
-    ...cookieArgs({ cookieFile, referer, cookiesFromBrowser }),
+    ...cookieArgs({ cookieFiles, referer, cookiesFromBrowser }),
     ...proxyArgs({ proxy }),
     '--',
     String(url),
@@ -602,7 +631,7 @@ async function probe(url, { timeoutMs = 60000, cookies = null, referer = null, c
     }
     throw Object.assign(new Error('Could not read the video information.'), { code: 'parse' });
   } finally {
-    deleteCookieFile(cookieFile);
+    deleteCookieFile(tempCookieFile);
   }
 }
 
@@ -684,6 +713,9 @@ function parseProgressLine(line) {
  *        Netscape file, never onto the command line.
  * @param {string} [o.referer]    page URL some CDNs require
  * @param {string} [o.cookiesFromBrowser] opt-in browser cookie store name
+ * @param {string} [o.cookieFile] user-supplied Netscape cookies.txt (Settings
+ *        › YouTube). Fallback when the extension captured no session for this
+ *        row — yt-dlp merges every --cookies file it is given.
  * @returns {Promise<{filePath:string,size:number}>}
  */
 function download(o) {
@@ -787,9 +819,13 @@ function downloadWithRunner(o, runner, resolve, reject) {
     if (ff) args.push('--ffmpeg-location', ff);
 
     // Session cookies / Referer for this job (see the cookie block above).
-    // Written to a file so the secret never appears in argv.
-    const cookieFile = cookies ? writeCookieFile(url, cookies) : null;
-    args.push(...cookieArgs({ cookieFile, referer, cookiesFromBrowser }));
+    // Written to a file so the secret never appears in argv. The user's
+    // exported cookies.txt (Settings › YouTube) rides along as the fallback —
+    // yt-dlp merges every --cookies file it is given.
+    const tempCookieFile = cookies ? writeCookieFile(url, cookies) : null;
+    const userCookieFile = resolveUserCookieFile(o.cookieFile);
+    const cookieFiles = [tempCookieFile, userCookieFile].filter(Boolean);
+    args.push(...cookieArgs({ cookieFiles, referer, cookiesFromBrowser }));
     args.push(...proxyArgs({ proxy }));
 
     args.push('--', String(url));
@@ -804,7 +840,7 @@ function downloadWithRunner(o, runner, resolve, reject) {
       });
     } catch (e) {
       // The cookie file is already on disk — don't leak it on a failed spawn.
-      if (cookieFile) deleteCookieFile(cookieFile);
+      if (tempCookieFile) deleteCookieFile(tempCookieFile);
       reject(e);
       return;
     }
@@ -823,7 +859,7 @@ function downloadWithRunner(o, runner, resolve, reject) {
       clearTimeout(hardTimer);
       clearInterval(abortTimer);
       cleanup();
-      deleteCookieFile(cookieFile); // never leave the session on disk
+      deleteCookieFile(tempCookieFile); // never leave the session on disk
       if (err) reject(err); else resolve(result);
     };
 
@@ -1006,6 +1042,7 @@ module.exports = {
   // Cookie / Referer plumbing (pure helpers are regression-tested).
   BROWSERS,
   cookieArgs,
+  resolveUserCookieFile,
   buildSubtitleArgs,
   cookieDomainFor,
   parseCookiePairs,

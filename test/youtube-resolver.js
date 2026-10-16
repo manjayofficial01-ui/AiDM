@@ -286,8 +286,8 @@ eq('HTTP 403 → forbidden (was: generic extract)',
   ytdlp.classifyError('ERROR: unable to download video data: HTTP Error 403: Forbidden').code, 'forbidden');
 eq('sign-in required → signin (was: generic extract)',
   ytdlp.classifyError('ERROR: This video is only available for registered users. Sign in if you').code, 'signin');
-check('outdated error names the update command',
-  /fetch-yt-dlp/.test(ytdlp.classifyError('nsig extraction failed').message));
+check('outdated error names the in-app updater',
+  /Settings . YouTube/.test(ytdlp.classifyError('nsig extraction failed').message));
 check('403 error tells the user to retry / open in browser',
   /403/.test(ytdlp.classifyError('HTTP Error 403: Forbidden').message));
 // The generic branch must still catch genuinely unclassifiable output.
@@ -468,7 +468,7 @@ try {
   const handled3 = await DownloadManager.prototype._startYoutubeDownload.call(ctx3, row3);
   eq('missing binary is handled, not thrown', handled3, true);
   eq('row errors', row3.status, 'error');
-  check('error message points at the installer', /fetch-yt-dlp\.js/.test(row3.error || ''));
+  check('error message points at the in-app updater', /Settings . YouTube/.test(row3.error || ''));
   eq('error code', row3.ytErrorCode, 'missing');
 
   // 9d. Pause mid-flight → row pauses (resume continues from the .part file)
@@ -643,7 +643,7 @@ try {
     console.log('  SKIP yt-dlp not installed — run: node tools/fetch-yt-dlp.js');
   }
   check('missing-yt-dlp message is actionable',
-    /tools\/fetch-yt-dlp\.js/.test(yt.ytdlpMissingMessage()) && /AIDM_YTDLP/.test(yt.ytdlpMissingMessage()));
+    /Settings . YouTube/.test(yt.ytdlpMissingMessage()) && /AIDM_YTDLP/.test(yt.ytdlpMissingMessage()));
 
   console.log(`\nyoutube-resolver: ${pass} passed, ${fail} failed`);
   process.exitCode = fail ? 1 : 0;

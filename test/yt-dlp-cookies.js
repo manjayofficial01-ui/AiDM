@@ -96,6 +96,33 @@ console.log('── cookieArgs ──');
   check('file + browser + referer combine in a stable order',
     JSON.stringify(ytdlp.cookieArgs({ cookieFile: '/tmp/c.txt', cookiesFromBrowser: 'firefox', referer: 'https://x.test/' })) ===
     '["--cookies-from-browser","firefox","--cookies","/tmp/c.txt","--referer","https://x.test/"]');
+  check('several cookie files all forwarded (yt-dlp merges them)',
+    JSON.stringify(ytdlp.cookieArgs({ cookieFiles: ['/tmp/a.txt', '/tmp/b.txt'] })) ===
+    '["--cookies","/tmp/a.txt","--cookies","/tmp/b.txt"]');
+  check('a cookieFiles entry that is empty is skipped',
+    JSON.stringify(ytdlp.cookieArgs({ cookieFiles: ['/tmp/a.txt', '', null] })) ===
+    '["--cookies","/tmp/a.txt"]');
+  check('user file + browser store + referer combine',
+    JSON.stringify(ytdlp.cookieArgs({ cookieFiles: ['/tmp/u.txt'], cookiesFromBrowser: 'edge', referer: 'https://x.test/' })) ===
+    '["--cookies-from-browser","edge","--cookies","/tmp/u.txt","--referer","https://x.test/"]');
+}
+
+// ── resolveUserCookieFile (Settings › YouTube cookies.txt) ──────────────────
+console.log('── resolveUserCookieFile ──');
+{
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'aidm-usercookie-'));
+  try {
+    const real = path.join(scratch, 'cookies.txt');
+    fs.writeFileSync(real, '# Netscape HTTP Cookie File\n');
+    check('an existing file is returned as-is', ytdlp.resolveUserCookieFile(real) === real);
+    check('a missing file returns null (a stale setting must not break downloads)',
+      ytdlp.resolveUserCookieFile(path.join(scratch, 'nope.txt')) === null);
+    check('a directory returns null', ytdlp.resolveUserCookieFile(scratch) === null);
+    check('empty / null-ish input returns null',
+      ytdlp.resolveUserCookieFile('') === null && ytdlp.resolveUserCookieFile(null) === null && ytdlp.resolveUserCookieFile(undefined) === null);
+  } finally {
+    try { fs.rmSync(scratch, { recursive: true, force: true }); } catch (e) {}
+  }
 }
 
 // ── writeCookieFile / deleteCookieFile ──────────────────────────────────────
@@ -150,17 +177,24 @@ console.log('── wiring ──');
   check('download() forwards the row cookies', /cookies:\s*download\.cookies/.test(dm));
   check('download() forwards the page referer', /referer:\s*\(download\.meta && download\.meta\.pageUrl\)/.test(dm));
   check('download() forwards the browser setting', /cookiesFromBrowser:\s*String\(this\.settings\.youtubeCookiesFromBrowser/.test(dm));
+  check('download() forwards the user cookies.txt (verified to exist)', /cookieFile:\s*ytdlp\.resolveUserCookieFile\(this\.settings\.youtubeCookiesFile\)/.test(dm));
   check('probe() forwards cookies too (picker must list private videos)',
     /ytdlp\.probe\(canonical,[\s\S]{0,200}cookies:\s*opts\.cookies/.test(yr));
+  check('probe() forwards the user cookies.txt too',
+    /ytdlp\.probe\(canonical,[\s\S]{0,260}cookieFile:\s*opts\.cookieFile/.test(yr));
   check('module exports the cookie helpers',
-    ['cookieArgs', 'netscapeCookieFile', 'writeCookieFile', 'deleteCookieFile']
+    ['cookieArgs', 'netscapeCookieFile', 'writeCookieFile', 'deleteCookieFile', 'resolveUserCookieFile']
       .every(k => typeof ytdlp[k] === 'function'));
   // The whole point of the file: secrets must not sit in argv.
   check('cookies are never passed via --add-header',
     !/--add-header['"]?\s*,\s*['"]?Cookie/i.test(yt));
   check('cookie file removed in download() finish',
-    /deleteCookieFile\(cookieFile\)/.test(yt));
-  check('probe() removes its cookie file too', /finally\s*\{\s*\n\s*deleteCookieFile\(cookieFile\)/.test(yt));
+    /deleteCookieFile\(tempCookieFile\)/.test(yt));
+  check('probe() removes its cookie file too', /finally\s*\{\s*\n\s*deleteCookieFile\(tempCookieFile\)/.test(yt));
+  // The temp file is OURS to delete; a user-configured cookies.txt must
+  // NEVER be deleted by AiDM — it lives outside the app.
+  check('the user cookies.txt is never deleted by AiDM',
+    !/deleteCookieFile\(userCookieFile\)/.test(yt) && !/deleteCookieFile\(o\.cookieFile\)/.test(yt));
 }
 
 console.log(`\nyt-dlp-cookies: ${pass} passed, ${fail} failed`);
