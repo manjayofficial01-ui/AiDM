@@ -65,6 +65,7 @@
     "test:auth-wall-manager": "node test/auth-wall-manager.js",
     "test:single-use-token": "node test/single-use-token.js",
     "test:ext-download-guard": "node test/ext-download-guard.js",
+    "test:ext-early-takeover": "node test/ext-early-takeover.js",
     "test:engine-ramp": "node test/engine-ramp.js",
     "test:ramp-controller": "node test/ramp-controller.js",
     "test:segment-advisor": "node test/segment-advisor.js",

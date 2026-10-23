@@ -1678,6 +1678,15 @@ function interceptDownload(downloadItem, suggest) {
     // (the native browser fallback): re-intercepting it would hand the same
     // file back to sendToAiDM in an endless fallback loop.
     if (isSelfDownload(downloadItem)) return fallBackToChrome();
+    // Early takeover already cancelled this download at onCreated and is
+    // handing it to AiDM — running a second handoff would POST the same URL
+    // twice. Make sure Chrome's copy stays dead and stop determining.
+    if (takenOverIds.has(downloadItem.id)) {
+      try { chrome.downloads.cancel(downloadItem.id, () => { void chrome.runtime.lastError; }); } catch (e) {}
+      safeRemoveChromeDownload(downloadItem.id);
+      try { suggest(); } catch (e) { /* download already gone */ }
+      return;
+    }
     if (!isConnected) await checkConnection();
     if (!isConnected) return fallBackToChrome();
 
@@ -1744,6 +1753,131 @@ function interceptDownload(downloadItem, suggest) {
 chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
   interceptDownload(downloadItem, suggest);
   return true; // suggest() is called asynchronously — required by the API
+});
+
+// ── Early takeover (downloads.onCreated) ─────────────────────────────────────
+// The determining-time handoff above only runs AFTER Chrome began target
+// determination — and with "Ask where to save each file" enabled (or an
+// explicit Save-image-as) Chrome raises its own Save As dialog during that
+// determination. The desktop accepts the handoff instantly and opens its own
+// Choose Download Location dialog, and Chrome's copy is only cancelled after
+// that POST lands — so the user faces BOTH dialogs at once.
+//
+// Fix: decide at downloads.onCreated — the earliest possible signal — and
+// cancel Chrome's copy there. A cancelled download aborts target
+// determination and Chrome closes (or never opens) its Save As dialog, so
+// AiDM's dialog is the only one the user sees. If AiDM then refuses the
+// handoff, the download is restored natively (saveAs: true) so nothing is
+// ever lost — cancel-first, but covered by an explicit fallback.
+//
+// blob:/data: URLs stay on the determining-time path: they are resolved by
+// fetching the page's blob in this worker and cannot be restored natively if
+// the handoff fails.
+
+// Download ids taken over at onCreated, so the determining-time listener
+// stands down instead of racing the early handoff with a second POST. NOTE:
+// ids are deliberately NOT dropped when the download interrupts — the
+// cancelled item's own onDeterminingFilename can still fire afterwards and
+// must still see the marker. Bounded FIFO keeps the set tiny.
+const takenOverIds = new Set();
+const TAKEN_OVER_MAX = 200;
+
+function markTakenOver(id) {
+  if (typeof id !== 'number') return;
+  takenOverIds.add(id);
+  if (takenOverIds.size > TAKEN_OVER_MAX) takenOverIds.delete(takenOverIds.values().next().value);
+}
+
+// ==TEST-EXPORT-EARLY-TAKEOVER-BEGIN== (consumed by test/ext-early-takeover.js)
+/**
+ * Synchronous decision at downloads.onCreated time: should AiDM cancel this
+ * brand-new browser download right now and hand it to the desktop itself?
+ *
+ * Deliberately conservative — every "no" here just falls back to the
+ * determining-time handoff, which still works (it merely cannot stop Chrome's
+ * Save As dialog):
+ *  • app not marked connected (a stale cache must not cancel user downloads;
+ *    the determining path re-checks the connection instead),
+ *  • self-initiated downloads (the native fallback re-fires onCreated),
+ *  • blob:/data: and other non-http(s) URLs,
+ *  • anything the takeover gate rejects (site exclusions, hotkeys, type list).
+ * @param {object} item chrome.downloads.DownloadItem at creation time
+ * @param {{connected: boolean, gate: Object, shouldTakeOver: Function,
+ *          isSelfDownload: Function, takenOverIds: Set<number>=}} ctx
+ */
+function shouldCancelAtCreation(item, ctx) {
+  try {
+    if (!item || typeof item.id !== 'number') return false;
+    if (!ctx || ctx.connected !== true) return false;
+    if (ctx.takenOverIds && ctx.takenOverIds.has(item.id)) return false;
+    if (typeof ctx.isSelfDownload === 'function' && ctx.isSelfDownload(item)) return false;
+    const url = String(item.finalUrl || item.url || '');
+    if (!/^https?:/i.test(url)) return false;
+    if (typeof ctx.shouldTakeOver === 'function' &&
+        !ctx.shouldTakeOver(url, ctx.gate || {})) return false;
+    return true;
+  } catch (e) { return false; }
+}
+// ==TEST-EXPORT-EARLY-TAKEOVER-END==
+
+chrome.downloads.onCreated.addListener((downloadItem) => {
+  try {
+    const take = shouldCancelAtCreation(downloadItem, {
+      connected: isConnected,
+      gate: {
+        browserIntegration: settings.browserIntegration,
+        interceptAll: settings.interceptAll,
+        interceptFileTypes: settings.interceptFileTypes,
+        excludedSites: settings.excludedSites,
+        preventAt: keyPreventAt,
+        forceAt: keyForceAt,
+        nowMs: Date.now(),
+      },
+      shouldTakeOver,
+      isSelfDownload,
+      takenOverIds,
+    });
+    if (!take) return;
+    markTakenOver(downloadItem.id);
+    // Cancel FIRST — this is the whole point: a cancelled download aborts
+    // Chrome's target determination, so the native Save As dialog never
+    // opens (or closes if it already did).
+    try {
+      chrome.downloads.cancel(downloadItem.id, () => { void chrome.runtime.lastError; });
+    } catch (e) { /* API unavailable — determining path still runs */ }
+    safeRemoveChromeDownload(downloadItem.id); // erase the dead entry from the shelf
+    (async () => {
+      await initReady;
+      if (!isConnected) await checkConnection();
+      const url = downloadItem.finalUrl || downloadItem.url;
+      const sent = await sendToAiDM(url, downloadItem.filename, {
+        referrer: downloadItem.referrer,
+        fileSize: downloadItem.fileSize,
+        mime: downloadItem.mime,
+      });
+      if (sent && (sent.sent || sent.duplicate)) {
+        try {
+          chrome.notifications.create({
+            type: 'basic',
+            iconUrl: 'icon128.png',
+            title: 'AiDM',
+            message: (sent.duplicate ? 'Already in AiDM: ' : 'Download started: ') +
+              (downloadItem.filename || extractFilename(url)),
+          });
+        } catch (e) {}
+        return;
+      }
+      // AiDM refused or died between the cancel and the POST — restore the
+      // download natively, with Chrome's own Save As prompt, so the user's
+      // file is never lost. markSelfDownload() inside keeps this loop-free.
+      await nativeDownloadToBrowser({
+        url,
+        filename: downloadItem.filename || extractFilename(url),
+        referrer: downloadItem.referrer || null,
+        saveAs: true,
+      });
+    })();
+  } catch (e) { /* never break download creation */ }
 });
 
 // ── Context Menus ─────────────────────────────────────────────────────────────
@@ -2469,7 +2603,7 @@ try {
   });
 } catch (e) { /* downloads API unavailable */ }
 
-async function nativeDownloadToBrowser({ url, filename, referrer }) {
+async function nativeDownloadToBrowser({ url, filename, referrer, saveAs }) {
   if (!url || !/^https?:/i.test(String(url))) {
     return { success: false, error: 'Missing url' };
   }
@@ -2482,21 +2616,27 @@ async function nativeDownloadToBrowser({ url, filename, referrer }) {
     const downloadId = await chrome.downloads.download({
       url: String(url),
       filename: name,
-      saveAs: false,
+      // saveAs: true restores the download AiDM cancelled but could not hand
+      // off — the user gets Chrome's own Save As dialog back.
+      saveAs: saveAs === true,
       conflictAction: 'uniquify',
     });
     if (typeof downloadId === 'number') {
       selfDownloadIds.add(downloadId);
       if (selfDownloadIds.size > 100) selfDownloadIds.delete(selfDownloadIds.values().next().value);
     }
-    try {
-      chrome.notifications.create({
-        type: 'basic',
-        iconUrl: 'icon128.png',
-        title: 'AiDM',
-        message: 'Browser download started: ' + name,
-      });
-    } catch (e) {}
+    if (saveAs !== true) {
+      // With saveAs the user is already looking at Chrome's own dialog —
+      // a notification under it is just noise.
+      try {
+        chrome.notifications.create({
+          type: 'basic',
+          iconUrl: 'icon128.png',
+          title: 'AiDM',
+          message: 'Browser download started: ' + name,
+        });
+      } catch (e) {}
+    }
     return { success: true, downloadId };
   } catch (e) {
     return { success: false, error: (e && e.message) || String(e) };
