@@ -111,13 +111,19 @@ function startServer() {
 
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) {}
 
+  // Drain the server fully before exiting: a bare close() + process.exit()
+  // here raced the spread task's socket teardown and tripped libuv's
+  // win/async.c assert (0xC0000409) — the response-integrity.js fix class.
   server.close();
+  server.closeAllConnections?.();
+  await new Promise((r) => server.once('close', r));
   destroyAgents();
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
-  process.exit(fail ? 1 : 0);
+  process.exitCode = fail ? 1 : 0;
+  setTimeout(() => process.exit(process.exitCode), 2000).unref();
 })().catch((e) => {
   console.error('engine-network-bind crashed:', e);
-  try { if (server) server.close(); } catch (_) {}
+  try { if (server) { server.close(); server.closeAllConnections?.(); } } catch (_) {}
   destroyAgents();
   process.exit(1);
 });
