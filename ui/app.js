@@ -167,8 +167,10 @@ function patchRow(tr, dl) {
     const isDone = dl.status === 'completed';
     const isActive = dl.status === 'downloading' || dl.status === 'connecting';
     fill.className = 'progress-fill ' + (isDone ? 'is-done' : (isActive ? 'is-active' : ''));
+    syncCurrent(fill, isActive && motionOk());
   }
   syncSpeedGlow(tr, dl);
+  syncIconRing(tr, dl);
   const ptext = tr.querySelector('.progress-text');
   if (ptext) ptext.textContent = percent + '%';
 
@@ -536,7 +538,7 @@ function renderDownloadRow(dl) {
       <td class="col-check"><input type="checkbox" ${selectedIds.has(dl.id) ? 'checked' : ''} /></td>
       <td class="col-name">
         <div class="file-info">
-          <div class="file-icon">${icon}</div>
+          <div class="file-icon">${icon}${iconRingHtml(dl)}</div>
           <div class="file-details">
             <span class="file-name" title="${escapeAttr(dl.filename)}">${escapeHtml(dl.filename)}${qualityBadge}</span>
             <span class="file-url" title="${escapeAttr(dl.url)}">${escapeHtml(truncateUrl(dl.url))}</span>
@@ -551,7 +553,7 @@ function renderDownloadRow(dl) {
       <td class="col-progress">
         <div class="progress-cell">
           <div class="progress-bar">
-            <div class="progress-fill ${fillClass}" style="width:${percent}%"></div>
+            <div class="progress-fill ${fillClass}" style="width:${percent}%">${isActive && motionOk() ? currentHtmlRow() : ''}</div>
           </div>
           <span class="progress-text">${percent}%</span>
         </div>
@@ -622,6 +624,62 @@ function motionOk() {
 }
 
 /**
+ * The App Store / Chrome-bubble progress ring around the file icon:
+ * a determinate arc at the REAL percent while downloading (plus a rotating
+ * comet), comet-only while connecting (honest: no percent exists yet),
+ * nothing otherwise. Markup is static SVG; the patch path moves only the
+ * arc's stroke-dashoffset.
+ */
+function iconRingHtml(dl) {
+  if (!window.DownloadViz || !window.DownloadViz.iconRingState) return '';
+  const st = window.DownloadViz.iconRingState(dl);
+  if (!st) return '';
+  const arc = st.mode === 'det'
+    ? `<circle class="arc" cx="18" cy="18" r="16" pathLength="100" style="stroke-dashoffset:${st.offset}"></circle>`
+    : '';
+  return `<span class="icon-ring ${st.mode}" aria-hidden="true">
+    <svg viewBox="0 0 36 36">
+      <circle class="track" cx="18" cy="18" r="16" pathLength="100"></circle>
+      ${arc}
+      <circle class="comet" cx="18" cy="18" r="16" pathLength="100"></circle>
+    </svg></span>`;
+}
+
+/** The flowing current inside the fill (three dashes, CSS-animated). */
+function currentHtmlRow() {
+  return (window.DownloadViz && window.DownloadViz.currentHtml) ? window.DownloadViz.currentHtml() : '';
+}
+
+/**
+ * Per-tick ring sync: the arc's dashoffset tracks the real percent (the CSS
+ * transition smooths it), never touching anything else on the row.
+ */
+function syncIconRing(tr, dl) {
+  const ring = tr.querySelector('.icon-ring');
+  if (!ring) return;
+  if (!window.DownloadViz || !window.DownloadViz.iconRingState) return;
+  const st = window.DownloadViz.iconRingState(dl);
+  if (!st) { ring.remove(); return; }
+  if (ring.classList.contains(st.mode)) {
+    const arc = ring.querySelector('.arc');
+    if (arc && arc.style.strokeDashoffset !== st.offset + '') arc.style.strokeDashoffset = st.offset;
+  }
+  // A mode change (connecting → downloading) re-renders the whole row via the
+  // status check at the top of patchRow, so no class surgery is needed here.
+}
+
+/** Add/remove the flowing current as the row's fill state changes. */
+function syncCurrent(fill, want) {
+  if (!fill) return;
+  const has = !!fill.querySelector('.current');
+  if (want && !has && motionOk() && window.DownloadViz) {
+    fill.insertAdjacentHTML('beforeend', currentHtmlRow());
+  } else if (!want && has) {
+    fill.querySelector('.current').remove();
+  }
+}
+
+/**
  * Add/remove the liquid crest inside a byte-map fill when the row's state
  * flips between active and everything else. The map is re-created on kind
  * changes anyway; this only covers a state flip with the SAME map kind
@@ -665,6 +723,11 @@ function fireCompletionFx(tr, dl) {
 
   const icon = tr.querySelector('.file-icon');
   if (icon) {
+    // Radial ripple first — one expanding ring, transform-only.
+    const ripple = document.createElement('span');
+    ripple.className = 'done-ripple';
+    icon.appendChild(ripple);
+    setTimeout(() => { if (ripple.isConnected) ripple.remove(); }, 700);
     const ring = document.createElement('div');
     ring.className = 'done-ring';
     // r=15.5 → circumference ≈ 97.4 (dasharray 98); the tick path is ≈ 20.5
@@ -704,17 +767,22 @@ function fireCompletionFx(tr, dl) {
   }
 }
 
-function renderSegments(segments) {
+/** Last per-cell states by row id — powers the just-done landing flash. */
+const segStatesCache = new Map();
+
+function renderSegments(segments, rowId) {
   // Fresh downloads carry a plain segment COUNT (number) until the engine
   // emits progress; only render the bar for a real per-segment array.
   if (!Array.isArray(segments) || segments.length <= 1) return '';
+  const prev = (rowId && segStatesCache.get(rowId)) || null;
   // Plexo BlockGrid: byte-space cells (a wide chunk is a wide block), each
   // filled by its own progress. Falls through to the equal-width bar when
   // the viz module is unavailable.
   if (window.DownloadViz && typeof window.DownloadViz.blockGridHtml === 'function') {
-    const grid = window.DownloadViz.blockGridHtml(segments, escapeAttr, { liquid: motionOk() });
-    if (grid) return grid;
+    const grid = window.DownloadViz.blockGridHtml(segments, escapeAttr, { liquid: motionOk(), justDone: prev });
+    if (grid) { if (rowId) segStatesCache.set(rowId, segments.map((s) => s.state || 'pending')); return grid; }
   }
+  if (rowId) segStatesCache.set(rowId, segments.map((s) => s.state || 'pending'));
   return `<div class="segments-bar">
     ${segments.map((s, i) => {
       const state = s.state || 'pending';
@@ -742,7 +810,7 @@ function renderSegments(segments) {
  */
 function renderRowMap(dl) {
   const segs = dl.segmentDetails || dl.segments;
-  if (Array.isArray(segs) && segs.length > 1) return renderSegments(segs);
+  if (Array.isArray(segs) && segs.length > 1) return renderSegments(segs, dl.id);
   if (!window.DownloadViz) return '';
   const DV = window.DownloadViz;
   if (DV.byteBlockState && DV.byteBlockState(dl)) {

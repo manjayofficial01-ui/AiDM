@@ -1,5 +1,48 @@
 # Changelog — modernization cycles
 
+## v5.7.0 (2026-10-25) — "Pulse Flow" animation redesign (user-requested)
+
+Second, deeper research pass over premium download animations — App Store
+button (state continuity: states morph, never jump), Chrome's download bubble
+/ Telegram radial arc (SVG ring, pathLength=100, dashoffset = 100−pct, round
+caps, M3 determinate+indeterminate pairing), motion principles (perceived
+speed, deterministic feedback), and 2025 spring physics via native CSS
+`linear()` easing (Josh Comeau / Carmen Ansio — Chromium 113+, Electron 45 ✓).
+What the Liquid Glow layer lacked vs. those references: a progress ring,
+state continuity, and springs. The redesign adds exactly those:
+
+1. **Icon progress ring** (App Store / Chrome-bubble pattern): a determinate
+   arc at the REAL percent around the file icon while downloading, plus a
+   rotating comet arc; comet-only while connecting (honest — no percent
+   exists yet); nothing otherwise. The patch path moves only the arc's
+   `stroke-dashoffset` (transition-smoothed) — states morph, never jump.
+   The old icon opacity-pulse retired (two movers on a 30px target = noise).
+2. **Flowing current**: three bright dashes traverse the active fill by
+   percentage (works at any width), speed driven by the SAME measured
+   data-glow tier as the halo — one cause, two effects.
+3. **Segment landing springs**: a BlockGrid cell that just flipped to done
+   pops on a sampled `linear()` overshoot curve (`--spring-pop`) — bytes
+   landing, not just a colour change. `renderSegments` caches per-cell
+   states and marks `.just-done` cells on re-render.
+4. **Completion ripple**: one expanding success ring behind the icon, joining
+   the drawn tick + particle burst.
+
+All on the unchanged house rules: transform/opacity-only motion (the tiny
+ring dashoffset is the one paint-based transition, same as the done-ring),
+honest decoration, bounded counts (1 ring + 3 dashes per row), and
+reduced-motion removes every mover while keeping the static arc/fill/percent
+information.
+
+Files: `ui/download-viz.js` (`iconRingState`, `currentHtml`, `justDone`
+marking), `ui/app.js` (`iconRingHtml`, `syncIconRing`, `syncCurrent`,
+`segStatesCache`, ripple), `ui/styles.css` (Pulse Flow layer + spring var +
+reduced-motion extension). `test/download-animation.js` grew 40→63 checks
+(ring math incl. clamping and percent-fallback honesty, comet-only
+connecting, current bounds, just-done precision, CSS guards incl.
+linear() spring and tier-driven durations, stale source-guards re-pinned).
+Verified: suite 63/63, legacy viz 76/76, offscreen render `05-row-pulseflow`
+shows ring + current + BlockGrid on a real Electron 45 render.
+
 ## v5.6.2 (2026-10-25, same cycle) — the real name now reaches the DIALOG
 
 User re-report with screenshots: the dialog still showed the placeholder +

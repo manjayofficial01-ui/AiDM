@@ -83,7 +83,7 @@ console.log('── 4. app.js wiring (source guards) ──');
 {
   const app = read('ui/app.js');
   check('map builders pass the reduced-motion gate to the viz',
-    /blockGridHtml\(segments, escapeAttr, \{ liquid: motionOk\(\) \}\)/.test(app) &&
+    /blockGridHtml\(segments, escapeAttr, \{ liquid: motionOk\(\), justDone: prev \}\)/.test(app) &&
     /byteBlockHtml\(dl, escapeAttr, \{ liquid: motionOk\(\) \}\)/.test(app));
   check('motionOk() is the single gate',
     /function motionOk\(\)/.test(app) &&
@@ -116,7 +116,7 @@ console.log('── 5. styles.css: GPU-only animation + reduced-motion removal �
     /tr\[data-glow="3"\] \.progress-bar::before \{ opacity: \.85; \}/.test(css));
   const rm = css.slice(css.indexOf('@media (prefers-reduced-motion: reduce)'));
   check('reduced motion REMOVES the whole layer',
-    /\.liquid, \.burst, \.done-ring \{ display: none !important; \}/.test(rm));
+    /\.liquid, \.burst, \.done-ring, \.done-ripple \{ display: none !important; \}/.test(rm));
   check('reduced motion freezes the glow transition', /progress-bar::before \{ transition: none; \}/.test(rm));
   check('wave clips inside the fill (no bleed over the track)',
     /\.block-fill \{ overflow: hidden; \}/.test(css));
@@ -136,6 +136,79 @@ console.log('── 6. geometry sanity: the wave really is two wavelengths ─�
   // control points at the crest y, hence 8 matches per direction.
   check('crests and troughs alternate across both wavelengths',
     crests === 8 && troughs === 8, crests + '↑ ' + troughs + '↓ (4 crests × 2 ctrl pts)');
+}
+
+console.log('── 7. Pulse Flow redesign (v5.7.0): icon ring, current, cell springs ──');
+{
+  const moving = { matches: false };
+  const still = { matches: true };
+  const DV2 = DV; // same module, new surface
+  const det = DV2.iconRingState({ status: 'downloading', downloaded: 44, totalSize: 100 }, moving);
+  check('ring: determinate at real percent (pathLength=100 → offset 100−pct)',
+    det && det.mode === 'det' && det.offset === 56 && det.pct === 44, JSON.stringify(det));
+  check('ring: percent-only rows floor honestly',
+    DV2.iconRingState({ status: 'downloading', percent: 37.6 }, moving).offset === 63);
+  check('ring: connecting is comet-only (never a fake percent)',
+    JSON.stringify(DV2.iconRingState({ status: 'connecting' }, moving)) === '{"mode":"indet","offset":100}');
+  check('ring: no ring when not in flight',
+    DV2.iconRingState({ status: 'completed' }, moving) === null &&
+    DV2.iconRingState({ status: 'paused' }, moving) === null &&
+    DV2.iconRingState(null) === null);
+  check('ring: reduced motion → no ring at all',
+    DV2.iconRingState({ status: 'downloading', downloaded: 1, totalSize: 2 }, still) === null);
+  check('ring: clamped at the edges (0% and 100%)',
+    DV2.iconRingState({ status: 'downloading', downloaded: 0, totalSize: 100 }, moving).offset === 100 &&
+    DV2.iconRingState({ status: 'downloading', downloaded: 999, totalSize: 100 }, moving).offset === 0);
+
+  const cur = DV2.currentHtml(moving);
+  check('current: exactly three dashes, no JS timers, aria-hidden',
+    (cur.match(/<i>/g) || []).length === 3 && !/setInterval|setTimeout/.test(cur) && /aria-hidden/.test(cur));
+  check('current: none under reduced motion', DV2.currentHtml(still) === '');
+
+  const segs = [
+    { start: 0, end: 99, downloaded: 100, state: 'done' },
+    { start: 100, end: 199, downloaded: 50, state: 'active' },
+    { start: 200, end: 299, downloaded: 0, state: 'pending' },
+  ];
+  const g = DV2.blockGridHtml(segs, (s) => s, { liquid: false, justDone: ['active', 'active', 'pending'] });
+  check('cells: only the just-completed cell is marked',
+    /block done just-done/.test(g) && !/block active just-done/.test(g) && !/block pending just-done/.test(g));
+  const g2 = DV2.blockGridHtml(segs, (s) => s, { liquid: false });
+  check('cells: no just-done without previous states', !/just-done/.test(g2));
+
+  const app2 = read('ui/app.js');
+  check('app: ring renders inside the file icon',
+    /file-icon">\$\{icon\}\$\{iconRingHtml\(dl\)\}/.test(app2));
+  check('app: patch path syncs the arc offset in place',
+    /function syncIconRing\(/.test(app2) && /syncIconRing\(tr, dl\)/.test(app2));
+  check('app: current added/removed on state flips',
+    /function syncCurrent\(/.test(app2) && /syncCurrent\(fill, isActive && motionOk\(\)\)/.test(app2));
+  check('app: segment states cached for the landing flash',
+    /segStatesCache/.test(app2) && /justDone: prev/.test(app2));
+  check('app: completion ripple self-cleans',
+    /done-ripple/.test(app2) && /ripple\.isConnected\) ripple\.remove\(\)/.test(app2));
+
+  const css2 = read('ui/styles.css');
+  check('css: spring easing is a native linear() curve',
+    /--spring-pop: linear\(/.test(css2));
+  check('css: ring comet rotates transform-only',
+    /@keyframes ring-comet \{ to \{ transform: rotate\(360deg\); \} \}/.test(css2));
+  check('css: ring arc transitions the dashoffset (morph, never jump)',
+    /transition: stroke-dashoffset \.45s/.test(css2));
+  check('css: current traverses by percentage (any fill width)',
+    /@keyframes current-flow[\s\S]*?from \{ transform: translateX\(-100%\); \}[\s\S]*?to \{ transform: translateX\(300%\); \}/.test(css2));
+  check('css: current speed follows the measured tier',
+    /tr\[data-glow="2"\] \.current \{ --dur: 1\.9s; \}/.test(css2) &&
+    /tr\[data-glow="3"\] \.current \{ --dur: 1\.1s; \}/.test(css2));
+  check('css: cell landing plays on the spring',
+    /animation: cell-land \.55s var\(--spring-pop\)/.test(css2));
+  check('css: the old icon pulse retired (ring owns "active")',
+    !/\.downloading \.file-icon \{ animation: pulse/.test(css2));
+  const rm2 = css2.slice(css2.indexOf('@media (prefers-reduced-motion: reduce)'));
+  check('reduced motion: comet/current/ripple/landing removed, static arc kept',
+    /\.icon-ring \.comet, \.current \{ display: none !important; \}/.test(rm2) &&
+    /\.done-ripple/.test(rm2) &&
+    /animation: none; background: var\(--success\);/.test(rm2));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

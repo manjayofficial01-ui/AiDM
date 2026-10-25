@@ -176,6 +176,9 @@
    * `opts.liquid` adds the wave crest to ACTIVE cells — at most
    * LIQUID_MAX_CELLS waves per row (first-come) so a 32-connection download
    * stays bounded: the remaining cells keep the shimmer only.
+   * `opts.justDone` (array of previous states, same cell order) marks cells
+   * that just flipped to done with `.just-done` so CSS can play a one-shot
+   * landing flash — bytes arriving, not just a colour change.
    */
   function blockGridHtml(segs, esc, opts) {
     const blocks = blocksFromSegments(segs, null);
@@ -183,8 +186,12 @@
     const o = opts || {};
     const e = typeof esc === 'function' ? esc : function (s) { return String(s); };
     let waveBudget = LIQUID_MAX_CELLS;
-    const cells = blocks.map(function (b) {
-      const cls = ['block', b.state, b.tail ? 'tail' : ''].filter(Boolean).join(' ');
+    const prevStates = Array.isArray(o.justDone) ? o.justDone : null;
+    const cells = blocks.map(function (b, i) {
+      const justDone = prevStates && b.state === 'done' && prevStates[i] !== undefined &&
+        prevStates[i] !== 'done';
+      const cls = ['block', b.state, justDone ? 'just-done' : '', b.tail ? 'tail' : '']
+        .filter(Boolean).join(' ');
       // First LIQUID_MAX_CELLS active cells get the crest; beyond the budget
       // a many-connection row keeps the shimmer only — bounded DOM, still liquid.
       const wave = (o.liquid && b.state === 'active' && waveBudget-- > 0) ? liquidHtml(null) : '';
@@ -328,6 +335,43 @@
   }
 
   /**
+   * The icon progress-ring state (App Store / Chrome-bubble pattern).
+   *   • downloading → 'det': a determinate arc at the REAL percent
+   *     (pathLength=100, so dashoffset = 100 − pct) plus a rotating comet arc.
+   *   • connecting   → 'indet': comet only — honest "in flight, no percent yet".
+   *   • anything else → null (no ring; the icon is the information).
+   * Pure so the Node suite can pin the math.
+   */
+  function iconRingState(dl, mm) {
+    if (!dl) return null;
+    if (prefersReducedMotion(mm)) return null;
+    const status = dl.status || '';
+    if (status === 'connecting') return { mode: 'indet', offset: 100 };
+    if (status !== 'downloading') return null;
+    let pct = 0;
+    const bytes = Number(dl.totalSize) || 0;
+    if (bytes > 0) {
+      pct = Math.floor((Math.max(0, Number(dl.downloaded) || 0) / bytes) * 100);
+    } else {
+      const p = Number(dl.percent);
+      if (isFinite(p) && p > 0) pct = Math.floor(p);
+    }
+    pct = Math.max(0, Math.min(100, pct));
+    return { mode: 'det', offset: 100 - pct, pct: pct };
+  }
+
+  /**
+   * The flowing "current" inside an active fill: three bright dashes drifting
+   * left→right. Their speed is set by CSS from the row's data-glow tier (one
+   * measured variable drives glow AND current — cause, then effect). Pure CSS
+   * transform loop, no timers, bounded to exactly three dashes.
+   */
+  function currentHtml(mm) {
+    if (prefersReducedMotion(mm)) return '';
+    return '<span class="current" aria-hidden="true"><i></i><i></i><i></i></span>';
+  }
+
+  /**
    * Plexo distributes chunks across physical networks round-robin. Fewer than
    * two networks can't be combined, so this returns null and the engine keeps
    * its ordinary default-route behaviour.
@@ -353,6 +397,8 @@
     wavePathD: wavePathD,
     liquidHtml: liquidHtml,
     speedGlowTier: speedGlowTier,
+    iconRingState: iconRingState,
+    currentHtml: currentHtml,
     LIQUID_MAX_CELLS: LIQUID_MAX_CELLS
   };
 });
