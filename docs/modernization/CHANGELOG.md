@@ -1,5 +1,32 @@
 # Changelog — modernization cycles
 
+## v5.6.2 (2026-10-25, same cycle) — the real name now reaches the DIALOG
+
+User re-report with screenshots: the dialog still showed the placeholder +
+"Fetching file info…" while Chrome's own download card showed the real name
+(`सुचना (1)-1.docx`). The 5.6.1 fix renamed the file MID-DOWNLOAD — after the
+dialog had closed. The dialog-time gap: for single-use URLs the probe is
+skipped by design, so nothing ever fetched the name BEFORE approval.
+
+Fix — **one header-only naming fetch** (`_probeGmailHeaders`): a plain GET
+with `redirect: 'follow'` whose body is cancelled the moment the response
+headers arrive. The Gmail entry URL (both `mail.google.com/…view=att` and the
+`mail-attachment.googleusercontent.com/attachment/…` CDN form) mints a FRESH
+one-shot redirect target per request — the codebase's own documented behavior —
+so this spends nothing for the real download, which re-requests the entry and
+mints its own target. The headers carry the real name (RFC 5987 UTF-8
+included), size and mime; they flow through the standard
+`_applyProbeResult` pipeline → row renamed, category fixed, size exact, and
+the open dialog patches itself via the existing `download-updated` plumbing —
+BEFORE the user clicks Start. If the fetch fails, the branch falls back to the
+exact synthetic contract the pure single-use path returns (pinned by
+`test/single-use-token.js`, harness updated with the new stubbed layer).
+
+Verified: `test/response-name.js` now 19 checks — the naming fetch against a
+Gmail-shaped 302 chain returns `सुचना (1).docx` + exact size + mime in ONE
+entry request, and the full manager path renames the pending row pre-approval
+with a stubbed fetch. Full suite **76/76 in 57.6s**.
+
 ## v5.6.1 (2026-10-25, same cycle) — Gmail attachment names (user re-report)
 
 The user's screenshot showed the location dialog offering **"7"** for a Gmail

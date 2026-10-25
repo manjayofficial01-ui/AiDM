@@ -19,6 +19,13 @@ const path = require('path');
 
 const { DownloadTask } = require('../src/engine/task');
 
+// DownloadManager with a scratch profile (settings/state under a temp dir).
+process.env.USERPROFILE = process.env.USERPROFILE && process.env.USERPROFILE.includes('aidm-response-name-')
+  ? process.env.USERPROFILE
+  : fs.mkdtempSync(path.join(os.tmpdir(), 'aidm-response-name-profile-'));
+process.env.HOME = process.env.USERPROFILE;
+const { DownloadManager } = require('../src/download-manager');
+
 let pass = 0, fail = 0;
 function check(name, cond, extra) {
   if (cond) { pass++; console.log('  OK   ' + name + (extra ? ' — ' + extra : '')); }
@@ -101,6 +108,72 @@ for (let i = 0; i < PAYLOAD.length; i++) PAYLOAD[i] = i & 0xFF;
       /download-name[\s\S]{0,600}dl\._userNamed/.test(src));
     check('approveDownload marks user-authored names',
       /dl\.filename = name;[\s\S]{0,400}dl\._userNamed = true;/.test(src));
+  }
+
+  console.log('\n── 3. the naming fetch: real name + size BEFORE approval ──');
+  {
+    // The user-reported gap: the dialog showed the placeholder + "Fetching
+    // file info…" until approval, because the rename only fired mid-download.
+    // The header-only naming fetch must return the real name/size/mime from a
+    // Gmail-shaped redirect chain (entry 302 → one-shot with RFC 5987 UTF-8
+    // filename) while the dialog is still open.
+    const mgr = new DownloadManager();
+    const seen = [];
+    const { server, port } = await startServer((req, res) => {
+      seen.push(req.url);
+      if (req.url.startsWith('/entry')) {
+        res.writeHead(302, { Location: '/one-shot?t=1' });
+        return res.end();
+      }
+      res.writeHead(200, {
+        'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        "Content-Disposition": "attachment; filename*=UTF-8''%E0%A4%B8%E0%A5%81%E0%A4%9A%E0%A4%A8%E0%A4%BE%20(1).docx",
+        'Content-Length': 141312,
+      });
+      res.end(Buffer.alloc(141312)); // body the probe must NOT download
+    });
+    try {
+      const url = `http://127.0.0.1:${port}/entry?ui=2&attid=0.1&view=att`;
+      const meta = await mgr._probeGmailHeaders(url, {});
+      check('naming fetch returns the real (UTF-8) name',
+        meta && meta.suggestedFilename === 'सुचना (1).docx', meta && meta.suggestedFilename);
+      check('naming fetch returns the exact size', meta && meta.contentLength === 141312);
+      check('naming fetch returns the mime type', meta && /wordprocessingml/.test(meta.contentType));
+      check('exactly one entry hit (reusable entry mints per request)',
+        seen.filter((u) => u.startsWith('/entry')).length === 1, `${seen.length} requests total`);
+      check('probe meta marked range-free (the real GET stays single-connection)',
+        meta && meta.supportsRange === false && meta.rangesBlocked === true);
+
+      // Full manager path: addDownload (Gmail CDN classifier → placeholder)
+      // then _resolveFilename with a STUBBED fetch (the classifier needs the
+      // real Gmail hostname, so the local server can't take that branch).
+      const dl = mgr.addDownload({ url: 'https://mail-attachment.googleusercontent.com/attachment/u/7/?ui=2&attid=0.1&view=att' });
+      check('row starts on the honest placeholder', dl.filename === 'Gmail attachment');
+      let updated = null;
+      mgr.on('download-updated', (d) => { updated = d; });
+      const stubHeaders = new Map([
+        ['content-disposition', 'attachment; filename="Report final.pdf"'],
+        ['content-type', 'application/pdf'],
+        ['content-length', '8192'],
+      ]);
+      const stubFetch = async () => ({
+        status: 200,
+        headers: { get: (k) => stubHeaders.get(k) ?? null },
+        body: { cancel: async () => {} },
+      });
+      await mgr._resolveFilename(dl, null, stubFetch).catch(() => {});
+      check('row renamed from the probe result before approval',
+        dl.filename === 'Report final.pdf', dl.filename);
+      check('size learned before approval', dl.totalSize === 8192);
+      check('category follows the real extension', dl.category === 'pdf', dl.category);
+      check('dialog patch event fired with the real name',
+        updated && updated.filename === 'Report final.pdf');
+      check('skipProbe still set (the real GET stays single-connection)',
+        dl.skipProbe === true && dl.singleConnection === true);
+    } finally {
+      await drain(server);
+      mgr.removeAllListeners?.();
+    }
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

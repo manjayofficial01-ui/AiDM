@@ -9,6 +9,7 @@ const { muxAudioVideo, isAvailable: ffmpegAvailable, facebookMediaHeaders } = re
 const ytdlp = require('./yt-dlp');
 const youtubeResolver = require('./youtube-resolver');
 const { sanitizeEntryUrl, entryUrlWasRepaired, isSingleUseTokenUrl, isGmailAttachmentEntryUrl, isGmailAttachmentCdnUrl } = require('./url-hygiene');
+const { filenameFromContentDisposition } = require('./engine/probe');
 const { looksLikeAuthWall, looksLikeHtmlHead, sessionExpiredMessage, extensionOfFilename, BINARY_EXTENSIONS } = require('./auth-wall');
 const googleDrive = require('./google-drive-resolver');
 const { TorrentEngine, isTorrentUrl, magnetDisplayName } = require('./torrent-engine');
@@ -2720,6 +2721,54 @@ class DownloadManager extends EventEmitter {
   }
 
   /**
+   * ONE header-only naming fetch for Gmail attachment URLs: a plain GET with
+   * `redirect: 'follow'` whose body is cancelled the moment the response
+   * headers arrive. The entry URL mints a fresh one-shot redirect target per
+   * request (see url-hygiene.js), so this spends nothing for the real
+   * download — and the headers carry the ONLY copy of the real file name +
+   * size that exists before the transfer starts (the probe is skipped for
+   * these URLs, the extension takeover fires before Chrome reads them).
+   * Never throws: any failure returns null and the honest placeholder stays.
+   * `fetchImpl` is injectable for tests.
+   */
+  async _probeGmailHeaders(url, headers, fetchImpl) {
+    const doFetch = fetchImpl || (typeof fetch === 'function' ? fetch : null);
+    if (!doFetch) return null;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 12000);
+    try {
+      const res = await doFetch(url, {
+        method: 'GET',
+        redirect: 'follow',
+        signal: ac.signal,
+        headers: { Accept: '*/*', ...(headers || {}) },
+      });
+      const status = res.status;
+      const cd = res.headers.get('content-disposition') || '';
+      const contentType = res.headers.get('content-type') || '';
+      const contentLength = parseInt(res.headers.get('content-length'), 10) || 0;
+      try { if (res.body) await res.body.cancel(); } catch (e) { /* headers read — body irrelevant */ }
+      const suggestedFilename = filenameFromContentDisposition(cd);
+      if (status >= 200 && status < 400 && (suggestedFilename || contentLength > 0)) {
+        return {
+          status,
+          supportsRange: false,
+          rangesBlocked: true,
+          contentLength,
+          contentType,
+          suggestedFilename,
+          headers: {},
+        };
+      }
+      return null;
+    } catch (e) {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
    * Ask the server for the real file name/size up front. Never throws: on any
    * failure it returns `null` and the URL-derived name is kept. The result is
    * cached on the download so `_startDownload` can reuse it without a second
@@ -2728,22 +2777,51 @@ class DownloadManager extends EventEmitter {
    * `extraHeaders` (e.g. session Cookie + Referer) must be passed in for
    * authenticated CDNs — probing without them gets 403 and a useless meta.
    */
-  async _resolveFilename(download, extraHeaders = null) {
+  async _resolveFilename(download, extraHeaders = null, fetchImpl = null) {
     if (download._nameResolved) return download._probe || null;
     const probeHeaders = extraHeaders || download.headers || {};
 
-    // Single-use signed attachment URLs (Gmail attachment, Drive usercontent,
-    // one-shot token params): every probe request spends the token, so the
-    // HEAD/Range multi-probe 400s while a browser's single GET works. Skip the
-    // network probe entirely and let the engine fetch the file in ONE plain
+    // Gmail attachment URLs (entry + CDN forms): the path carries no file name
+    // and a multi-request probe would misbehave — BUT the entry mints a fresh
+    // one-shot redirect target on EVERY request, so ONE header-only GET costs
+    // the real download nothing and is the only place the real name + size
+    // exist before the transfer starts. Abort right after the response
+    // headers; the real download re-requests the entry and mints its own
+    // target. This is what fills the location dialog before approval.
+    if (!download._nameResolved && (isGmailAttachmentCdnUrl(download.url) || isGmailAttachmentEntryUrl(download.url))) {
+      download.singleConnection = true;
+      download.resumable = false;
+      // The real download still streams ONE plain connection (skipProbe) —
+      // the naming fetch above is separate and spends nothing.
+      download.skipProbe = true;
+      const meta = await this._probeGmailHeaders(download.url, probeHeaders, fetchImpl);
+      download._nameResolved = true;
+      if (meta) {
+        // Reuses the standard probe pipeline: name refinement (honours
+        // _userNamed), category, size, persist + 'download-updated' → the
+        // open location dialog patches itself live.
+        this._applyProbeResult(download, { kind: 'file', meta, hlsSize: null });
+      } else {
+        // Naming fetch failed (offline / sign-in page / timeout): fall back to
+        // the exact synthetic shape the pure single-use path returns, so every
+        // caller sees the same contract (singleConnection, rangesBlocked…).
+        download._probe = {
+          status: 200, supportsRange: false, singleConnection: true,
+          rangesBlocked: true, contentLength: 0,
+          suggestedFilename: null, contentType: '', headers: {},
+        };
+        this.emit('download-updated', download);
+      }
+      return download._probe;
+    }
+
+    // Single-use signed attachment URLs (Drive usercontent, one-shot token
+    // params): every probe request spends the token, so the HEAD/Range
+    // multi-probe 400s while a browser's single GET works. Skip the network
+    // probe entirely and let the engine fetch the file in ONE plain
     // connection. The browser (extension intercept) already supplied the real
     // filename; total size is learned live from the response stream.
-    //
-    // Gmail's mail.google.com/mail attachment endpoint joins the same path:
-    // it is the REUSABLE entry point (each request mints a fresh one-shot
-    // redirect target), so it must likewise never be multi-probed — one plain
-    // GET that follows the redirect internally, with cookies + Referer.
-    if (!download._nameResolved && (isSingleUseTokenUrl(download.url) || isGmailAttachmentEntryUrl(download.url))) {
+    if (!download._nameResolved && isSingleUseTokenUrl(download.url)) {
       download.singleConnection = true;
       download.resumable = false;
       // The engine's DownloadTask runs its OWN Range probe in prepare(); that

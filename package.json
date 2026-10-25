@@ -1,6 +1,6 @@
 {
   "name": "aidm",
-  "version": "5.6.1",
+  "version": "5.6.2",
   "description": "AiDM - AI-powered download manager with a multi-connection engine, YouTube/DASH via yt-dlp, torrent/magnet, HTTP/2, and an IDM-style Chrome extension.",
   "main": "main.js",
   "scripts": {

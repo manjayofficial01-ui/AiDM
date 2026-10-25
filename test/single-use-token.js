@@ -108,6 +108,11 @@ check('Gmail attachment: short-circuits to single-connection, probeMeta never ca
   const mgr = {
     emits: [],
     emit(ev) { this.emits.push(ev); },
+    // v5.6.2: Gmail forms get ONE header-only naming GET (see response-name.js)
+    // whose result renames the row pre-approval. It is NOT probeMeta, costs no
+    // mint (the entry re-mints per request), and stubs to null here so this
+    // suite keeps exercising the fall-back synthetic contract.
+    _probeGmailHeaders() { return Promise.resolve(null); },
     engine: {
       probeMeta() {
         probeCalled = true;
@@ -165,6 +170,8 @@ check('Gmail mail.google.com entry also skips the network probe', () => {
   const mgr = {
     emits: [],
     emit(ev) { this.emits.push(ev); },
+    // v5.6.2 naming-GET stub — see the comment on the Gmail-attachment check.
+    _probeGmailHeaders() { return Promise.resolve(null); },
     engine: {
       probeMeta() {
         probeCalled = true;
