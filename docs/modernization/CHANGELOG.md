@@ -59,6 +59,11 @@ Baseline before work: `npm test` → **74/73→73/73 suites** (re-measured 73/73
 - `npm run dist` → **success, exit 0** (after the optional-native pruning below)
   → `dist/AiDM-Setup-5.5.0.exe` **150,331,744 B** + blockmap 158,019 B.
   Bigger than 5.4.0's 104.9 MB: Electron 45's runtime is larger than 28's.
+- **v5.6.0 rebuild** (after the Liquid Glow feature): `npm run dist` → exit 0 →
+  `dist/AiDM-Setup-5.6.0.exe` **150,335,764 B** + blockmap; `latest.yml`
+  refreshed and sha512 independently re-verified; the three animation files
+  (`ui/download-viz.js`, `ui/app.js`, `ui/styles.css`) byte-identical inside
+  the asar; packaged `--version` → 5.6.0.
 - `node tools/refresh-latest-yml.js` → sha512 independently recomputed and
   **matches** electron-builder's value; `latest.yml` describes 5.5.0,
   `releaseDate` 2026-10-25T15:05:15.943Z.
