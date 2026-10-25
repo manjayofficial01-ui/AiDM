@@ -518,6 +518,100 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
   100% { background-position: 150% 0; }
 }
 
+/* ── Liquid Glow animation layer (v5.6.0) ────────────────────────────────────
+   Three decoration-only effects on active/completed rows. House rules:
+   the animation never carries information the static state lacks; every
+   element animates only `transform`/`opacity` (GPU-composited); the whole
+   layer is disabled under prefers-reduced-motion (see the media block at
+   the bottom of this file). */
+
+/* Act 1 — liquid crest on active fills. Each `.liquid` SVG is exactly two
+   wavelengths wide (see DownloadViz.wavePathD) at 200% of the fill width,
+   translating -50% per loop = one full wavelength pair → seamless. Two
+   layers at different speeds/directions give the liquid depth. */
+.block-fill { overflow: hidden; }
+.liquid {
+  position: absolute; top: 0; left: 0;
+  width: 200%; height: 4px;
+  pointer-events: none;
+  will-change: transform;
+  animation: liquid-slide 2.4s linear infinite;
+}
+.liquid-2 { animation-duration: 3.6s; animation-direction: reverse; opacity: .6; }
+.liquid .w { fill: rgba(255, 255, 255, .30); }
+.liquid-2 .w { fill: rgba(255, 255, 255, .18); }
+@keyframes liquid-slide {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+/* Act 2 — speed-reactive glow. The row's `data-glow` (0–3, from the live
+   throughput via DownloadViz.speedGlowTier) sets the halo opacity over the
+   main progress bar. Only opacity transitions; the blurred layer itself is
+   static. tier 0 (idle/paused) leaves opacity 0 — no glow without speed.
+   z-index 1: the bar's overflow:hidden clips the halo to the pill, and the
+   sheen must paint ABOVE the fill to read as light on the liquid. */
+.progress-bar::before {
+  content: ''; position: absolute; inset: 0;
+  border-radius: 999px;
+  background: radial-gradient(60% 140% at 50% 50%, var(--accent), transparent 78%);
+  filter: blur(4px);
+  opacity: 0;
+  transition: opacity .6s ease;
+  pointer-events: none;
+  z-index: 1;
+}
+tr[data-glow="1"] .progress-bar::before { opacity: .28; }
+tr[data-glow="2"] .progress-bar::before { opacity: .55; }
+tr[data-glow="3"] .progress-bar::before { opacity: .85; }
+
+/* Act 3 — the completion flourish. A success ring draws itself around the
+   file icon (stroke-dashoffset → 0), then a small particle burst radiates
+   from the fill's leading edge. Particles are 12 absolutely-positioned <i>
+   elements flying on transform/opacity via their --dx/--dy/--rot/--delay
+   custom properties; the container self-cleans. */
+.file-icon { position: relative; }
+.done-ring {
+  position: absolute; inset: -5px;
+  pointer-events: none;
+}
+.done-ring svg { width: 100%; height: 100%; overflow: visible; display: block; }
+.done-ring .ring {
+  stroke: var(--success); stroke-width: 2; stroke-linecap: round;
+  stroke-dasharray: 98; stroke-dashoffset: 98;
+  transform: rotate(-90deg); transform-origin: center;
+  animation: ring-draw .45s ease-out forwards;
+}
+.done-ring .tick {
+  stroke: var(--success); stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round;
+  stroke-dasharray: 22; stroke-dashoffset: 22;
+  animation: tick-draw .3s ease-out .28s forwards;
+}
+.done-ring.leaving { transition: opacity .3s ease; opacity: 0; }
+@keyframes ring-draw { to { stroke-dashoffset: 0; } }
+@keyframes tick-draw { to { stroke-dashoffset: 0; } }
+
+.burst {
+  position: absolute; top: 50%;
+  width: 0; height: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+.burst i {
+  position: absolute; left: -3px; top: -3px;
+  width: 6px; height: 6px;
+  border-radius: 2px;
+  opacity: 0;
+  will-change: transform, opacity;
+  animation: burst-fly .7s cubic-bezier(.16, .84, .44, 1) forwards;
+  animation-delay: var(--delay, 0ms);
+}
+@keyframes burst-fly {
+  0%   { opacity: 0; transform: translate(0, 0) rotate(0deg) scale(.6); }
+  12%  { opacity: 1; }
+  100% { opacity: 0; transform: translate(var(--dx), var(--dy)) rotate(var(--rot)) scale(.4); }
+}
+
 .speed-cell { font-family: var(--font-mono); font-size: 11px; color: var(--success); font-variant-numeric: tabular-nums; }
 .speed-cell.zero { color: var(--text-muted); }
 
@@ -961,6 +1055,11 @@ input[type="checkbox"] { accent-color: var(--accent); width: 14px; height: 14px;
     transition-duration: .001ms !important;
     scroll-behavior: auto !important;
   }
+  /* Liquid Glow layer: pure decoration, so it is REMOVED under reduced
+     motion rather than frozen — the fill width, percent text and success
+     colour carry the same information without any movement. */
+  .liquid, .burst, .done-ring { display: none !important; }
+  .progress-bar::before { transition: none; }
 }
 
 /* ── Site grabber results (v5.4.0) ────────────────────────────────────────────

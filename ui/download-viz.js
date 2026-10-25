@@ -163,6 +163,9 @@
     return { line: line, area: area };
   }
 
+  /** Max concurrent wave animations per row — beyond this, shimmer only. */
+  var LIQUID_MAX_CELLS = 16;
+
   /**
    * The BlockGrid's markup, ready to drop into the row's progress cell:
    * one flex cell per segment whose width is its byte share of the file and
@@ -170,16 +173,24 @@
    * nothing to draw (single/absent segment), so the caller falls back to its
    * plain equal-width bar. `esc` is the caller's attribute escaper (injected
    * so the Node tests need no DOM).
+   * `opts.liquid` adds the wave crest to ACTIVE cells — at most
+   * LIQUID_MAX_CELLS waves per row (first-come) so a 32-connection download
+   * stays bounded: the remaining cells keep the shimmer only.
    */
-  function blockGridHtml(segs, esc) {
+  function blockGridHtml(segs, esc, opts) {
     const blocks = blocksFromSegments(segs, null);
     if (!blocks.length) return '';
+    const o = opts || {};
     const e = typeof esc === 'function' ? esc : function (s) { return String(s); };
+    let waveBudget = LIQUID_MAX_CELLS;
     const cells = blocks.map(function (b) {
       const cls = ['block', b.state, b.tail ? 'tail' : ''].filter(Boolean).join(' ');
+      // First LIQUID_MAX_CELLS active cells get the crest; beyond the budget
+      // a many-connection row keeps the shimmer only — bounded DOM, still liquid.
+      const wave = (o.liquid && b.state === 'active' && waveBudget-- > 0) ? liquidHtml(null) : '';
       return '<div class="' + cls + '" style="flex:0 0 ' + b.width.toFixed(2) +
         '%" title="' + e(b.title) + '"><div class="block-fill" style="width:' + b.pct +
-        '%"></div></div>';
+        '%">' + wave + '</div></div>';
     }).join('');
     return '<div class="segments-bar block-grid" title="Segment map">' + cells + '</div>';
   }
@@ -234,14 +245,17 @@
    * BlockGrid's cell CSS — one cell at 100% width, its own fill percent —
    * so the whole download list shares one visual language. '' when there is
    * no honest truth (caller falls back to the flow band or nothing).
+   * `opts.liquid` adds the wave crest while the row is actively downloading.
    */
-  function byteBlockHtml(d, esc) {
+  function byteBlockHtml(d, esc, opts) {
     const st = byteBlockState(d);
     if (!st) return '';
+    const o = opts || {};
     const e = typeof esc === 'function' ? esc : function (s) { return String(s); };
+    const wave = (o.liquid && st.state === 'active') ? liquidHtml(null) : '';
     return '<div class="segments-bar block-grid byte-map" title="' + e(st.tip) + '">' +
       '<div class="block ' + st.state + '" style="flex:0 0 100%">' +
-      '<div class="block-fill" style="width:' + st.pct + '%"></div></div></div>';
+      '<div class="block-fill" style="width:' + st.pct + '%">' + wave + '</div></div></div>';
   }
 
   /**
@@ -259,6 +273,58 @@
       e('Downloading \u2014 size unknown') + '">' +
       '<div class="block active" style="flex:0 0 100%">' +
       '<div class="' + fillCls + '"></div></div></div>';
+  }
+
+  /**
+   * Closed sine-ish wave path, exactly TWO wavelengths across `width`, filled
+   * down to the bottom. The two-wavelength rule is what makes the CSS loop
+   * seamless: the element is 200% wide and translates by -50% (= one full
+   * wavelength pair), so the pattern repeats with no visible seam.
+   */
+  function wavePathD(width, height, wavelength, amplitude, midY) {
+    const half = wavelength / 2;
+    let d = 'M0,' + midY;
+    let dir = -1;
+    for (let x = 0; x < width; x += half) {
+      d += ' C' + (x + half * 0.25).toFixed(1) + ',' + (midY + dir * amplitude) +
+        ' ' + (x + half * 0.75).toFixed(1) + ',' + (midY + dir * amplitude) +
+        ' ' + (x + half).toFixed(1) + ',' + midY;
+      dir = -dir;
+    }
+    d += ' L' + width + ',' + height + ' L0,' + height + ' Z';
+    return d;
+  }
+
+  /**
+   * The liquid crest for an ACTIVE fill: two translucent wave layers sliding
+   * at different speeds. Pure CSS `transform` translation on 200%-wide SVGs —
+   * GPU-composited, no JS timers. Returns '' under reduced motion (the caller
+   * keeps the plain fill; the animation is decoration, never the information).
+   * @param {MediaQueryList|null} mm optional matchMedia stub for tests
+   */
+  function liquidHtml(mm) {
+    if (prefersReducedMotion(mm)) return '';
+    // Wavelengths must divide 100 exactly (half the width): the -50% translate
+    // has to land on an identical phase or the loop visibly jumps.
+    const a = wavePathD(200, 10, 50, 2.4, 5);
+    const b = wavePathD(200, 10, 25, 1.7, 6.4);
+    return '<svg class="liquid" viewBox="0 0 200 10" preserveAspectRatio="none" aria-hidden="true">' +
+      '<path class="w" d="' + a + '"></path></svg>' +
+      '<svg class="liquid liquid-2" viewBox="0 0 200 10" preserveAspectRatio="none" aria-hidden="true">' +
+      '<path class="w" d="' + b + '"></path></svg>';
+  }
+
+  /**
+   * Live speed → glow tier. Honest decoration: the row's glow strength tracks
+   * the MEASURED throughput, not a fixed look. 0 = idle/paused (no glow),
+   * 1 = trickling, 2 = fast, 3 = saturating.
+   */
+  function speedGlowTier(bytesPerSec) {
+    const s = Number(bytesPerSec) || 0;
+    if (s <= 0) return 0;
+    if (s < 5 * 1024 * 1024) return 1;
+    if (s < 25 * 1024 * 1024) return 2;
+    return 3;
   }
 
   /**
@@ -283,6 +349,10 @@
     byteBlockHtml: byteBlockHtml,
     flowBandHtml: flowBandHtml,
     areaPath: areaPath,
-    assignInterfaces: assignInterfaces
+    assignInterfaces: assignInterfaces,
+    wavePathD: wavePathD,
+    liquidHtml: liquidHtml,
+    speedGlowTier: speedGlowTier,
+    LIQUID_MAX_CELLS: LIQUID_MAX_CELLS
   };
 });

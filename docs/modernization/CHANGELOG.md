@@ -71,6 +71,31 @@ Baseline before work: `npm test` → **74/73→73/73 suites** (re-measured 73/73
   the cert was not available in this session) — installer is unsigned,
   recorded honestly.
 
+### Added (same cycle, follow-up feature)
+
+- **"Liquid Glow" download-animation layer** (v5.6.0), built from a research
+  pass on 2025–26 progress-animation patterns (liquid/wave fill, glow rings,
+  completion bursts, check-draw micro-interactions):
+  1. *Liquid crest* on active fills — two translucent SVG waves, exactly two
+     wavelengths wide (λ must divide 100 or the −50% CSS loop jumps — caught
+     by the suite), translating transform-only for a seamless GPU loop; two
+     layers at different speeds for depth. Embedded via `DownloadViz.liquidHtml()`
+     into the byte map and BlockGrid cells (budget: first 16 active cells per
+     row; beyond that the shimmer carries the motion).
+  2. *Speed-reactive glow* — `DownloadViz.speedGlowTier(measured B/s)` → row
+     `data-glow` 0–3 → halo opacity over the main bar (opacity-only
+     transitions; tier 0 = no glow without speed; honest decoration).
+  3. *Completion flourish* — a success ring draws itself around the file icon
+     (stroke-dashoffset → 0) plus a 12-particle transform/opacity burst from
+     the fill's leading edge; once per completion (`completionFxIds`), reset
+     on resume, self-cleaning timers, skipped under reduced motion.
+  Files: `ui/download-viz.js` (`liquidHtml`, `speedGlowTier`, `wavePathD`,
+  `LIQUID_MAX_CELLS`), `ui/app.js` (`motionOk`, `syncMapWave`, `syncSpeedGlow`,
+  `fireCompletionFx` + hooks in patch/render/IPC paths), `ui/styles.css`
+  (animation layer + reduced-motion removal), `test/download-animation.js`
+  (40 checks). Verified: suite 40/40; offscreen renders `05-row-liquid` /
+  `06-row-burst` show crest, glow sheen and the drawn ring on real Electron.
+
 ### Toolchain changes this cycle
 
 - `.npmrc` with `omit=optional`: prunes `bufferutil`, `utf-8-validate`,
