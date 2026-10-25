@@ -1,5 +1,91 @@
 # Changelog — modernization cycles
 
+## Cycle 2 — v5.4.0 → v5.5.0 (2026-10-25)
+
+Baseline before work: `npm test` → **74/73→73/73 suites** (re-measured 73/73 in
+63.5s on the untouched v5.4.0 tree). After: **74/74 suites in 66.4s**
+(one new suite; no regressions).
+
+### Security (the headline of this cycle)
+
+| Change | Why | Evidence |
+|---|---|---|
+| **Electron 28.3.3 → 45.0.0** (17 majors) + electron-builder 26.15.3 → 26.18.0 | 28.3.3 carries ~21 known high advisories; directly relevant here: `shell.openPath` null-byte bypass (AiDM opens download folders), Windows registry key injection in `app.setAsDefaultProtocolClient` (protocol registration), use-after-free in the download **save dialog** (AiDM's own flow), ASAR integrity bypass, `setLoginItemSettings` unquoted-path (AiDM calls it at main.js:83) | `npm audit` before/after; full suite green on 45; offscreen render check green |
+| `uuid` 9.0.1 → 11.1.1 | GHSA-w5hq-g745-h8pq (moderate). AiDM only uses `v4` (advisory affects v3/v5/v6 with `buf`), so impact was nil — bumped anyway to clear the flag; `require('uuid').v4` API unchanged | `require('uuid').v4()` verified |
+| `ip-address` override → 10.7.5 | GHSA-rxp7-6hxx-x8q5 (quadratic ReDoS in IPv6 zone parsing) ships via webtorrent's `load-ip-set`/`torrent-discovery`; torrent peers are untrusted input | `node_modules/ip-address` = 10.7.5; torrent suite 31/31 |
+| archive-extract hardening | Two Windows edge cases found in the cycle-2 fresh-eyes pass: NTFS alternate-data-stream entry names (`readme.txt:zone.identifier`) and DOS reserved device names (`CON`, `NUL.txt`) were not refused — both stay inside the extraction root, so severity low, but hidden/odd targets | 4 new checks in `test/archive-extract.js` (52/52) |
+
+### Fixed (user-reported)
+
+- **"The file name is not catching the exact file name"** — two defects:
+  1. `filenameFromContentDisposition` (src/engine/probe.js) percent-decoded
+     *quoted* `filename="…"` values, which are literal per RFC 6266 — a real
+     name like `Report%202026.pdf` silently became `Report 2026.pdf`.
+     Quoted values are now literal; bare tokens keep the tolerant decode.
+  2. `_refineFilename` (src/download-manager.js) only applied the server's
+     Content-Disposition name when the current name was generic or
+     extension-less, so a URL basename like `9f8e7d.zip` beat the server's
+     exact `Monthly Report.zip`. The server name now wins over URL-derived
+     guesses (browser parity) but never over an explicitly provided name
+     (`_userNamed`, set in `addDownload`). New suite
+     `test/filename-exact.js` (21 checks); the mydaddy-title source guard was
+     updated to pin the new condition.
+
+### Test-infrastructure fixes
+
+- `test/site-grabber.js` crashed the runner with the libuv `win/async.c`
+  assert (same class as the engine-network-bind / response-integrity fixes of
+  previous cycles): the live-crawl HTTP server was not drained before exit.
+  Now uses the house pattern (`close()` + `closeAllConnections?.()` + await
+  close, `process.exitCode` + unref'd 2s force-exit). 3× isolated runs clean.
+- `test/mydaddy-title.js` guard `generic names yield to Content-Disposition`
+  updated to the new authority condition.
+
+### Dependency notes (recorded honestly)
+
+- `npm audit fix` was run for the dev-tooling transitive chain
+  (brace-expansion, undici via electron-builder→node-gyp). Build-time only.
+- **Remaining residue, deferred:** 4 high advisories in `bittorrent-tracker`
+  11.2.3 (transitive under webtorrent 2.8.5). The fix is webtorrent 3.x,
+  which is ESM-native; `src/torrent-engine.js` loads webtorrent via dynamic
+  `import()` (verified working), but the major bump needs verification against
+  live swarms and is deferred to cycle 3. Not silently ignored — see
+  VALIDATION_REPORT §residual.
+- webtorrent intentionally stays 2.8.5 (2.8.5 is CJS-loadable and verified by
+  the torrent suite; 3.0.21 is a breaking major).
+
+### Built
+
+- `npm run dist` → **success, exit 0** (after the optional-native pruning below)
+  → `dist/AiDM-Setup-5.5.0.exe` **150,331,744 B** + blockmap 158,019 B.
+  Bigger than 5.4.0's 104.9 MB: Electron 45's runtime is larger than 28's.
+- `node tools/refresh-latest-yml.js` → sha512 independently recomputed and
+  **matches** electron-builder's value; `latest.yml` describes 5.5.0,
+  `releaseDate` 2026-10-25T15:05:15.943Z.
+- Packaged content verified: 7 touched sources (`probe`, `archive-extract`,
+  `download-manager`, `main`, `ui/app`, `cli`, `site-grabber`) **byte-identical
+  (sha256)** inside `app.asar`; packaged `package.json` reports 5.5.0; runtime
+  deps inside the asar are the same 4 (uuid now 11.1.1).
+- Packaged runtime proof: `AiDM.exe --version` → **5.5.0**, exit 0.
+- No signing certificate configured this build (cycle 1 signed via signtool;
+  the cert was not available in this session) — installer is unsigned,
+  recorded honestly.
+
+### Toolchain changes this cycle
+
+- `.npmrc` with `omit=optional`: prunes `bufferutil`, `utf-8-validate`,
+  `utp-native` (optional native accelerators whose Electron-45 rebuild broke
+  the packaging). The app's zero-native-builds design already runs without
+  them (pure-JS fallbacks; torrent suite 31/31).
+
+### Not done (recorded, not hidden)
+
+- Wave-2 features (auto-purge, portable mode, winget/scoop manifests, transcode
+  presets, queue-scoped scheduling, app-aware throttling): **not attempted this
+  cycle** — the Electron 17-major jump + verification consumed the cycle budget;
+  they remain the top of the roadmap for cycle 3. A verified platform/security
+  jump beat an unverified feature batch (skill scale rule).
+
 ## Cycle 1 — v5.3.3 → v5.4.0 (2026-10-25)
 
 Baseline before work: `npm test` → **67/67 suites, 84.1s**, clean tree at v5.3.3.

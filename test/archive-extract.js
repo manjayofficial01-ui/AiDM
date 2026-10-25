@@ -54,6 +54,9 @@ function writeZip(name, entries) {
   check('drive letter refused', ae.resolveEntryPath(root, 'C:\\Windows\\x.dll').reason === 'drive-letter');
   check('UNC path refused', ae.resolveEntryPath(root, '\\\\server\\share\\x').reason === 'unc-path');
   check('NUL byte refused', ae.resolveEntryPath(root, 'a\u0000b').reason === 'control-char');
+  check('NTFS alternate data stream refused', ae.resolveEntryPath(root, 'readme.txt:zone.identifier').reason === 'ntfs-ads');
+  check('reserved device name refused', ae.resolveEntryPath(root, 'CON').reason === 'reserved-name');
+  check('reserved device name with extension refused', ae.resolveEntryPath(root, 'logs/NUL.txt').reason === 'reserved-name');
   check('empty name refused', ae.resolveEntryPath(root, '').reason === 'empty-name');
   check('root itself refused', ae.resolveEntryPath(root, '.').ok === false);
 

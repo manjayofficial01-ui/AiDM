@@ -1,5 +1,14 @@
 # Modernization Roadmap — Cycle 1
 
+> **Cycle 2 status (2026-10-25, later):** executed as a security/platform cycle —
+> Electron 28.3.3→45.0.0, exact-filename fix (user-reported), dependency
+> hardening, archive ADS/reserved-name guards. 74/74 suites, installer rebuilt,
+> v5.5.0. See `CHANGELOG.md` / `VALIDATION_REPORT.md` cycle-2 sections.
+> **The Wave-2 backlog below is untouched and remains the active plan for cycle 3,
+> joined by two new items:** webtorrent 2.8.5→3.x migration (clears the 4
+> bittorrent-tracker advisories; loader already ESM-ready) and a streaming cap
+> in site-grabber `readLimited`.
+
 **Target:** `aidm/` (Electron desktop app) · **Baseline:** v5.3.3, 67/67 suites green (84.1s)
 **Constraint:** additive, low-risk changes. No engine rewrite, no framework swap, no
 dependency added for anything the standard library can do.

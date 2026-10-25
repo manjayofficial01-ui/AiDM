@@ -1001,6 +1001,12 @@ class DownloadManager extends EventEmitter {
     // "1080.mp4", a CDN hash). Generic names identify no video, so fall back
     // to the URL basename or the real page/video title instead.
     let parsedName = this._deriveFilename(url, filename, meta, quality);
+    // Was the name an explicit, meaningful choice by the caller (Add-URL
+    // dialog, extension takeover, resolver)? The server's own
+    // Content-Disposition name may later replace a URL-derived guess —
+    // browsers work the same way — but never an explicit choice.
+    const providedClean = filename ? this._cleanFilename(filename) : null;
+    const userNamed = !!(providedClean && parsedName === providedClean && !isGenericFilename(providedClean, url));
     if (torrent) {
       // A magnet's `dn` param gives a real name before swarm metadata lands.
       // No forced extension — the deliverable is the torrent's own file(s),
@@ -1028,6 +1034,7 @@ class DownloadManager extends EventEmitter {
       id,
       url,
       _normUrl: normalizeMediaUrl(url),
+      _userNamed: userNamed,
       filename: parsedName,
       category: finalCategory,
       savePath: finalSavePath,
@@ -2648,7 +2655,11 @@ class DownloadManager extends EventEmitter {
     let next = cur;
     const cd = meta.suggestedFilename ? this._cleanFilename(meta.suggestedFilename) : null;
     const cdUsable = cd && /\.[A-Za-z0-9]{1,8}$/.test(cd) && !isGenericFilename(cd, dl.url);
-    if (curGeneric && cdUsable) {
+    // The server's Content-Disposition name is the EXACT name. It replaces a
+    // URL-derived guess (browsers do the same) and any generic name — but
+    // never a name the caller chose explicitly, which `_userNamed` records
+    // at add time.
+    if (cdUsable && (curGeneric || !dl._userNamed)) {
       next = cd;
     } else if (!hasExt) {
       if (cdUsable) {

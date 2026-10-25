@@ -141,8 +141,11 @@ function startSite() {
   });
 }
 
+let siteServer = null;
+
 (async () => {
   const { server, port, seen } = await startSite();
+  siteServer = server;
   const base = `http://127.0.0.1:${port}`;
   const fetchImpl = (url, init) => fetch(url, init);
 
@@ -266,9 +269,13 @@ function startSite() {
   }
 
   server.close();
+  server.closeAllConnections?.();
+  await new Promise((r) => server.once('close', r));
   console.log(`\n${pass} passed, ${fail} failed`);
-  process.exit(fail ? 1 : 0);
+  process.exitCode = fail ? 1 : 0;
+  setTimeout(() => process.exit(process.exitCode), 2000).unref();
 })().catch((e) => {
   console.error('UNCAUGHT', e);
+  try { siteServer && siteServer.close(); siteServer && siteServer.closeAllConnections?.(); } catch (_) {}
   process.exit(1);
 });

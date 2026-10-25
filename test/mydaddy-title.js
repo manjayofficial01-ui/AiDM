@@ -106,8 +106,9 @@ check('probe-time 401/403 fails fast with guidance',
   /accessDeniedMessage\(meta\.status\)/.test(mgrSrc));
 check('page Referer is replayed when the caller gave none',
   /download\.meta && download\.meta\.pageUrl/.test(mgrSrc));
-check('generic names yield to Content-Disposition',
-  /curGeneric && cdUsable/.test(mgrSrc));
+check('generic and URL-derived names yield to Content-Disposition, explicit names do not',
+  /cdUsable && \(curGeneric \|\| !dl\._userNamed\)/.test(mgrSrc) &&
+  /_userNamed: userNamed/.test(mgrSrc));
 check('probe-issued cookies replayed for the real download',
   /meta\.responseCookies/.test(mgrSrc));
 

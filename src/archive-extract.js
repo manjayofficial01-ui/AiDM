@@ -266,6 +266,13 @@ function resolveEntryPath(root, name) {
 
   const segments = norm.split('/').filter((s) => s.length > 0 && s !== '.');
   if (segments.some((s) => s === '..')) return { ok: false, reason: 'parent-traversal' };
+  // `file.txt:stream` would write an NTFS alternate data stream on Windows —
+  // hidden content the user cannot see in the extracted folder.
+  if (segments.some((s) => s.includes(':'))) return { ok: false, reason: 'ntfs-ads' };
+  // DOS device names resolve to devices, not files (CON, NUL, COM1, …).
+  if (segments.some((s) => /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i.test(s))) {
+    return { ok: false, reason: 'reserved-name' };
+  }
   if (segments.length === 0) return { ok: false, reason: 'empty-name' };
 
   const abs = path.resolve(root, ...segments);

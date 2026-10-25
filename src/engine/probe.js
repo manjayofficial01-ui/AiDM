@@ -204,12 +204,19 @@ function filenameFromContentDisposition(header) {
   }
   const plain = /filename\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^;]+))/i.exec(header);
   if (plain) {
-    const raw = (plain[1] !== undefined ? plain[1].replace(/\\(.)/g, '$1') : plain[2]).trim();
+    const quoted = plain[1] !== undefined;
+    const raw = (quoted ? plain[1].replace(/\\(.)/g, '$1') : plain[2].trim());
     let value = raw;
-    try {
-      value = decodeURIComponent(raw);
-    } catch {
-      /* keep raw */
+    // A quoted value is literal per RFC 6266 — percent-decoding it corrupts
+    // exact names like "Report%202026.pdf". Bare tokens are literal too, but
+    // plenty of servers percent-encode them anyway; one tolerant decode keeps
+    // those (a literal '%' that isn't a valid escape throws → raw kept).
+    if (!quoted) {
+      try {
+        value = decodeURIComponent(raw);
+      } catch {
+        /* keep raw */
+      }
     }
     const clean = sanitizeFilename(value);
     if (clean) return clean;
