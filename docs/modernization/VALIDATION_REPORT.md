@@ -20,7 +20,7 @@ Everything in this report was executed. Nothing is projected, estimated, or infe
 | 7 | No new runtime dependency | **PASS** | `package.json` dependencies unchanged (4) |
 | 8 | Extension manifest matches app version | **PASS** | `test/extension-dimensions.js` → "extension version matches the app" |
 | 9 | Backward compatibility | **PASS** | all new settings are additive with safe defaults (`autoExtract`/`autoExtractDelete` **false**, `preventSleep` **true**); no IPC channel or HTTP route removed or renamed |
-| 10 | Installer build | **UNVERIFIED** | not built this cycle — see §5 |
+| 10 | Installer build | **PASS** (built 2026-10-25 18:05) | `dist/AiDM-Setup-5.4.0.exe` 104,995,225 B + blockmap; `latest.yml` recomputed and matches the file's sha512; see §5 |
 
 ## 2. New suite detail
 
@@ -64,25 +64,58 @@ Found by writing the tests, not by inspection:
 5. **Two stacked docblocks in `src/server.js`** — the new `addUrl` doc was inserted
    between `_routeDownload`'s comment and its body, misattributing it. Reordered.
 
-## 5. Limitations and unverified items
+## 5. Installer build (executed after the test cycle)
 
-- **Installer not built.** No `dist/AiDM-Setup-5.4.0.exe` was produced, so the packaged
-  artifact, the NSIS shortcut path and `latest.yml` are **UNVERIFIED** for this version.
-  (`description` length is unchanged, so the 260-char shortcut-name trap is not re-armed.)
-- **`--version` / `--help` output on a packaged GUI build** is written with
-  `fs.writeSync(1, …)`. That works from a terminal that shares a console; a double-clicked
-  GUI launch has no console, so the text is discarded and the process exits 0. Not
-  testable here without building the installer.
-- **Live-site behaviour** of the grabber and of the engine was exercised only against
-  local HTTP servers. No real-world site was crawled (deliberate: no scraping third
-  parties during verification).
-- **Sleep inhibition** was validated as policy + blocker lifecycle with a fake blocker.
-  That Windows actually honours `prevent-app-suspension` was not observed end-to-end
-  (would require an unattended sleep cycle).
+`npm run dist` → **success** in 2m12s, exit 0 (no safe-delete interference this time;
+no stale `dist/win-unpacked` existed to move aside).
+
+| Artifact | Size | Notes |
+|---|---|---|
+| `dist/AiDM-Setup-5.4.0.exe` | 104,995,225 B | NSIS, signed with signtool |
+| `dist/AiDM-Setup-5.4.0.exe.blockmap` | 109,643 B | |
+| `dist/latest.yml` | — | `node tools/refresh-latest-yml.js` recomputed sha512 independently and it **matches** what electron-builder wrote |
+
+**Packaged-content proof** (asar parsed by hand; data offset `16 + align4(headerSize)`):
+
+- 1,629 entries, 28.4 MB asar, `package.json` inside reports **5.4.0**.
+- `src/{site-grabber,cli,keep-awake,archive-extract}.js` all present.
+- `src/cli.js`, `src/archive-extract.js`, `src/keep-awake.js`, `src/site-grabber.js`,
+  `src/engine/checksum.js`, `main.js`, `ui/app.js` are **byte-identical (sha256)** to the
+  working tree — the build is not stale.
+- `resources/chrome-extension/` shipped (background.js, content.js, icons).
+- `description` is still 150 chars, so the 260-char NSIS shortcut-NAME trap is not re-armed.
+
+**Runtime proof on the packaged build** (installed v5.3.2 was running throughout and was
+never touched — an isolated `--user-data-dir` was used):
+
+1. `AiDM.exe --version` → prints `5.4.0`, exit 0.
+2. Cold start with a URL → the app boots, its local API reports `"version":"5.4.0"`, and
+   the URL is parsed and routed: `[AiDM] CLI URL refused: …` from the YouTube-CDN guard.
+3. **Second-instance forwarding** → with instance A already serving on 18766, launching B
+   with a URL produced no second app; A's log recorded the forwarded URL being refused by
+   the same guard. This is the `idm /d` pattern working end-to-end.
+
+Note: this sandboxed shell cannot initialise Chromium's GPU process
+(`exit_code=-1073741819` → `GPU process isn't usable`), so the packaged boot test used
+`--disable-gpu --no-sandbox`. That is an artifact of the non-interactive session, not of
+the build — the user's installed copy runs normally on the real desktop.
+
+## 6. Limitations and unverified items
+
+- **Sleep inhibition** was validated as policy + blocker lifecycle with a fake blocker, and
+  the packaged app wires it. That Windows actually *honours* `prevent-app-suspension` was
+  not observed across a real unattended sleep cycle.
+- **`--version` / `--help` on a double-clicked GUI launch** have no console to write to, so
+  the text is discarded (exit 0). Works from a terminal, as verified.
+- **Live-site behaviour** of the grabber was exercised only against local HTTP servers. No
+  third-party site was crawled during verification, by choice.
+- **Installer installation itself** (elevation, Start Menu / desktop shortcut, uninstall
+  entry) was not performed — that would replace the user's installed v5.3.2. The `.exe` is
+  built and self-verified but has not been installed over an existing copy.
 - **Not attempted** (see `MODERNIZATION_ROADMAP.md`): queue-scoped scheduling, app-aware
   throttling, portable mode, winget/scoop manifests, auto-purge, transcode presets.
 
-## 6. Rollback
+## 7. Rollback
 
 Every change is additive and isolated:
 

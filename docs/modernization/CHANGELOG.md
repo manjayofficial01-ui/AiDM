@@ -44,8 +44,20 @@ After: **73/73 suites, 103.1s** (6 new suites, no regressions).
 | `test/site-grabber.js` | 96 | Link extraction, robots rules, live crawl, caps, wiring guards |
 | `test/_zip-fixture.js` | — | Shared real-ZIP writer (underscore = not a suite) |
 
+### Built
+
+- `npm run dist` → `dist/AiDM-Setup-5.4.0.exe` (104,995,225 B) + blockmap, 2m12s, exit 0.
+- `node tools/refresh-latest-yml.js` → recomputed sha512 matches the installer;
+  `latest.yml` describes 5.4.0 with a fresh `releaseDate`.
+- Packaged content verified by parsing `app.asar`: all four new modules present and
+  byte-identical to the working tree; packed `package.json` reports 5.4.0.
+- Packaged runtime verified: `--version` → 5.4.0; cold-start URL intake; second-instance
+  argv forwarding into a running instance.
+
 ### Not done (recorded, not hidden)
 
-- Installer not built this cycle — no `dist/` artifact was produced or verified.
+- **Not installed** over the existing copy (an installed v5.3.2 was running during the
+  build and was left untouched), so elevation/shortcut/uninstall behaviour is untested
+  for 5.4.0.
 - Queue-scoped scheduling, app-aware throttling, portable mode, winget/scoop manifests,
   auto-purge of completed rows: deferred to cycle 2 (see `MODERNIZATION_ROADMAP.md`).
