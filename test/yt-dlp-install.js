@@ -68,5 +68,33 @@ check('returns a non-empty per-user dir', typeof dir === 'string' && dir.length 
 check('win32 dir is under LOCALAPPDATA\\AiDM\\bin',
   process.platform === 'win32' ? /AiDM[\\/]+bin$/.test(dir) : dir.length > 3);
 
+// ── quarantine detection (IObit renamed yt-dlp.exe → yt-dlp_IObitDel.exe) ──
+console.log('\u2500\u2500 quarantine hint \u2500\u2500');
+{
+  const fs = require('fs');
+  const path = require('path');
+  const os = require('os');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'aidm-iobit-test-'));
+  const ytdlp = require('../src/yt-dlp.js');
+  // The detector is unit-tested with injected dirs: this machine's REAL bin
+  // dir still holds the remnant that inspired the feature, so scanning the
+  // default dirs here would (correctly) find it.
+  check('clean dir → no remnant detected',
+    ytdlp.quarantinedRemnantName([tmp]) === null);
+  fs.writeFileSync(path.join(tmp, 'yt-dlp_IObitDel.exe'), 'x');
+  check('IObit-renamed remnant detected by name',
+    ytdlp.quarantinedRemnantName([tmp]) === 'yt-dlp_IObitDel.exe');
+  check('guidance names the quarantine when a remnant is on the search path',
+    /QUARANTINED/.test(ytdlp.ytdlpMissingMessage()) &&
+    /yt-dlp_IObitDel\.exe/.test(ytdlp.ytdlpMissingMessage()),
+    '(the real %LOCALAPPDATA%\\AiDM\\bin remnant counts too)');
+  check('unrelated renamed files are ignored',
+    (() => { fs.rmSync(path.join(tmp, 'yt-dlp_IObitDel.exe'));
+      fs.writeFileSync(path.join(tmp, 'yt-dlp_backup.exe'), 'x');
+      const r = ytdlp.quarantinedRemnantName([tmp]);
+      fs.rmSync(tmp, { recursive: true, force: true });
+      return r === null; })());
+}
+
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

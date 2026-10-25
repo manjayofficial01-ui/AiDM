@@ -146,16 +146,42 @@ function isAvailable() {
   return !!runnerCache;
 }
 
+/**
+ * Security software sometimes QUARANTINES yt-dlp by renaming it in place
+ * (IObit's pattern: `yt-dlp_IObitDel.exe`) instead of deleting it — so the
+ * user "had it installed" and it silently vanished. Detect such a renamed
+ * remnant in the bin dirs and name the real cause in the guidance.
+ */
+function quarantinedRemnantName(dirs) {
+  for (const dir of (dirs || binDirs())) {
+    if (!dir) continue;
+    try {
+      const names = fs.readdirSync(dir);
+      const hit = names.find((n) => /yt-dlp.*(?:IObitDel|quarantin|deleted)/i.test(n));
+      if (hit) return hit;
+    } catch (e) { /* dir missing — nothing to report */ }
+  }
+  return null;
+}
+
 /** Actionable, non-fatal guidance shown when the engine is not installed. */
 function ytdlpMissingMessage() {
   const dir = IS_WIN
     ? (process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'AiDM', 'bin') : '%LOCALAPPDATA%\\AiDM\\bin')
     : '~/.local/share/aidm/bin';
+  const remnant = quarantinedRemnantName();
+  const quarantineHint = remnant
+    ? ' NOTE: a renamed copy (' + remnant + ') was found next to the expected ' +
+      'location — your antivirus/security suite (e.g. IObit) has QUARANTINED ' +
+      'yt-dlp. Restore it or whitelist the ' + dir + ' folder in that suite, ' +
+      'then use the button below to re-install, or this will happen again.'
+    : '';
   return 'yt-dlp was not found, so this YouTube link cannot be extracted. ' +
     'Install it from Settings › YouTube › "Update yt-dlp" (it downloads the ' +
     'official build into ' + dir + '), or grab yt-dlp from ' +
     'github.com/yt-dlp/yt-dlp/releases/latest and drop the binary there ' +
-    'yourself, or set AIDM_YTDLP to its full path — then restart AiDM.';
+    'yourself, or set AIDM_YTDLP to its full path — then restart AiDM.' +
+    quarantineHint;
 }
 
 // ── Merge safety ─────────────────────────────────────────────────────────────
@@ -1116,6 +1142,7 @@ module.exports = {
   detectRunner,
   isAvailable,
   ytdlpMissingMessage,
+  quarantinedRemnantName,
   redact,
   classifyError,
   parseProgressLine,
