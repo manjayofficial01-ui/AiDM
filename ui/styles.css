@@ -962,3 +962,49 @@ input[type="checkbox"] { accent-color: var(--accent); width: 14px; height: 14px;
     scroll-behavior: auto !important;
   }
 }
+
+/* ── Site grabber results (v5.4.0) ────────────────────────────────────────────
+   A capped, scrollable list of discovered files. Each row is a checkbox plus
+   the URL and its depth/off-site marker, so the user can see WHY a link is
+   there before queueing it. */
+.grab-list {
+  max-height: 260px;
+  overflow-y: auto;
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.grab-list:empty { display: none; }
+.grab-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.grab-row:hover { background: var(--row-hover); }
+.grab-row input[type="checkbox"] { flex: 0 0 auto; margin: 0; }
+.grab-row .grab-url {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+}
+.grab-row .grab-tag {
+  flex: 0 0 auto;
+  font-size: 10px;
+  letter-spacing: .02em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-light);
+  color: var(--text-muted);
+}
+.grab-row .grab-tag.offsite { color: var(--warning); border-color: var(--warning); }

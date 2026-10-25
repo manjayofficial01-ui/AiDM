@@ -13,6 +13,10 @@ const { looksLikeAuthWall, looksLikeHtmlHead, sessionExpiredMessage, extensionOf
 const googleDrive = require('./google-drive-resolver');
 const { TorrentEngine, isTorrentUrl, magnetDisplayName } = require('./torrent-engine');
 const { listActiveInterfaces, eligibleForCombine } = require('./network-interfaces');
+// Archive auto-extract. Required defensively for the same reason as media-probe:
+// a broken extractor must degrade to "no extraction", never break completion.
+let archiveExtract = null;
+try { archiveExtract = require('./archive-extract'); } catch (e) { archiveExtract = null; }
 
 // Team A's real geometry reader (width/height/duration/audio-track presence
 // proven from the container bytes). Required defensively: a missing or broken
@@ -44,6 +48,39 @@ function isMediaFile(filePath, category) {
   if (category === 'video' || category === 'audio') return true;
   const ext = String(filePath || '').split('.').pop().toLowerCase();
   return MEDIA_EXTENSIONS.has(ext);
+}
+
+// Archive types the extractor is even asked about. The real format decision is
+// made by magic bytes inside src/archive-extract.js — this set only avoids
+// touching the disk for rows that could never be archives.
+//
+// The non-ZIP entries are here on purpose: if the user turned auto-extract on
+// and downloads a .7z, silence would read as a bug. The extractor refuses it
+// and the row explains why ("7Z extraction is not supported (ZIP only)").
+const ARCHIVE_EXTENSIONS = new Set(['zip', '7z', 'rar', 'tar', 'gz', 'bz2', 'xz']);
+
+/**
+ * Turn an extractor refusal into one short, honest sentence for the row.
+ * Deliberately says what happened rather than "extraction failed" — the user
+ * needs to know whether to install 7-Zip, type a password, or re-download.
+ * @param {{ reason?: string, format?: string|null, skipped?: { reason: string }[] }} res
+ */
+function archiveExtractReason(res) {
+  const reason = String((res && res.reason) || '');
+  if (reason.startsWith('unsupported-format:')) {
+    const fmt = (reason.split(':')[1] || '').trim().toUpperCase();
+    return `${fmt || 'This format'} extraction is not supported (ZIP only)`;
+  }
+  if (reason === 'not-an-archive') return 'not a ZIP archive — left as downloaded';
+  if (reason === 'empty-archive') return 'archive is empty';
+  if (reason === 'no-central-directory' || reason === 'corrupt-central-directory') return 'archive is corrupt';
+  if (reason === 'too-many-entries') return 'archive has too many entries';
+  if (reason === 'nothing-extracted') {
+    const encrypted = (res.skipped || []).some((s) => s.reason === 'encrypted');
+    return encrypted ? 'archive is password-protected' : 'nothing could be extracted';
+  }
+  if (reason.startsWith('io-error')) return 'extraction failed: ' + reason.replace('io-error: ', '');
+  return reason ? 'extraction skipped: ' + reason : 'extraction skipped';
 }
 
 function detectCategory(filename) {
@@ -504,6 +541,10 @@ const DEFAULT_SETTINGS = {
   hlsConcurrency: 6,    // parallel segment fetches for HLS streams
   maxLiveMinutes: 180,   // hard cap when recording a live stream (Xtream/IPTV)
   autoResume: true,
+  // Hold a Windows/macOS suspension blocker while a transfer is actually
+  // running, so an idle-sleep timer cannot kill a long overnight download.
+  // Does NOT keep the display on, and does not wake an already-sleeping PC.
+  preventSleep: true,
   speedLimit: 0,
   queueMaxActive: 3, // historical default kept for settings-file compatibility (unused; concurrency uses maxConcurrentDownloads)
   // yt-dlp media pipeline (used by YouTube and DASH .mpd routing)
@@ -599,6 +640,13 @@ const DEFAULT_SETTINGS = {
   // list entry requirements — kept minimal on purpose.
   postDownloadCmd: '',
   postDownloadCmdTimeoutSec: 120,
+  // Archive auto-extract (v5.4.0): when a finished download is a ZIP, unpack it
+  // into a sibling folder. OFF by default — writing extra files to disk is a
+  // side effect the user must opt into. `autoExtractDelete` removes the source
+  // archive afterwards, and only when every entry extracted cleanly (a partial
+  // extraction keeps the archive so nothing is lost). See src/archive-extract.js.
+  autoExtract: false,
+  autoExtractDelete: false,
   // Network tab (v5.0.0): proxy for all engine traffic — http(s) CONNECT or
   // socks5(h), credentials embedded in the URL are used as-is. Empty = direct.
   proxyUrl: '',
@@ -1472,8 +1520,58 @@ class DownloadManager extends EventEmitter {
         .then(() => this._ensureAudio(dl))
         .then(() => this._maybeAiSummarize(dl))
         .catch(() => {})
+        // Archive extraction runs BEFORE the user's post-download command: an
+        // antivirus hook should see the unpacked payload, not just the wrapper.
+        .then(() => this._maybeAutoExtract(dl))
+        .catch(() => {})
         .finally(() => this._runPostDownloadAction(dl));
     } catch (e) { /* never throw into the Electron main process */ }
+  }
+
+  /**
+   * Archive auto-extract (v5.4.0). Unpacks a finished ZIP next to itself.
+   *
+   * Deliberate design choices:
+   *  - OFF by default (`settings.autoExtract`) — silently writing many files is
+   *    a side effect the user opts into.
+   *  - The archive is only deleted when EVERY entry extracted and the user
+   *    asked for deletion; a partial extraction keeps the source so nothing is
+   *    lost to a single bad entry.
+   *  - Any refusal (7z/rar/encrypted/zip-slip) becomes a short note on the row,
+   *    never an error state: the download itself succeeded.
+   *  - Fail-open, like every other post-completion step.
+   */
+  async _maybeAutoExtract(dl) {
+    try {
+      if (!dl || dl._extractDone) return;
+      if (dl.status !== 'completed') return;
+      if (!this.settings || !this.settings.autoExtract) return;
+      if (!archiveExtract || !dl.filepath || !fs.existsSync(dl.filepath)) return;
+      const ext = path.extname(dl.filepath).toLowerCase().replace('.', '');
+      if (!ARCHIVE_EXTENSIONS.has(ext)) return;
+
+      dl._extractDone = true;
+      const res = await archiveExtract.extractArchive(dl.filepath);
+      const live = this.downloads.get(dl.id) || dl;
+
+      if (res.ok) {
+        live.extractDir = res.destDir;
+        live.extractCount = res.extracted.length;
+        live.extractSkipped = res.skipped.length;
+        live.extractNote = `${res.extracted.length} file${res.extracted.length === 1 ? '' : 's'} extracted` +
+          (res.skipped.length ? `, ${res.skipped.length} skipped` : '');
+        if (this.settings.autoExtractDelete && res.skipped.length === 0) {
+          try {
+            fs.unlinkSync(live.filepath);
+            live.extractSourceRemoved = true;
+          } catch (e) { /* the folder is the deliverable; keep the archive */ }
+        }
+      } else {
+        live.extractNote = archiveExtractReason(res);
+      }
+      this._persistDownloads(true);
+      this.emit('download-updated', { ...live });
+    } catch (e) { /* never throw into the completion path */ }
   }
 
   /**

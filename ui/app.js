@@ -565,6 +565,7 @@ function renderDownloadRow(dl) {
           ${dl.status === 'pending-approval' ? `<button class="action-btn" data-action="approve" title="Choose folder"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-folder"></use></svg></button>` : ''}
           ${dl.status === 'completed' ? `<button class="action-btn" data-action="open-file" title="Open"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-external"></use></svg></button>` : ''}
           ${dl.status === 'completed' ? `<button class="action-btn" data-action="open-folder" title="Open Folder"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-folder"></use></svg></button>` : ''}
+          ${dl.status === 'completed' && dl.extractDir ? `<button class="action-btn" data-action="open-extract" title="${escapeAttr(dl.extractNote || 'Open extracted folder')}"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-archive"></use></svg></button>` : ''}
           ${dl.status === 'error' && dl.aiHint ? `<button class="action-btn" data-action="ai-hint" title="${escapeAttr(dl.aiHint)}"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><use href="#i-sparkles"></use></svg></button>` : ''}
           ${dl.status === 'error' && dl.ytLogPath ? `<button class="action-btn" data-action="open-log" title="Open error log"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-clipboard"></use></svg></button>` : ''}
           <button class="action-btn danger" data-action="remove" title="Remove from list (file stays on disk)"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-list-x"></use></svg></button>
@@ -767,6 +768,13 @@ async function handleAction(action, id) {
       if (dl) window.aidm.openFolder(dl.savePath);
       break;
     }
+    case 'open-extract': {
+      // Archive auto-extract landed this row a folder next to the file; open
+      // the folder itself, not its parent, so the result is one click away.
+      const dl = downloads.find(d => d.id === id);
+      if (dl && dl.extractDir) window.aidm.openFolder(dl.extractDir);
+      break;
+    }
     case 'ai-hint': {
       const dl = downloads.find(d => d.id === id);
       if (!dl) break;
@@ -840,7 +848,7 @@ function hideDeleteModal() {
 
 /** True when any modal overlay is visible (so Delete key doesn't fight with inputs). */
 function isAnyModalOpen() {
-  return ['modal-overlay', 'quality-overlay', 'settings-overlay', 'scheduler-overlay', 'ai-overlay', 'delete-overlay']
+  return ['modal-overlay', 'quality-overlay', 'settings-overlay', 'scheduler-overlay', 'ai-overlay', 'delete-overlay', 'grab-overlay']
     .some(id => {
       const el = document.getElementById(id);
       return el && el.style.display !== 'none' && el.style.display !== '';
@@ -849,7 +857,7 @@ function isAnyModalOpen() {
 
 // ── Shared overlay plumbing (backdrop close, focus trap, focus restore) ──────
 
-const OVERLAY_IDS = ['modal-overlay', 'quality-overlay', 'settings-overlay', 'scheduler-overlay', 'ai-overlay', 'delete-overlay'];
+const OVERLAY_IDS = ['modal-overlay', 'quality-overlay', 'settings-overlay', 'scheduler-overlay', 'ai-overlay', 'delete-overlay', 'grab-overlay'];
 const OVERLAY_HIDE = {
   'modal-overlay': hideAddModal,
   'quality-overlay': hideQualityPicker,
@@ -857,6 +865,7 @@ const OVERLAY_HIDE = {
   'scheduler-overlay': hideSchedulerModal,
   'ai-overlay': hideAiModal,
   'delete-overlay': hideDeleteModal,
+  'grab-overlay': hideGrabModal,
 };
 const overlayReturnFocus = new Map();
 
@@ -1289,6 +1298,19 @@ function setupEventListeners() {
   if (clearCompletedBtn) clearCompletedBtn.addEventListener('click', clearCompleted);
   document.getElementById('btn-settings').addEventListener('click', showSettingsModal);
   document.getElementById('btn-scheduler').addEventListener('click', showSchedulerModal);
+  const grabBtn = document.getElementById('btn-grab-site');
+  if (grabBtn) grabBtn.addEventListener('click', showGrabModal);
+  // Site-grabber overlay controls.
+  const grabScan = document.getElementById('btn-grab-scan');
+  const grabAdd = document.getElementById('btn-grab-add');
+  if (grabScan) grabScan.addEventListener('click', runGrabScan);
+  if (grabAdd) grabAdd.addEventListener('click', addGrabbedFiles);
+  const grabClose = document.getElementById('grab-close');
+  const grabClose2 = document.getElementById('btn-grab-close2');
+  if (grabClose) grabClose.addEventListener('click', hideGrabModal);
+  if (grabClose2) grabClose2.addEventListener('click', hideGrabModal);
+  const grabResults = document.getElementById('grab-results');
+  if (grabResults) grabResults.addEventListener('change', renderGrabResults);
   document.getElementById('btn-sidebar-collapse').addEventListener('click', toggleSidebar);
   document.getElementById('btn-ai-assistant').addEventListener('click', showAiModal);
 
@@ -1469,7 +1491,7 @@ function setupEventListeners() {
     if (e.ctrlKey && e.key === 'n') { e.preventDefault(); showAddModal(); }
     if (e.ctrlKey && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); searchInput.focus(); }
     if (e.key === 'F5') { e.preventDefault(); refreshList(); }
-    if (e.key === 'Escape') { hideAddModal(); hideSettingsModal(); hideQualityPicker(); hideContextMenu(); hideAiModal(); hideDeleteModal(); hideSchedulerModal(); }
+    if (e.key === 'Escape') { hideAddModal(); hideSettingsModal(); hideQualityPicker(); hideContextMenu(); hideAiModal(); hideDeleteModal(); hideSchedulerModal(); hideGrabModal(); }
     const typing = !!(e.target.matches && e.target.matches('input, textarea, select'));
     if (!typing && !isAnyModalOpen()) {
       // Delete key opens the delete dialog (with disk checkbox) for the selection
@@ -2006,11 +2028,14 @@ async function showSettingsModal() {
   document.getElementById('setting-launch-startup').checked = settings.launchAtStartup !== false;
   document.getElementById('setting-minimize-tray').checked = settings.minimizeToTray !== false;
   document.getElementById('setting-autoresume').checked = settings.autoResume !== false;
+  document.getElementById('setting-prevent-sleep').checked = settings.preventSleep !== false;
   // The status-bar clipboard dot must reflect the real toggle, not stay
   // statically "active" forever.
   const clipDot = document.getElementById('clipboard-dot');
   if (clipDot) clipDot.classList.toggle('active', !!settings.clipboardMonitor);
   document.getElementById('setting-post-download-cmd').value = settings.postDownloadCmd || '';
+  document.getElementById('setting-auto-extract').checked = settings.autoExtract === true;
+  document.getElementById('setting-auto-extract-delete').checked = settings.autoExtractDelete === true;
   // AI (TokenHarbor) — never display existing key back in full; show placeholder only
   document.getElementById('setting-ai-enabled').checked = settings.aiEnabled !== false;
   document.getElementById('setting-ai-baseurl').value = settings.aiBaseURL || 'https://tokenharbor.ai/v1';
@@ -2199,6 +2224,7 @@ async function saveSettings() {
     launchAtStartup: document.getElementById('setting-launch-startup').checked,
     minimizeToTray: document.getElementById('setting-minimize-tray').checked,
     autoResume: document.getElementById('setting-autoresume').checked,
+    preventSleep: document.getElementById('setting-prevent-sleep').checked,
     categoryPaths,
     jevAssist: document.getElementById('setting-jev-assist').checked,
     // File hosts (v4.5.0): only overwrite a stored secret when the user typed
@@ -2214,6 +2240,11 @@ async function saveSettings() {
     youtubeCookiesFile: (document.getElementById('setting-yt-cookies-file')?.value || '').trim(),
     youtubeExtractorArgs: (document.getElementById('setting-yt-extractor-args')?.value || '').trim(),
     postDownloadCmd: document.getElementById('setting-post-download-cmd').value.trim(),
+    autoExtract: document.getElementById('setting-auto-extract').checked,
+    // Deleting the archive only makes sense if extraction is on; persisting a
+    // dangling "delete" flag would surprise the user later.
+    autoExtractDelete: document.getElementById('setting-auto-extract').checked &&
+      document.getElementById('setting-auto-extract-delete').checked,
     aiEnabled: document.getElementById('setting-ai-enabled').checked,
     aiBaseURL: document.getElementById('setting-ai-baseurl').value.trim() || 'https://tokenharbor.ai/v1',
     aiPrimaryModel: document.getElementById('setting-ai-primary').value,
@@ -2239,6 +2270,141 @@ async function showSchedulerModal() {
 }
 
 function hideSchedulerModal() { closeOverlay('scheduler-overlay'); }
+
+// ── Site Grabber (v5.4.0) ───────────────────────────────────────────────────
+// Discovers every downloadable file on a site, then queues the selected ones
+// through batchUrls — i.e. the same addDownload door as every other entry.
+// The crawler itself (caps, robots.txt, same-origin rules) lives in
+// src/site-grabber.js; this file only renders and dispatches.
+let grabFiles = [];
+
+function showGrabModal() {
+  const urlInput = document.getElementById('grab-url');
+  // Seed from whatever the user was about to add — the common flow is
+  // "I have this page open, grab everything on it".
+  if (!urlInput.value) {
+    const pending = document.getElementById('input-url');
+    if (pending && /^https?:\/\//i.test(pending.value.trim())) urlInput.value = pending.value.trim();
+  }
+  document.getElementById('grab-status').textContent = 'Idle.';
+  renderGrabResults();
+  openOverlay('grab-overlay');
+  urlInput.focus();
+}
+
+function hideGrabModal() { closeOverlay('grab-overlay'); }
+
+function renderGrabResults() {
+  const list = document.getElementById('grab-results');
+  const addBtn = document.getElementById('btn-grab-add');
+  if (!list || !addBtn) return;
+  list.textContent = '';
+  if (!grabFiles.length) {
+    addBtn.disabled = true;
+    addBtn.textContent = 'Add selected';
+    return;
+  }
+  for (const [index, file] of grabFiles.entries()) {
+    const row = document.createElement('label');
+    row.className = 'grab-row';
+
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = true;
+    box.dataset.index = String(index);
+
+    const url = document.createElement('span');
+    url.className = 'grab-url';
+    url.textContent = file.url;
+    url.title = file.url;
+
+    row.appendChild(box);
+    row.appendChild(url);
+    if (file.crossOrigin) {
+      const tag = document.createElement('span');
+      tag.className = 'grab-tag offsite';
+      tag.textContent = 'off-site';
+      row.appendChild(tag);
+    }
+    list.appendChild(row);
+  }
+  const selected = list.querySelectorAll('input[type="checkbox"]:checked').length;
+  addBtn.disabled = selected === 0;
+  addBtn.textContent = `Add ${selected} file${selected === 1 ? '' : 's'}`;
+}
+
+async function runGrabScan() {
+  const url = document.getElementById('grab-url').value.trim();
+  const status = document.getElementById('grab-status');
+  const scanBtn = document.getElementById('btn-grab-scan');
+  if (!url) { showNotification('Enter a site URL first', 'error'); return; }
+
+  grabFiles = [];
+  renderGrabResults();
+  scanBtn.disabled = true;
+  status.textContent = 'Scanning…';
+
+  try {
+    const result = await window.aidm.grabSite({
+      url,
+      maxDepth: Number(document.getElementById('grab-depth').value) || 0,
+      maxPages: Number(document.getElementById('grab-pages').value) || 25,
+      extensions: document.getElementById('grab-exts').value.trim() || undefined,
+      respectRobots: document.getElementById('grab-robots').checked,
+    });
+
+    if (!result || !result.ok) {
+      const reasons = {
+        'invalid-url': 'That is not a valid http(s) URL.',
+        'unsupported-protocol': 'Only http and https pages can be scanned.',
+        'no-matching-files': 'No files matching those types were found.',
+        'no-pages-fetched': 'Could not load any page — check the URL or your connection.',
+      };
+      status.textContent = (result && (reasons[result.reason] || result.reason)) || 'Scan failed.';
+      return;
+    }
+
+    grabFiles = result.files;
+    renderGrabResults();
+    const skipped = result.skipped ? result.skipped.length : 0;
+    status.textContent =
+      `Found ${result.files.length} file${result.files.length === 1 ? '' : 's'} across ` +
+      `${result.pages.length} page${result.pages.length === 1 ? '' : 's'}` +
+      (skipped ? ` · ${skipped} link${skipped === 1 ? '' : 's'} skipped` : '') +
+      (result.truncated ? ' · stopped at a limit' : '') +
+      ` · ${(result.elapsedMs / 1000).toFixed(1)}s`;
+  } catch (e) {
+    status.textContent = 'Scan failed: ' + (e && e.message ? e.message : 'unknown error');
+  } finally {
+    scanBtn.disabled = false;
+  }
+}
+
+async function addGrabbedFiles() {
+  const list = document.getElementById('grab-results');
+  const boxes = [...list.querySelectorAll('input[type="checkbox"]:checked')];
+  const urls = boxes.map((b) => grabFiles[Number(b.dataset.index)]).filter(Boolean).map((f) => f.url);
+  if (!urls.length) return;
+  try {
+    await window.aidm.batchUrls(urls);
+    showNotification(`Queued ${urls.length} file${urls.length === 1 ? '' : 's'}`);
+    hideGrabModal();
+  } catch (e) {
+    showNotification('Could not queue the files: ' + (e && e.message ? e.message : 'unknown error'), 'error');
+  }
+}
+
+(function wireGrabberProgress() {
+  // Progress arrives while the scan runs; the buttons themselves are wired in
+  // setupEventListeners() alongside every other toolbar control.
+  if (window.aidm && window.aidm.onGrabProgress) {
+    window.aidm.onGrabProgress((p) => {
+      const status = document.getElementById('grab-status');
+      if (status && p) status.textContent = `Scanning… ${p.pages} page(s), ${p.files} file(s)`;
+    });
+  }
+})();
+
 
 async function loadSchedules() {
   try { schedules = await window.aidm.getSchedules() || []; }

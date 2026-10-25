@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, clipboard, shell, Tray, Menu, nativeImage, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, clipboard, shell, Tray, Menu, nativeImage, dialog, powerSaveBlocker } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { DownloadManager, youtubeLogDir } = require('./src/download-manager');
@@ -9,6 +9,8 @@ const { AiService } = require('./src/ai-service');
 const resolvers = require('./src/resolvers');
 const locationDialog = require('./src/location-dialog');
 const { Scheduler, parseSpeedRules, speedLimitAt, validateSchedule } = require('./src/scheduler');
+const cli = require('./src/cli');
+const { KeepAwake, countActiveTransfers } = require('./src/keep-awake');
 const { exec } = require('child_process');
 
 let mainWindow;
@@ -35,9 +37,34 @@ process.on('unhandledRejection', (reason) => {
   console.error('[AiDM] unhandledRejection:', reason && reason.stack || reason);
 });
 
+// Command-line intake (v5.4.0). AiDM used to read argv only for `--hidden`,
+// so `AiDM.exe <url>`, a batch file, or "Open with AiDM" all did nothing.
+// Parsing lives in src/cli.js (pure, tested); dispatch happens after the
+// manager + local server exist, because URLs must go through the SAME resolver
+// routing as the browser extension.
+function launchArgs(argv) {
+  // Packaged: [AiDM.exe, …args]   Dev: [electron, ., …args]
+  return (Array.isArray(argv) ? argv : []).slice(app.isPackaged ? 1 : 2);
+}
+
+const LAUNCH_INTAKE = cli.parseArgs(launchArgs(process.argv), {
+  existsSync: (p) => { try { return fs.existsSync(p); } catch (e) { return false; } },
+  readFileSync: (p, enc) => fs.readFileSync(p, enc),
+});
+
+// `--version` / `--help` answer without creating a window, and without taking
+// the single-instance lock (so they work while AiDM is already running).
+// Synchronous write: process.exit() can otherwise truncate a piped stdout.
+if ((LAUNCH_INTAKE.version || LAUNCH_INTAKE.help) && !LAUNCH_INTAKE.urls.length) {
+  const text = LAUNCH_INTAKE.version ? app.getVersion() : cli.USAGE;
+  try { fs.writeSync(1, text + '\n'); } catch (e) { /* no console attached */ }
+  process.exit(0);
+}
+
 // Launched by Windows at login (openAtLogin) or with an explicit flag:
 // start hidden in the tray so the app is "just always there".
-const START_HIDDEN = process.argv.some(a => /--hidden|--minimized/i.test(a));
+const START_HIDDEN = LAUNCH_INTAKE.hidden || LAUNCH_INTAKE.minimized ||
+  process.argv.some(a => /--hidden|--minimized/i.test(a));
 
 function getAppIcon() {
   const candidates = [
@@ -68,6 +95,38 @@ function showWindow() {
   if (!mainWindow.isVisible()) mainWindow.show();
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.focus();
+}
+
+/**
+ * Queue URLs that arrived on the command line (cold start, second launch, or
+ * a file association). Goes through `IPCServer.addUrl()` so the resolver layer,
+ * the YouTube-CDN guard and the single `addDownload()` door all apply exactly
+ * as they do for the browser extension.
+ *
+ * Never throws: a bad argument must not stop the app from starting.
+ * @param {string[]} urls
+ * @param {{ reveal?: boolean }} [opts]
+ * @returns {Promise<number>} how many URLs were accepted
+ */
+async function queueLaunchUrls(urls, opts = {}) {
+  const list = Array.isArray(urls) ? urls.filter(Boolean) : [];
+  if (!list.length) return 0;
+  if (opts.reveal !== false) showWindow();
+  if (!ipcServer) {
+    console.warn('[AiDM] CLI URL(s) dropped — local server not ready:', list.length);
+    return 0;
+  }
+  let queued = 0;
+  for (const url of list) {
+    try {
+      const result = await ipcServer.addUrl(url);
+      if (result && result.body && result.body.success !== false) queued++;
+      else console.warn('[AiDM] CLI URL refused:', url, (result && result.body && result.body.error) || '');
+    } catch (e) {
+      console.warn('[AiDM] CLI URL failed:', url, e && e.message ? e.message : e);
+    }
+  }
+  return queued;
 }
 
 function createTray() {
@@ -201,6 +260,8 @@ function createWindow() {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send(event, data);
       }
+      // Every lifecycle event is a chance for the active set to have changed.
+      refreshKeepAwake();
     });
   });
 
@@ -305,6 +366,7 @@ function onScheduleStart({ schedule }) {
     };
     downloadManager.startQueue();
     applyTimetableSpeed();
+    refreshKeepAwake();
     notifyScheduler(`Scheduler started: ${schedulerSession.name}`);
     // An empty queue drains instantly — settle the session on next tick.
     setTimeout(maybeSchedulerComplete, 10000);
@@ -322,6 +384,7 @@ function onScheduleStop({ schedule }) {
     }
     downloadManager.pauseQueue();
     applyTimetableSpeed();
+    refreshKeepAwake();
     notifyScheduler(`Scheduler stopped${schedule && schedule.name ? ': ' + schedule.name : ''}`);
   } catch (e) {
     console.warn('[AiDM] schedule stop failed:', e.message);
@@ -342,6 +405,7 @@ function maybeSchedulerComplete() {
   if (!schedulerSession || !managerIsIdle()) return;
   const sess = schedulerSession;
   schedulerSession = null;
+  refreshKeepAwake();
   try { downloadManager.engine.setSpeedLimit(sess.prevSpeed || 0); } catch (e) {}
   applyTimetableSpeed();
   runCompletionAction(sess.onComplete, sess.name);
@@ -1015,6 +1079,28 @@ ipcMain.handle('batch-urls', async (event, { urls }) => {
   return downloadManager.importDownloads(urls.filter((u) => typeof u === 'string'));
 });
 
+// ── Site grabber (v5.4.0) ────────────────────────────────────────────────────
+// Discovery only: crawls a site and returns the file URLs it found. Queueing
+// happens in the renderer through `batch-urls`, so every grabbed row still
+// passes through DownloadManager.addDownload() — one door, as always.
+// Caps live in src/site-grabber.js (pages / depth / files / time / robots).
+ipcMain.handle('grab-site', async (event, opts) => {
+  const { grabSite } = require('./src/site-grabber');
+  const url = opts && typeof opts.url === 'string' ? opts.url.trim() : '';
+  if (!url) throw new Error('A site URL is required');
+  return grabSite(url, {
+    maxDepth: opts && opts.maxDepth,
+    maxPages: opts && opts.maxPages,
+    extensions: opts && opts.extensions,
+    respectRobots: !opts || opts.respectRobots !== false,
+    onProgress: (p) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('grab-progress', p);
+      }
+    },
+  });
+});
+
 // ── Natural-language queue commands ──────────────────────────────────────────
 
 ipcMain.handle('nl-command', async (event, { text }) => {
@@ -1086,18 +1172,65 @@ ipcMain.handle('nl-command', async (event, { text }) => {
 
 // ── App Lifecycle ─────────────────────────────────────────────────────────────
 
+/**
+ * Sleep inhibition (v5.4.0). Windows suspends an idle machine on its own
+ * timer, which silently kills long overnight transfers. Hold a suspension
+ * blocker exactly while bytes are moving (or a scheduler session is running),
+ * and drop it the moment nothing is transferring — the app must not keep a
+ * laptop awake because a download is merely queued or paused.
+ *
+ * Idempotent, so it can be called from every download event without cost.
+ */
+const keepAwake = new KeepAwake(powerSaveBlocker);
+function refreshKeepAwake() {
+  try {
+    if (!downloadManager) return;
+    const enabled = downloadManager.getSettings().preventSleep !== false;
+    keepAwake.update({
+      enabled,
+      activeTransfers: countActiveTransfers(downloadManager.downloads.values()),
+      scheduleRunning: !!schedulerSession,
+    });
+  } catch (e) { /* never let this break a transfer */ }
+}
+
 // Single instance: a second launch (e.g. Start Menu /Run-AiDM) just focuses
 // the already-running app instead of starting a duplicate server.
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
-  app.on('second-instance', showWindow);
-  app.whenReady().then(createWindow);
+  app.on('second-instance', (_event, argv) => {
+    showWindow();
+    // A second launch carries its own arguments — `AiDM.exe <url>` against a
+    // running instance must QUEUE that URL, not just raise the window. The
+    // argv here includes the executable at index 0, so drop it before parsing.
+    try {
+      const intake = cli.parseArgs((Array.isArray(argv) ? argv : []).slice(1), {
+        existsSync: (p) => { try { return fs.existsSync(p); } catch (e) { return false; } },
+        readFileSync: (p, enc) => fs.readFileSync(p, enc),
+      });
+      if (intake.urls.length) queueLaunchUrls(intake.urls, { reveal: false });
+    } catch (e) {
+      console.warn('[AiDM] second-instance args ignored:', e && e.message);
+    }
+  });
+  app.whenReady().then(() => {
+    createWindow();
+    // Cold start with URLs: the window and manager now exist, so the resolver
+    // routing is available. Deliberately not awaited — the window must paint
+    // even if a resolver is slow.
+    if (LAUNCH_INTAKE.urls.length) {
+      queueLaunchUrls(LAUNCH_INTAKE.urls, { reveal: !START_HIDDEN });
+    }
+  });
 }
 
 app.on('before-quit', () => {
   isQuitting = true;
+  // Release the suspension blocker before the process goes away — a leaked
+  // blocker id would keep the machine awake after AiDM has quit.
+  keepAwake.release();
   // Never leave a topmost window or a temporary owner behind on exit.
   locationDialog.teardown();
   // Pooled keep-alive sockets hold the event loop open — release them so the

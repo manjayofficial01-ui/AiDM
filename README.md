@@ -1,6 +1,69 @@
-# ⚡ AiDM - AI-Powered Download Manager v5.0.0
+# ⚡ AiDM - AI-Powered Download Manager v5.4.0
 
 > Classic IDM-style download manager with next-generation modular download engine, dynamic in-flight segment splitting, positional random-access disk I/O, multi-mirror failover, atomic `.part.meta` crash recovery, Chrome browser integration, video quality detection, smart per-category file organization, ETA, dual-layer speed limiting, streaming multi-algorithm checksum verification, and a yt-dlp + FFmpeg extraction engine for YouTube.
+
+---
+
+## What's New in v5.4.0
+
+The **automation and follow-through** release. Five capabilities that every serious
+competitor ships and AiDM did not, each with a dedicated test suite and adversarial
+coverage for the two that touch untrusted input.
+
+### New: archive auto-extract (Settings › Downloads)
+A finished ZIP is unpacked into a folder beside it, so a multi-part release is ready to
+use the moment the download completes — the JDownloader/Gopeed/FDM behaviour.
+- **Dependency-free ZIP reader** (`src/archive-extract.js`): reads the central directory
+  directly and inflates with the standard library. Zip64 archives are supported.
+- **Every entry is CRC-verified.** A truncated or patched archive produces a *skipped*
+  entry, never a file that looks fine and is corrupt.
+- **Zip-slip hardened.** Absolute paths, drive letters, UNC paths, `..` segments, NUL
+  bytes and symlink entries are all refused, and the resolved path must still be inside
+  the destination after resolution. Refusals are reported on the row.
+- **Honest about what it cannot do:** 7z, RAR and password-protected archives are
+  reported as such instead of failing silently. The source archive is only deleted when
+  you opt in *and* every entry extracted cleanly.
+- Off by default. Extraction runs before your post-download command, so an antivirus
+  hook sees the unpacked payload rather than the wrapper.
+
+### New: command line + "Open with AiDM"
+`AiDM.exe <url> [<url> …]` now queues downloads, and a second launch forwards its
+arguments to the running instance instead of being ignored (IDM's `/d` pattern).
+- `--add-file <list.txt|.json|.csv>` queues a whole list; `--hidden` / `--minimized`
+  still work; `--version` / `--help` answer without opening a window.
+- URLs go through **the same resolver routing as the browser extension**, so a YouTube
+  or Twitter page URL opens the normal quality picker.
+- A bare path is never treated as a URL — only `http`/`https`/`ftp`/`magnet` are
+  accepted, and anything unrecognised is reported rather than guessed at.
+
+### New: sleep inhibition while a download is running
+An idle-sleep timer used to silently kill long transfers overnight. A suspension
+blocker is now held exactly while bytes are moving (or a scheduler session is running)
+and released the moment nothing is transferring. The display is never kept on, and a
+machine that is already asleep is not woken. Toggle in Settings › General.
+
+### New: grab every file on a site
+A recursive site grabber — point it at a page and it collects every downloadable link.
+- Same-origin crawling with depth/page/file/time caps; off-site *file* links are listed
+  (that is how CDNs and mirrors serve downloads) but off-site pages are never crawled.
+- **robots.txt is honoured** by default, with a polite delay between requests.
+- Results are checkboxes: nothing downloads until you press Add, and then it goes
+  through the normal `addDownload()` door.
+
+### Improved: checksum input handling
+- The algorithm is now **inferred from the digest length** (32/40/64/128 → MD5/SHA-1/
+  SHA-256/SHA-512), so a bare digest verifies without being labelled.
+- Accepts `sha256:<hex>`, `SHA-256 <hex>`, `0x<hex>`, uppercase, and colon/dash-grouped
+  digests — the class of input that makes FDM report "Verification Failed" on a good
+  file (their ticket #272855).
+- A digest of the **wrong length is now a clear error** instead of a mismatch that
+  blamed the downloaded file.
+
+### Tests
+6 new suites (`archive-extract`, `auto-extract`, `cli`, `keep-awake`, `checksum`,
+`site-grabber`) — **73/73 suites green**, up from 67. The archive and crawler suites
+assert the attack cases, not just the happy path; `auto-extract` drives the real
+completion pipeline against a real HTTP download rather than stubbing it.
 
 ---
 

@@ -64,6 +64,7 @@
   <div class="toolbar">
     <div class="toolbar-group">
       <button class="tool-btn primary" id="btn-add-url" title="Add URL (Ctrl+N)" aria-label="Add URL (Ctrl+N)"><span class="btn-icon"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-plus"></use></svg></span></button>
+      <button class="tool-btn" id="btn-grab-site" title="Grab every file on a site" aria-label="Grab site"><span class="btn-icon"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-link"></use></svg></span></button>
       <button class="tool-btn" id="btn-pause-all" title="Pause All" aria-label="Pause All"><span class="btn-icon"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-pause"></use></svg></span></button>
       <button class="tool-btn" id="btn-resume-all" title="Resume All" aria-label="Resume All"><span class="btn-icon"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none"><use href="#i-play"></use></svg></span></button>
       <button class="tool-btn" id="btn-delete" title="Remove from list (files stay on disk)" aria-label="Remove from list"><span class="btn-icon"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-list-x"></use></svg></span></button>
@@ -344,6 +345,11 @@
               <input type="checkbox" id="setting-autoresume" checked />
             </div>
             <div class="form-group toggle">
+              <label>Prevent sleep while a download is running</label>
+              <input type="checkbox" id="setting-prevent-sleep" checked />
+            </div>
+            <p class="settings-hint">Holds the OS suspension blocker only while bytes are moving, so an idle timer cannot kill a long overnight transfer. The display is never kept on, and an already-sleeping PC is not woken.</p>
+            <div class="form-group toggle">
               <label>Start AiDM when Windows starts</label>
               <input type="checkbox" id="setting-launch-startup" checked />
             </div>
@@ -391,6 +397,15 @@
               <input type="text" id="setting-post-download-cmd" placeholder='&quot;C:\Program Files\Windows Defender\MpCmdRun.exe&quot; -Scan -ScanType 3 -File &quot;{file}&quot;' />
               <div class="settings-hint">Result is recorded on the download row. Runs once, after any audio-mux step, with a 2-minute timeout.</div>
             </div>
+            <div class="form-group toggle">
+              <label>Extract ZIP archives after download</label>
+              <input type="checkbox" id="setting-auto-extract" />
+            </div>
+            <div class="form-group toggle">
+              <label>Delete the archive once it extracted cleanly</label>
+              <input type="checkbox" id="setting-auto-extract-delete" />
+            </div>
+            <p class="settings-hint">Unpacks into a folder beside the archive. ZIP only — 7z/RAR and password-protected archives are reported on the row instead of silently failing. The archive is kept whenever any entry was skipped, so nothing is lost.</p>
           </section>
 
           <section class="settings-pane" data-settings-pane="network">
@@ -725,6 +740,53 @@
         <button class="tool-btn" id="btn-sched-clear">Clear form</button>
         <button class="tool-btn" id="btn-sched-cancel">Close</button>
         <button class="tool-btn primary" id="btn-sched-save">Save Schedule</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Site Grabber Modal (v5.4.0) — discover every downloadable file on a site -->
+  <div class="modal-overlay" id="grab-overlay" style="display:none;">
+    <div class="modal settings-modal">
+      <div class="modal-header">
+        <h3><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-link"></use></svg> Grab files from a site</h3>
+        <button class="modal-close" id="grab-close" aria-label="Close"><svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-close"></use></svg></button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>Site or page URL</label>
+          <input type="text" id="grab-url" placeholder="https://example.com/downloads/" />
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Follow links (depth)</label>
+            <select id="grab-depth">
+              <option value="0">This page only</option>
+              <option value="1" selected>1 level</option>
+              <option value="2">2 levels</option>
+              <option value="3">3 levels</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Max pages</label>
+            <input type="number" id="grab-pages" min="1" max="200" value="25" />
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Only these file types (comma separated, blank = common types)</label>
+          <input type="text" id="grab-exts" placeholder="zip, pdf, mp4, exe" />
+        </div>
+        <div class="form-group toggle">
+          <label>Respect robots.txt</label>
+          <input type="checkbox" id="grab-robots" checked />
+        </div>
+        <p class="settings-hint">Stays on the same site for page links; off-site file links are listed but never crawled. Nothing downloads until you press Add.</p>
+        <div class="settings-hint" id="grab-status">Idle.</div>
+        <div class="grab-list" id="grab-results"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="tool-btn" id="btn-grab-close2">Close</button>
+        <button class="tool-btn" id="btn-grab-scan">Scan</button>
+        <button class="tool-btn primary" id="btn-grab-add" disabled>Add selected</button>
       </div>
     </div>
   </div>

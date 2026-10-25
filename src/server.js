@@ -770,6 +770,26 @@ class IPCServer {
   }
 
   /**
+   * Public in-process entry point for URL intake that does not come over HTTP —
+   * the CLI (`AiDM.exe <url>`), second-instance forwarding, and file
+   * associations. Delegates to `_routeDownload` so a URL typed on the command
+   * line gets EXACTLY the same treatment as one from the browser extension:
+   * YouTube CDN refusal, page-URL resolution into the quality picker, and the
+   * single `DownloadManager.addDownload()` door. Duplicating that routing in
+   * main.js is how the CLI would drift out of sync with the extension.
+   *
+   * @param {string} url
+   * @param {{ cookies?: string, headers?: Record<string,string>, meta?: object }} [opts]
+   * @returns {Promise<{ statusCode: number, body: any }>}
+   */
+  async addUrl(url, opts = {}) {
+    if (!url || typeof url !== 'string') {
+      return { statusCode: 400, body: { error: 'Missing url' } };
+    }
+    return this._routeDownload({ ...(opts || {}), url });
+  }
+
+  /**
    * Route ONE download request through the same guards /api/download uses.
    *
    * Returns `{ statusCode, body }`. HTTP callers (single + batch) write the

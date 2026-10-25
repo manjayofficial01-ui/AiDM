@@ -53,6 +53,11 @@ contextBridge.exposeInMainWorld('aidm', {
   importSettings: (settings) => ipcRenderer.invoke('import-settings', settings),
   batchUrls: (urls) => ipcRenderer.invoke('batch-urls', { urls }),
   nlCommand: (text) => ipcRenderer.invoke('nl-command', { text }),
+  // Recursive site grabber: returns { files: [{url, depth, crossOrigin}], … }.
+  // It only DISCOVERS URLs — queueing them still goes through batchUrls, i.e.
+  // the normal addDownload door.
+  grabSite: (opts) => ipcRenderer.invoke('grab-site', opts),
+  onGrabProgress: (cb) => ipcRenderer.on('grab-progress', (_, data) => cb(data)),
 
   // Window controls
   minimize: () => ipcRenderer.invoke('window-minimize'),
