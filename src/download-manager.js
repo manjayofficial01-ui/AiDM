@@ -8,7 +8,7 @@ const { DEFAULT_INTERCEPT_TYPES } = require('./scheduler');
 const { muxAudioVideo, isAvailable: ffmpegAvailable, facebookMediaHeaders } = require('./media-mux');
 const ytdlp = require('./yt-dlp');
 const youtubeResolver = require('./youtube-resolver');
-const { sanitizeEntryUrl, entryUrlWasRepaired, isSingleUseTokenUrl, isGmailAttachmentEntryUrl } = require('./url-hygiene');
+const { sanitizeEntryUrl, entryUrlWasRepaired, isSingleUseTokenUrl, isGmailAttachmentEntryUrl, isGmailAttachmentCdnUrl } = require('./url-hygiene');
 const { looksLikeAuthWall, looksLikeHtmlHead, sessionExpiredMessage, extensionOfFilename, BINARY_EXTENSIONS } = require('./auth-wall');
 const googleDrive = require('./google-drive-resolver');
 const { TorrentEngine, isTorrentUrl, magnetDisplayName } = require('./torrent-engine');
@@ -739,6 +739,25 @@ class DownloadManager extends EventEmitter {
       this.emit('download-progress', { ...data, eta: dl ? dl.eta : null });
     });
 
+    // The response itself named the file (skipProbe flows: the single plain
+    // GET's Content-Disposition is the only naming source). Rename the row and
+    // the open location dialog live; the engine has already retargeted the
+    // final file, and its completion event will carry the same real path.
+    // An explicitly user-chosen name (dialog edit, resolver) is never overridden.
+    this.engine.on('download-name', (data) => {
+      const dl = this.downloads.get(data.id);
+      if (!dl || !data.filename || dl._userNamed) return;
+      const clean = this._cleanFilename(data.filename);
+      if (!clean || clean === dl.filename) return;
+      dl.filename = clean;
+      dl.category = detectCategory(clean);
+      // The engine's task writes into the directory chosen at start; only the
+      // NAME changed, so the row's folder must not move.
+      dl.filepath = path.join(dl.savePath, dl.filename);
+      this._persistDownloads(true);
+      this.emit('download-updated', { ...dl });
+    });
+
     this.engine.on('download-complete', (data) => {
       const dl = this.downloads.get(data.id);
       // Completion-time auth-wall guard (see _guardSavedFile): rows that skip
@@ -1196,6 +1215,9 @@ class DownloadManager extends EventEmitter {
       }
       dl.filename = name;
       dl.category = detectCategory(name);
+      // The user authored this name in the dialog — the response's
+      // Content-Disposition must not override it (download-name listener).
+      dl._userNamed = true;
     }
 
     dl.filepath = path.join(chosenPath, dl.filename);
@@ -2580,6 +2602,14 @@ class DownloadManager extends EventEmitter {
       // blob: URLs carry the page origin, not a file name — strip the scheme
       // and parse what remains so `blob:https://x.com/uuid` doesn't leak a URL.
       const inner = raw.startsWith('blob:') ? raw.slice(5) : raw;
+      // Gmail attachment URLs: the last path segment is a numeric user id
+      // ("/attachment/u/7/"), which basename happily reports as a "file
+      // name" — and the real name exists only in the one plain GET's
+      // Content-Disposition (captured later by the engine). An honest
+      // placeholder beats a meaningless "7".
+      if (isGmailAttachmentCdnUrl(inner) || isGmailAttachmentEntryUrl(inner)) {
+        return 'Gmail attachment';
+      }
       const parsed = new URL(inner);
       let name = path.basename(parsed.pathname);
       if (!name || name === '/' || name === parsed.hostname) name = '';

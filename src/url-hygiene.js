@@ -146,6 +146,25 @@ function isGmailAttachmentEntryUrl(raw) {
 }
 
 /**
+ * True for the Gmail attachment CDN form (the entry URL's redirect target,
+ * also handed over by the extension's early takeover — Chrome is cancelled at
+ * downloads.onCreated, BEFORE Content-Disposition ever reaches it, so the
+ * real file name exists only in the response of the one plain GET AiDM itself
+ * performs). The path's last segment is a numeric user id — `/attachment/u/7/`
+ * — which `path.basename` happily reports as a "file name". Callers must never
+ * derive a name from such a URL.
+ * @param {unknown} raw
+ */
+function isGmailAttachmentCdnUrl(raw) {
+  if (typeof raw !== 'string' || !raw) return false;
+  let u = null;
+  try { u = new URL(raw); } catch (e) { return false; }
+  if (!/^https?:$/i.test(u.protocol)) return false;
+  if (!/^mail-attachment\.googleusercontent\.com$/i.test(u.hostname)) return false;
+  return /^\/attachment\//i.test(u.pathname);
+}
+
+/**
  * True for URLs whose signed token is consumed by every extra request, so the
  * engine must fetch them with a single plain connection (no HEAD/Range probe,
  * no segmented Range burst). Conservative on purpose: only the Google
@@ -209,6 +228,7 @@ module.exports = {
   entryUrlWasRepaired,
   isSingleUseTokenUrl,
   isGmailAttachmentEntryUrl,
+  isGmailAttachmentCdnUrl,
   hasSingleUseTokenParam,
   isSameRegistrableDomain,
 };

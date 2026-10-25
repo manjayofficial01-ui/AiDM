@@ -138,6 +138,15 @@ class DownloadTask extends EventEmitter {
     this.finalPath = null;
     /** @type {string | null} */
     this.partPath = null;
+    /**
+     * The real file name learned from the first response's Content-Disposition
+     * (skipProbe flows: the probe itself would spend the one-shot token, so
+     * the response IS the only naming source). Applied before the final
+     * .part → final rename; emitted as 'name' so the manager can update the
+     * row and the location dialog mid-download.
+     * @type {string | null}
+     */
+    this._responseName = null;
     /** @type {DownloadError | null} */
     this.errorValue = null;
 
@@ -650,6 +659,20 @@ class DownloadTask extends EventEmitter {
       await verifyChecksum(partPath, this.config.checksum, this.runAbort?.signal);
     }
 
+    // Apply the server-supplied name (Content-Disposition of the single plain
+    // GET — skipProbe flows never had a probe to learn it from). The .part
+    // file keeps its provisional name until this final rename, so swapping the
+    // target here is safe: no open handle points at `finalPath` yet, and the
+    // conflict policy below still guards the NEW name.
+    if (this._responseName) {
+      const better = sanitizeFilename(this._responseName);
+      if (better && better !== this.filename) {
+        this.log('info', `Response names the file ${better} (was ${this.filename})`);
+        this.filename = better;
+        finalPath = join(this.config.directory, better);
+      }
+    }
+
     if (await fileExists(finalPath)) {
       switch (this.config.onConflict) {
         case 'fail':
@@ -790,6 +813,16 @@ class DownloadTask extends EventEmitter {
           this.mirrors.reportSuccess(mirror, result.bytes, result.elapsedMs);
           segments.complete(segment);
           this.emit('segment', segment.snapshot());
+          // First response with a server-supplied name wins (Gmail/Drive
+          // single-GET flows). Sanitize + dedupe here; the manager decides
+          // what the row shows.
+          if (result.suggestedName && !this._responseName) {
+            const clean = sanitizeFilename(result.suggestedName);
+            if (clean) {
+              this._responseName = clean;
+              this.emit('name', { filename: clean });
+            }
+          }
         },
         (err) => {
           const de = toDownloadError(err);

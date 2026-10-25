@@ -867,6 +867,15 @@ class DownloadEngine extends EventEmitter {
       });
     });
 
+    // The response itself named the file (Content-Disposition on the single
+    // plain GET — Gmail/Drive attachment flows, where a probe would spend the
+    // one-shot token). Forward so the manager can rename the row and the open
+    // location dialog mid-download; the task has already retargeted finalPath,
+    // so `download-complete` will report the same real path.
+    task.on('name', (info) => {
+      if (info && info.filename) this.emit('download-name', { id, filename: info.filename });
+    });
+
     task.on('completed', (info) => {
       this.activeTasks.delete(id);
       this.activeSegments.delete(id);

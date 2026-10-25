@@ -1,6 +1,6 @@
 // @ts-check
 const { DownloadError, classifyHttpStatus, toDownloadError } = require('./errors');
-const { parseContentRange } = require('./probe');
+const { parseContentRange, filenameFromContentDisposition } = require('./probe');
 const { parseRetryAfter } = require('./retry');
 const { SpeedMeter } = require('./speed');
 
@@ -103,6 +103,12 @@ async function runSegmentWorker(segment, mirror, ctx) {
 
     const promisedBytes = inspectResponse(res, segment, from, sentIfRange, ctx);
     if (!res.body) throw new DownloadError('NETWORK', 'Empty response body', { retryable: true });
+    // Single-use-token flows (Gmail/Drive attachments) never get a probe — the
+    // probe itself would spend the one-shot token — so the response's own
+    // Content-Disposition is the FIRST place the real file name appears. Read
+    // it while the headers are in hand; the task renames its target with it
+    // (before the .part → final rename) and the manager updates the row/dialog.
+    const suggestedName = filenameFromContentDisposition(res.headers.get('content-disposition'));
     reader = res.body.getReader();
 
     for (;;) {
@@ -193,7 +199,7 @@ async function runSegmentWorker(segment, mirror, ctx) {
       });
     }
     finished = true;
-    return { bytes, elapsedMs: Date.now() - startedAt };
+    return { bytes, elapsedMs: Date.now() - startedAt, suggestedName: suggestedName || null };
   } finally {
     disarm();
     if (reader && !finished) reader.cancel().catch(() => {});

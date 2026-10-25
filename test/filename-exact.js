@@ -141,6 +141,23 @@ console.log('── 2. Authority: server name vs URL basename vs explicit name �
   mgr.removeAllListeners?.();
 }
 
+console.log('── 3. Gmail attachment URLs never borrow a URL segment as a name ──');
+{
+  const mgr2 = new DownloadManager();
+  // The reported bug: the location dialog offered "7" for
+  // .../attachment/u/7/?ui=2&ik=... — the numeric user-id path segment.
+  const cdn = 'https://mail-attachment.googleusercontent.com/attachment/u/7/?ui=2&ik=abc&attid=0.1&view=att';
+  check('Gmail CDN URL derives an honest placeholder, not "7"',
+    mgr2._extractFilename(cdn) === 'Gmail attachment', mgr2._extractFilename(cdn));
+  check('Gmail entry URL derives the same placeholder',
+    mgr2._extractFilename('https://mail.google.com/mail/u/0/?ui=2&ik=abc&attid=0.1&view=att') === 'Gmail attachment');
+  const row = mgr2.addDownload({ url: cdn });
+  check('the row is created with the placeholder name', row.filename === 'Gmail attachment', row.filename);
+  check('the placeholder is not treated as a generic junk name',
+    !require('../src/titles').isGenericFilename('Gmail attachment', cdn));
+  mgr2.removeAllListeners?.();
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exitCode = fail ? 1 : 0;
 setTimeout(() => process.exit(process.exitCode), 2000).unref();

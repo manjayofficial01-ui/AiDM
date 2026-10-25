@@ -1,5 +1,31 @@
 # Changelog — modernization cycles
 
+## v5.6.1 (2026-10-25, same cycle) — Gmail attachment names (user re-report)
+
+The user's screenshot showed the location dialog offering **"7"** for a Gmail
+attachment — the numeric user-id segment of
+`mail-attachment.googleusercontent.com/attachment/u/7/?ui=2&...`. This is a
+DIFFERENT path from the cycle-2 Content-Disposition fix: single-use-token
+downloads skip the probe entirely (the probe would spend the one-shot token),
+so the real name existed ONLY in the response of the one plain GET AiDM itself
+performs — and nothing read it. Root causes, both fixed:
+
+1. `_extractFilename` happily reported the URL's last path segment (`7`) as a
+   file name. Gmail CDN/entry URLs now derive the honest placeholder
+   **"Gmail attachment"** (new `isGmailAttachmentCdnUrl` in url-hygiene.js).
+2. The engine's single plain GET receives `Content-Disposition` but nothing
+   consumed it. Now: `worker.js` captures it into the segment result →
+   `task.js` emits `name` + retargets the final file (the `.part` keeps its
+   provisional name until the final rename — no open-handle risk) →
+   `download-engine.js` forwards `download-name` → the manager renames the
+   row + open dialog live. A name the user typed in the dialog
+   (`approveDownload`) is marked `_userNamed` and never overridden.
+
+Verified: new end-to-end suite `test/response-name.js` (local Gmail-shaped
+302 → one-shot with `Content-Disposition: Invoice Q4 2026.pdf` → file lands
+byte-exact under the real name, 8 checks) + `test/filename-exact.js`
+extensions (25 checks). Full suite **76/76 in 68.0s**.
+
 ## Cycle 2 — v5.4.0 → v5.5.0 (2026-10-25)
 
 Baseline before work: `npm test` → **74/73→73/73 suites** (re-measured 73/73 in
