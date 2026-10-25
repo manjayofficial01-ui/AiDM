@@ -173,31 +173,18 @@
    * nothing to draw (single/absent segment), so the caller falls back to its
    * plain equal-width bar. `esc` is the caller's attribute escaper (injected
    * so the Node tests need no DOM).
-   * `opts.liquid` adds the wave crest to ACTIVE cells — at most
-   * LIQUID_MAX_CELLS waves per row (first-come) so a 32-connection download
-   * stays bounded: the remaining cells keep the shimmer only.
-   * `opts.justDone` (array of previous states, same cell order) marks cells
-   * that just flipped to done with `.just-done` so CSS can play a one-shot
-   * landing flash — bytes arriving, not just a colour change.
+   * v5.7.1 "one motion": the grid is deliberately STATIC — the liquid wave
+   * on the row's main bar is the single downloading animation.
    */
-  function blockGridHtml(segs, esc, opts) {
+  function blockGridHtml(segs, esc) {
     const blocks = blocksFromSegments(segs, null);
     if (!blocks.length) return '';
-    const o = opts || {};
     const e = typeof esc === 'function' ? esc : function (s) { return String(s); };
-    let waveBudget = LIQUID_MAX_CELLS;
-    const prevStates = Array.isArray(o.justDone) ? o.justDone : null;
-    const cells = blocks.map(function (b, i) {
-      const justDone = prevStates && b.state === 'done' && prevStates[i] !== undefined &&
-        prevStates[i] !== 'done';
-      const cls = ['block', b.state, justDone ? 'just-done' : '', b.tail ? 'tail' : '']
-        .filter(Boolean).join(' ');
-      // First LIQUID_MAX_CELLS active cells get the crest; beyond the budget
-      // a many-connection row keeps the shimmer only — bounded DOM, still liquid.
-      const wave = (o.liquid && b.state === 'active' && waveBudget-- > 0) ? liquidHtml(null) : '';
+    const cells = blocks.map(function (b) {
+      const cls = ['block', b.state, b.tail ? 'tail' : ''].filter(Boolean).join(' ');
       return '<div class="' + cls + '" style="flex:0 0 ' + b.width.toFixed(2) +
         '%" title="' + e(b.title) + '"><div class="block-fill" style="width:' + b.pct +
-        '%">' + wave + '</div></div>';
+        '%"></div></div>';
     }).join('');
     return '<div class="segments-bar block-grid" title="Segment map">' + cells + '</div>';
   }
@@ -252,17 +239,16 @@
    * BlockGrid's cell CSS — one cell at 100% width, its own fill percent —
    * so the whole download list shares one visual language. '' when there is
    * no honest truth (caller falls back to the flow band or nothing).
-   * `opts.liquid` adds the wave crest while the row is actively downloading.
+   * v5.7.1 "one motion": deliberately static (no wave) — the main bar owns
+   * the single downloading animation.
    */
-  function byteBlockHtml(d, esc, opts) {
+  function byteBlockHtml(d, esc) {
     const st = byteBlockState(d);
     if (!st) return '';
-    const o = opts || {};
     const e = typeof esc === 'function' ? esc : function (s) { return String(s); };
-    const wave = (o.liquid && st.state === 'active') ? liquidHtml(null) : '';
     return '<div class="segments-bar block-grid byte-map" title="' + e(st.tip) + '">' +
       '<div class="block ' + st.state + '" style="flex:0 0 100%">' +
-      '<div class="block-fill" style="width:' + st.pct + '%">' + wave + '</div></div></div>';
+      '<div class="block-fill" style="width:' + st.pct + '%"></div></div></div>';
   }
 
   /**
@@ -322,56 +308,6 @@
   }
 
   /**
-   * Live speed → glow tier. Honest decoration: the row's glow strength tracks
-   * the MEASURED throughput, not a fixed look. 0 = idle/paused (no glow),
-   * 1 = trickling, 2 = fast, 3 = saturating.
-   */
-  function speedGlowTier(bytesPerSec) {
-    const s = Number(bytesPerSec) || 0;
-    if (s <= 0) return 0;
-    if (s < 5 * 1024 * 1024) return 1;
-    if (s < 25 * 1024 * 1024) return 2;
-    return 3;
-  }
-
-  /**
-   * The icon progress-ring state (App Store / Chrome-bubble pattern).
-   *   • downloading → 'det': a determinate arc at the REAL percent
-   *     (pathLength=100, so dashoffset = 100 − pct) plus a rotating comet arc.
-   *   • connecting   → 'indet': comet only — honest "in flight, no percent yet".
-   *   • anything else → null (no ring; the icon is the information).
-   * Pure so the Node suite can pin the math.
-   */
-  function iconRingState(dl, mm) {
-    if (!dl) return null;
-    if (prefersReducedMotion(mm)) return null;
-    const status = dl.status || '';
-    if (status === 'connecting') return { mode: 'indet', offset: 100 };
-    if (status !== 'downloading') return null;
-    let pct = 0;
-    const bytes = Number(dl.totalSize) || 0;
-    if (bytes > 0) {
-      pct = Math.floor((Math.max(0, Number(dl.downloaded) || 0) / bytes) * 100);
-    } else {
-      const p = Number(dl.percent);
-      if (isFinite(p) && p > 0) pct = Math.floor(p);
-    }
-    pct = Math.max(0, Math.min(100, pct));
-    return { mode: 'det', offset: 100 - pct, pct: pct };
-  }
-
-  /**
-   * The flowing "current" inside an active fill: three bright dashes drifting
-   * left→right. Their speed is set by CSS from the row's data-glow tier (one
-   * measured variable drives glow AND current — cause, then effect). Pure CSS
-   * transform loop, no timers, bounded to exactly three dashes.
-   */
-  function currentHtml(mm) {
-    if (prefersReducedMotion(mm)) return '';
-    return '<span class="current" aria-hidden="true"><i></i><i></i><i></i></span>';
-  }
-
-  /**
    * Plexo distributes chunks across physical networks round-robin. Fewer than
    * two networks can't be combined, so this returns null and the engine keeps
    * its ordinary default-route behaviour.
@@ -396,9 +332,6 @@
     assignInterfaces: assignInterfaces,
     wavePathD: wavePathD,
     liquidHtml: liquidHtml,
-    speedGlowTier: speedGlowTier,
-    iconRingState: iconRingState,
-    currentHtml: currentHtml,
     LIQUID_MAX_CELLS: LIQUID_MAX_CELLS
   };
 });

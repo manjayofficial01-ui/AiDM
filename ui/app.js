@@ -167,10 +167,8 @@ function patchRow(tr, dl) {
     const isDone = dl.status === 'completed';
     const isActive = dl.status === 'downloading' || dl.status === 'connecting';
     fill.className = 'progress-fill ' + (isDone ? 'is-done' : (isActive ? 'is-active' : ''));
-    syncCurrent(fill, isActive && motionOk());
+    syncFillWave(fill, dl.status === 'downloading' && motionOk());
   }
-  syncSpeedGlow(tr, dl);
-  syncIconRing(tr, dl);
   const ptext = tr.querySelector('.progress-text');
   if (ptext) ptext.textContent = percent + '%';
 
@@ -251,12 +249,7 @@ function patchRow(tr, dl) {
         const fill = map.querySelector('.block-fill');
         if (st && block && fill) {
           const wantCls = 'block ' + st.state;
-          if (block.className !== wantCls) {
-            block.className = wantCls;
-            // The liquid crest belongs to ACTIVE fills only: add it when a
-            // row starts moving, remove it when it pauses/stalls/completes.
-            syncMapWave(fill, st.state === 'active');
-          }
+          if (block.className !== wantCls) block.className = wantCls;
           if (fill.style.width !== st.pct + '%') fill.style.width = st.pct + '%';
           if (map.title !== st.tip) map.title = st.tip;
         }
@@ -514,8 +507,6 @@ function renderDownloadRow(dl) {
     const tr = document.createElement('tr');
     tr.dataset.id = dl.id;
     tr.dataset.status = dl.status || '';
-    tr.dataset.glow = String(window.DownloadViz && window.DownloadViz.speedGlowTier
-      ? window.DownloadViz.speedGlowTier(dl.speed) : 0);
     tr.className = (dl.status || '') + (selectedIds.has(dl.id) ? ' selected' : '');
 
     const percent = rowPercent(dl);
@@ -538,7 +529,7 @@ function renderDownloadRow(dl) {
       <td class="col-check"><input type="checkbox" ${selectedIds.has(dl.id) ? 'checked' : ''} /></td>
       <td class="col-name">
         <div class="file-info">
-          <div class="file-icon">${icon}${iconRingHtml(dl)}</div>
+          <div class="file-icon">${icon}</div>
           <div class="file-details">
             <span class="file-name" title="${escapeAttr(dl.filename)}">${escapeHtml(dl.filename)}${qualityBadge}</span>
             <span class="file-url" title="${escapeAttr(dl.url)}">${escapeHtml(truncateUrl(dl.url))}</span>
@@ -553,7 +544,7 @@ function renderDownloadRow(dl) {
       <td class="col-progress">
         <div class="progress-cell">
           <div class="progress-bar">
-            <div class="progress-fill ${fillClass}" style="width:${percent}%">${isActive && motionOk() ? currentHtmlRow() : ''}</div>
+            <div class="progress-fill ${fillClass}" style="width:${percent}%">${dl.status === 'downloading' && motionOk() ? fillWaveHtml() : ''}</div>
           </div>
           <span class="progress-text">${percent}%</span>
         </div>
@@ -624,94 +615,31 @@ function motionOk() {
 }
 
 /**
- * The App Store / Chrome-bubble progress ring around the file icon:
- * a determinate arc at the REAL percent while downloading (plus a rotating
- * comet), comet-only while connecting (honest: no percent exists yet),
- * nothing otherwise. Markup is static SVG; the patch path moves only the
- * arc's stroke-dashoffset.
+ * v5.7.1 "one motion": the downloading row shows exactly ONE animation —
+ * the liquid wave floating on the main progress fill. Everything else on an
+ * active row (icon, badges, segment grid) stays static; the information
+ * (percent, size, speed, segment states) is carried by content, not motion.
  */
-function iconRingHtml(dl) {
-  if (!window.DownloadViz || !window.DownloadViz.iconRingState) return '';
-  const st = window.DownloadViz.iconRingState(dl);
-  if (!st) return '';
-  const arc = st.mode === 'det'
-    ? `<circle class="arc" cx="18" cy="18" r="16" pathLength="100" style="stroke-dashoffset:${st.offset}"></circle>`
-    : '';
-  return `<span class="icon-ring ${st.mode}" aria-hidden="true">
-    <svg viewBox="0 0 36 36">
-      <circle class="track" cx="18" cy="18" r="16" pathLength="100"></circle>
-      ${arc}
-      <circle class="comet" cx="18" cy="18" r="16" pathLength="100"></circle>
-    </svg></span>`;
+function fillWaveHtml() {
+  return (window.DownloadViz && window.DownloadViz.liquidHtml) ? window.DownloadViz.liquidHtml() : '';
 }
 
-/** The flowing current inside the fill (three dashes, CSS-animated). */
-function currentHtmlRow() {
-  return (window.DownloadViz && window.DownloadViz.currentHtml) ? window.DownloadViz.currentHtml() : '';
-}
-
-/**
- * Per-tick ring sync: the arc's dashoffset tracks the real percent (the CSS
- * transition smooths it), never touching anything else on the row.
- */
-function syncIconRing(tr, dl) {
-  const ring = tr.querySelector('.icon-ring');
-  if (!ring) return;
-  if (!window.DownloadViz || !window.DownloadViz.iconRingState) return;
-  const st = window.DownloadViz.iconRingState(dl);
-  if (!st) { ring.remove(); return; }
-  if (ring.classList.contains(st.mode)) {
-    const arc = ring.querySelector('.arc');
-    if (arc && arc.style.strokeDashoffset !== st.offset + '') arc.style.strokeDashoffset = st.offset;
-  }
-  // A mode change (connecting → downloading) re-renders the whole row via the
-  // status check at the top of patchRow, so no class surgery is needed here.
-}
-
-/** Add/remove the flowing current as the row's fill state changes. */
-function syncCurrent(fill, want) {
-  if (!fill) return;
-  const has = !!fill.querySelector('.current');
-  if (want && !has && motionOk() && window.DownloadViz) {
-    fill.insertAdjacentHTML('beforeend', currentHtmlRow());
-  } else if (!want && has) {
-    fill.querySelector('.current').remove();
-  }
-}
-
-/**
- * Add/remove the liquid crest inside a byte-map fill when the row's state
- * flips between active and everything else. The map is re-created on kind
- * changes anyway; this only covers a state flip with the SAME map kind
- * (downloading → paused → downloading on one row).
- */
-function syncMapWave(fill, want) {
+/** Add/remove the wave on the main fill as the row starts/stops. */
+function syncFillWave(fill, want) {
   if (!fill) return;
   const has = !!fill.querySelector('.liquid');
   if (want && !has && motionOk() && window.DownloadViz) {
-    fill.insertAdjacentHTML('beforeend', window.DownloadViz.liquidHtml());
+    fill.insertAdjacentHTML('beforeend', fillWaveHtml());
   } else if (!want && has) {
     fill.querySelectorAll('.liquid').forEach((w) => w.remove());
   }
 }
 
 /**
- * Speed-reactive glow tier on the row: `data-glow` 0–3 read by CSS to set the
- * halo opacity over the progress bar. Honest decoration — the strength tracks
- * the MEASURED throughput (DownloadViz.speedGlowTier), idle rows get none.
- */
-function syncSpeedGlow(tr, dl) {
-  if (!tr || !window.DownloadViz || !window.DownloadViz.speedGlowTier) return;
-  const tier = String(window.DownloadViz.speedGlowTier(dl.speed));
-  if (tr.dataset.glow !== tier) tr.dataset.glow = tier;
-}
-
-/**
  * One-shot completion flourish on a row that just finished: a drawn
- * success ring around the file icon (SVG stroke-dashoffset draw) and a small
- * particle burst from the progress fill's leading edge. DOM particles use
- * transform/opacity only (GPU-composited); everything self-cleans on a timer,
- * fires at most once per completion, and is skipped entirely under reduced
+ * success tick around the file icon (SVG stroke-dashoffset draw). It
+ * self-cleans on a timer, fires at most once per completion, and is
+ * skipped entirely under reduced
  * motion (the static is-done state carries the information).
  */
 const completionFxIds = new Set();
@@ -723,11 +651,6 @@ function fireCompletionFx(tr, dl) {
 
   const icon = tr.querySelector('.file-icon');
   if (icon) {
-    // Radial ripple first — one expanding ring, transform-only.
-    const ripple = document.createElement('span');
-    ripple.className = 'done-ripple';
-    icon.appendChild(ripple);
-    setTimeout(() => { if (ripple.isConnected) ripple.remove(); }, 700);
     const ring = document.createElement('div');
     ring.className = 'done-ring';
     // r=15.5 → circumference ≈ 97.4 (dasharray 98); the tick path is ≈ 20.5
@@ -744,45 +667,19 @@ function fireCompletionFx(tr, dl) {
     });
     setTimeout(() => { if (ring.isConnected) ring.remove(); }, 2500);
   }
-
-  const bar = tr.querySelector('.progress-bar');
-  if (bar) {
-    const burst = document.createElement('div');
-    burst.className = 'burst';
-    burst.style.left = Math.max(4, Math.min(100, Number(dl && dl.percent) || 100)) + '%';
-    const COLORS = ['var(--accent)', 'var(--success)', '#A78BFA'];
-    for (let i = 0; i < 12; i++) {
-      const p = document.createElement('i');
-      const angle = (Math.PI * 2 * i) / 12 + Math.random() * 0.5;
-      const dist = 26 + Math.random() * 30;
-      p.style.setProperty('--dx', (Math.cos(angle) * dist).toFixed(1) + 'px');
-      p.style.setProperty('--dy', (Math.sin(angle) * dist * 0.75 - 10).toFixed(1) + 'px');
-      p.style.setProperty('--rot', Math.round(Math.random() * 260 - 130) + 'deg');
-      p.style.setProperty('--delay', ((i % 4) * 30) + 'ms');
-      p.style.background = COLORS[i % COLORS.length];
-      burst.appendChild(p);
-    }
-    bar.appendChild(burst);
-    setTimeout(() => { if (burst.isConnected) burst.remove(); }, 1100);
-  }
 }
 
-/** Last per-cell states by row id — powers the just-done landing flash. */
-const segStatesCache = new Map();
-
-function renderSegments(segments, rowId) {
+function renderSegments(segments) {
   // Fresh downloads carry a plain segment COUNT (number) until the engine
   // emits progress; only render the bar for a real per-segment array.
   if (!Array.isArray(segments) || segments.length <= 1) return '';
-  const prev = (rowId && segStatesCache.get(rowId)) || null;
   // Plexo BlockGrid: byte-space cells (a wide chunk is a wide block), each
   // filled by its own progress. Falls through to the equal-width bar when
-  // the viz module is unavailable.
+  // the viz module is unavailable. Static by design (v5.7.1 one-motion).
   if (window.DownloadViz && typeof window.DownloadViz.blockGridHtml === 'function') {
-    const grid = window.DownloadViz.blockGridHtml(segments, escapeAttr, { liquid: motionOk(), justDone: prev });
-    if (grid) { if (rowId) segStatesCache.set(rowId, segments.map((s) => s.state || 'pending')); return grid; }
+    const grid = window.DownloadViz.blockGridHtml(segments, escapeAttr);
+    if (grid) return grid;
   }
-  if (rowId) segStatesCache.set(rowId, segments.map((s) => s.state || 'pending'));
   return `<div class="segments-bar">
     ${segments.map((s, i) => {
       const state = s.state || 'pending';
@@ -810,11 +707,11 @@ function renderSegments(segments, rowId) {
  */
 function renderRowMap(dl) {
   const segs = dl.segmentDetails || dl.segments;
-  if (Array.isArray(segs) && segs.length > 1) return renderSegments(segs, dl.id);
+  if (Array.isArray(segs) && segs.length > 1) return renderSegments(segs);
   if (!window.DownloadViz) return '';
   const DV = window.DownloadViz;
   if (DV.byteBlockState && DV.byteBlockState(dl)) {
-    return DV.byteBlockHtml(dl, escapeAttr, { liquid: motionOk() });
+    return DV.byteBlockHtml(dl, escapeAttr);
   }
   const status = dl.status || '';
   const inFlight = status === 'downloading' || status === 'connecting';

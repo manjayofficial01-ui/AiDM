@@ -1,14 +1,13 @@
-// Regression harness for the "Liquid Glow" download-animation layer (v5.6.0).
+// Regression harness for the download-animation layer.
 //
-// Three decoration-only effects, all gated on prefers-reduced-motion:
-//   1. LIQUID CREST — two-wavelength SVG waves on active fills, animated by
-//      pure CSS transform (seamless -50% loop), bounded per row.
-//   2. SPEED GLOW — row `data-glow` 0–3 derived from the MEASURED throughput.
-//   3. COMPLETION FLOURISH — drawn success ring + particle burst, once per
-//      completion, self-cleaning.
+// v5.7.1 "ONE MOTION" (user feedback): after the Pulse Flow redesign a
+// downloading row ran six simultaneous effects — ring, comet, current,
+// shimmer, glow, waves. The contract now: an active download shows exactly
+// ONE animation, the liquid wave floating on the main progress fill.
+// Everything else on the row is static; connecting rows keep the honest
+// flow band; completion keeps the brief drawn tick; reduced motion removes
+// all of it while the fill/percent/success colour keep the information.
 //
-// House rules under test: reduced motion removes (never fakes); animation is
-// decoration — the honest percent/fill/success colour carry the information.
 // Run: node test/download-animation.js
 'use strict';
 
@@ -25,16 +24,7 @@ function check(name, cond, extra) {
 }
 const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
 
-console.log('── 1. speedGlowTier: measured throughput → honest tier ──');
-{
-  check('idle/paused → tier 0', DV.speedGlowTier(0) === 0 && DV.speedGlowTier(-5) === 0);
-  check('non-numeric → tier 0', DV.speedGlowTier(NaN) === 0 && DV.speedGlowTier(undefined) === 0);
-  check('trickle (<5 MB/s) → tier 1', DV.speedGlowTier(1024) === 1 && DV.speedGlowTier(5 * 1024 * 1024 - 1) === 1);
-  check('fast (≥5, <25 MB/s) → tier 2', DV.speedGlowTier(5 * 1024 * 1024) === 2 && DV.speedGlowTier(24.9 * 1024 * 1024) === 2);
-  check('saturating (≥25 MB/s) → tier 3', DV.speedGlowTier(25 * 1024 * 1024) === 3 && DV.speedGlowTier(1e9) === 3);
-}
-
-console.log('── 2. liquidHtml: seamless two-layer wave, reduced-motion empty ──');
+console.log('── 1. The wave: seamless, two-layer, reduced-motion empty ──');
 {
   const still = { matches: true };
   const moving = { matches: false };
@@ -43,172 +33,89 @@ console.log('── 2. liquidHtml: seamless two-layer wave, reduced-motion empty
   check('two SVG layers', (html.match(/<svg/g) || []).length === 2, 'liquid + liquid-2');
   check('layers carry the .liquid class for the CSS loop',
     /class="liquid"/.test(html) && /class="liquid liquid-2"/.test(html));
-  check('both paths are closed shapes (crest + body)',
-    (html.match(/Z"/g) || []).length === 2);
-  check('paths are two wavelengths wide (seamless -50% loop)',
-    /L200,10 L0,10 Z/.test(html));
+  check('paths are closed shapes (crest + body)', (html.match(/Z"/g) || []).length === 2);
+  check('paths are two wavelengths wide (seamless -50% loop)', /L200,10 L0,10 Z/.test(html));
   check('no JS timers in the markup (pure CSS animation)',
     !/setInterval|setTimeout|requestAnimationFrame/.test(html));
   check('aria-hidden (decoration, not information)', /aria-hidden="true"/.test(html));
+
+  // λ must divide 100 exactly: the -50% translate has to land on an identical
+  // phase or the loop visibly jumps (this exact bug shipped once — λ=56).
+  const d = DV.wavePathD(200, 10, 50, 2.4, 5);
+  check('path starts at the midline', d.startsWith('M0,5'));
+  check('path closes bottom-right then bottom-left', /L200,10 L0,10 Z$/.test(d));
+  const crests = (d.match(/,2\.6\b/g) || []).length;
+  const troughs = (d.match(/,7\.4\b/g) || []).length;
+  check('crests/troughs alternate across both wavelengths (4 each × 2 ctrl pts)',
+    crests === 8 && troughs === 8, crests + '↑ ' + troughs + '↓');
 }
 
-console.log('── 3. wave gating on the real markup builders ──');
-{
-  const still = { matches: true };
-  const active = { downloaded: 50, totalSize: 100, status: 'downloading' };
-  const paused = { downloaded: 50, totalSize: 100, status: 'paused' };
-  const esc = (s) => s;
-  check('active byte map embeds the wave', /liquid/.test(DV.byteBlockHtml(active, esc, { liquid: true })));
-  check('paused byte map does not', !/liquid/.test(DV.byteBlockHtml(paused, esc, { liquid: true })));
-  check('liquid:false (caller honours reduced motion) → plain fill',
-    !/liquid/.test(DV.byteBlockHtml(active, esc, { liquid: false })));
-  check('flow band unchanged (has its own stripe, no wave)',
-    !/liquid/.test(DV.flowBandHtml(esc, still)));
-
-  const segs = Array.from({ length: 24 }, (_, i) => ({
-    start: i * 100, end: i * 100 + 99, downloaded: 40, state: 'active',
-  }));
-  const grid = DV.blockGridHtml(segs, esc, { liquid: true });
-  const waves = (grid.match(/class="liquid"/g) || []).length;
-  check('many-connection row capped at LIQUID_MAX_CELLS waves',
-    waves === DV.LIQUID_MAX_CELLS, waves + ' of 24 cells');
-  const small = DV.blockGridHtml(segs.slice(0, 4), esc, { liquid: true });
-  check('small grid: every active cell gets a wave',
-    (small.match(/class="liquid"/g) || []).length === 4);
-  check('grid without liquid keeps the pre-v5.6.0 markup',
-    !/liquid/.test(DV.blockGridHtml(segs.slice(0, 3), esc)));
-}
-
-console.log('── 4. app.js wiring (source guards) ──');
+console.log('── 2. ONE MOTION: the wave lives on the main fill, nothing else ──');
 {
   const app = read('ui/app.js');
-  check('map builders pass the reduced-motion gate to the viz',
-    /blockGridHtml\(segments, escapeAttr, \{ liquid: motionOk\(\), justDone: prev \}\)/.test(app) &&
-    /byteBlockHtml\(dl, escapeAttr, \{ liquid: motionOk\(\) \}\)/.test(app));
-  check('motionOk() is the single gate',
-    /function motionOk\(\)/.test(app) &&
-    /prefersReducedMotion/.test(app.slice(app.indexOf('function motionOk'), app.indexOf('function motionOk') + 200)));
-  check('patch path syncs the wave on state flips', /function syncMapWave\(/.test(app));
-  check('patch path syncs the glow tier every tick', /function syncSpeedGlow\(/.test(app) && /syncSpeedGlow\(tr, dl\)/.test(app));
-  check('full render seeds data-glow', /tr\.dataset\.glow = String\(/.test(app));
-  check('completion flourish fires from onDownloadComplete',
-    /onDownloadComplete\(\(data\) => \{[\s\S]*?fireCompletionFx\(rowEls\.get\(data\.id\), dl\)/.test(app));
-  check('flourish fires at most once per completion', /completionFxIds\.has\(tr\.dataset\.id\)/.test(app));
-  check('flourish skipped entirely under reduced motion',
-    app.indexOf('completionFxIds.add(tr.dataset.id)') < app.indexOf('if (!motionOk()) return;'));
-  check('burst self-cleans on a timer',
-    /burst isConnected.*remove/.test(app.replace(/\s+/g, ' ')) || /if \(burst\.isConnected\) burst\.remove\(\)/.test(app));
-  check('resumed rows may flourish again', /completionFxIds\.delete\(data\.id\)/.test(app));
-  check('ring self-cleans with a fallback timeout', /setTimeout\(\(\) => \{ if \(ring\.isConnected\) ring\.remove\(\); \}, 2500\)/.test(app));
-}
+  check('active row embeds the wave in the main progress fill',
+    /progress-fill \$\{fillClass\}" style="width:\$\{percent\}%">\$\{dl\.status === 'downloading' && motionOk\(\) \? fillWaveHtml\(\) : ''\}/.test(app));
+  check('patch path syncs the wave on the main fill (state flips)',
+    /function syncFillWave\(/.test(app) && /syncFillWave\(fill, dl\.status === 'downloading' && motionOk\(\)\)/.test(app));
+  check('the wave is the ONLY animation markup the row renders',
+    !/iconRing/.test(app) && !/currentHtml/.test(app) && !/done-ripple/.test(app) &&
+    !/className = 'burst'/.test(app) && !/data-glow/.test(app) && !/segStatesCache/.test(app));
+  check('completion keeps only the drawn tick (no burst, no ripple)',
+    /done-ring/.test(app) && /tick-draw/.test(app) &&
+    !/BURST|burst\.style|done-ripple/.test(app));
+  check('flow band unchanged for connecting rows',
+    /flowBandHtml\(escapeAttr\)/.test(app));
 
-console.log('── 5. styles.css: GPU-only animation + reduced-motion removal ──');
-{
   const css = read('ui/styles.css');
-  check('liquid loop is transform-only', /@keyframes liquid-slide \{\s*from \{ transform: translateX\(0\); \}\s*to \{ transform: translateX\(-50%\); \}\s*\}/.test(css));
-  check('particles fly on transform/opacity only',
-    /@keyframes burst-fly/.test(css) && /translate\(var\(--dx\), var\(--dy\)\) rotate\(var\(--rot\)\)/.test(css));
-  check('ring + tick draw via stroke-dashoffset',
-    /@keyframes ring-draw \{ to \{ stroke-dashoffset: 0; \} \}/.test(css) &&
-    /@keyframes tick-draw \{ to \{ stroke-dashoffset: 0; \} \}/.test(css));
-  check('glow tiers scale opacity with throughput',
-    /tr\[data-glow="1"\] \.progress-bar::before \{ opacity: \.28; \}/.test(css) &&
-    /tr\[data-glow="3"\] \.progress-bar::before \{ opacity: \.85; \}/.test(css));
+  check('css: the wave clips inside the fill',
+    /\.progress-fill \{ overflow: hidden; \}/.test(css));
+  check('css: wave loop is transform-only',
+    /@keyframes liquid-slide \{\s*from \{ transform: translateX\(0\); \}\s*to \{ transform: translateX\(-50%\); \}\s*\}/.test(css));
   const rm = css.slice(css.indexOf('@media (prefers-reduced-motion: reduce)'));
-  check('reduced motion REMOVES the whole layer',
-    /\.liquid, \.burst, \.done-ring, \.done-ripple \{ display: none !important; \}/.test(rm));
-  check('reduced motion freezes the glow transition', /progress-bar::before \{ transition: none; \}/.test(rm));
-  check('wave clips inside the fill (no bleed over the track)',
-    /\.block-fill \{ overflow: hidden; \}/.test(css));
+  check('reduced motion removes the wave and the tick draw',
+    /\.liquid, \.done-ring \{ display: none !important; \}/.test(rm));
+
+  console.log('    ── negative guards: none of the retired effects survive ──');
+  check('no icon ring / comet in css', !/\.icon-ring/.test(css) && !/ring-comet/.test(css));
+  check('no current dashes in css', !/\.current\b/.test(css) && !/current-flow/.test(css));
+  check('no speed-glow halo in css', !/data-glow/.test(css) && !/radial-gradient\(60% 140%/.test(css));
+  check('no shimmer on active fills or block cells',
+    !/is-active::after/.test(css) && !/block\.active \.block-fill::after/.test(css));
+  check('no cell landing springs / spring var / ripple / burst in css',
+    !/just-done/.test(css) && !/cell-land/.test(css) && !/--spring-pop/.test(css) &&
+    !/done-ripple/.test(css) && !/\.burst/.test(css) && !/burst-fly/.test(css));
+  check('no stale keyframes (shimmer kept only where still referenced)',
+    !/cell-land|ripple-out|current-flow|ring-comet|burst-fly/.test(css));
 }
 
-console.log('── 6. geometry sanity: the wave really is two wavelengths ──');
+console.log('── 3. Static maps stay honest and motionless ──');
 {
-  // λ=56 over width 200 must yield a closed path whose horizontal extent is
-  // exactly 200 and whose crests alternate above/below the midline.
-  const d = DV.wavePathD(200, 10, 56, 2.4, 5);
-  check('path starts at the midline', d.startsWith('M0,5'));
-  check('path closes at the bottom-right then bottom-left',
-    /L200,10 L0,10 Z$/.test(d));
-  const crests = (d.match(/,2\.6\b/g) || []).length;   // 5 + (-2.4) → 2.6
-  const troughs = (d.match(/,7\.4\b/g) || []).length;  // 5 + 2.4  → 7.4
-  // λ=50 across 200 → 4 crests + 4 troughs; each half-wave carries TWO cubic
-  // control points at the crest y, hence 8 matches per direction.
-  check('crests and troughs alternate across both wavelengths',
-    crests === 8 && troughs === 8, crests + '↑ ' + troughs + '↓ (4 crests × 2 ctrl pts)');
+  const esc = (s) => s;
+  const segs = Array.from({ length: 4 }, (_, i) => ({
+    start: i * 100, end: i * 100 + 99, downloaded: 40, state: 'active',
+  }));
+  const grid = DV.blockGridHtml(segs, esc);
+  check('BlockGrid renders no wave markup (static by design)', !/liquid/.test(grid));
+  check('byte map renders no wave markup', !/liquid/.test(
+    DV.byteBlockHtml({ downloaded: 50, totalSize: 100, status: 'downloading' }, esc)));
+  check('flow band still has its honest stripe',
+    /flow-fill/.test(DV.flowBandHtml(esc, { matches: false })));
+  check('flow band is static under reduced motion',
+    /still/.test(DV.flowBandHtml(esc, { matches: true })));
+  check('viz exports only the one-motion surface (no ring/current/glow tier)',
+    DV.iconRingState === undefined && DV.currentHtml === undefined &&
+    DV.speedGlowTier === undefined);
 }
 
-console.log('── 7. Pulse Flow redesign (v5.7.0): icon ring, current, cell springs ──');
+console.log('── 4. Completion tick: once, self-cleaning, reduced-motion safe ──');
 {
-  const moving = { matches: false };
-  const still = { matches: true };
-  const DV2 = DV; // same module, new surface
-  const det = DV2.iconRingState({ status: 'downloading', downloaded: 44, totalSize: 100 }, moving);
-  check('ring: determinate at real percent (pathLength=100 → offset 100−pct)',
-    det && det.mode === 'det' && det.offset === 56 && det.pct === 44, JSON.stringify(det));
-  check('ring: percent-only rows floor honestly',
-    DV2.iconRingState({ status: 'downloading', percent: 37.6 }, moving).offset === 63);
-  check('ring: connecting is comet-only (never a fake percent)',
-    JSON.stringify(DV2.iconRingState({ status: 'connecting' }, moving)) === '{"mode":"indet","offset":100}');
-  check('ring: no ring when not in flight',
-    DV2.iconRingState({ status: 'completed' }, moving) === null &&
-    DV2.iconRingState({ status: 'paused' }, moving) === null &&
-    DV2.iconRingState(null) === null);
-  check('ring: reduced motion → no ring at all',
-    DV2.iconRingState({ status: 'downloading', downloaded: 1, totalSize: 2 }, still) === null);
-  check('ring: clamped at the edges (0% and 100%)',
-    DV2.iconRingState({ status: 'downloading', downloaded: 0, totalSize: 100 }, moving).offset === 100 &&
-    DV2.iconRingState({ status: 'downloading', downloaded: 999, totalSize: 100 }, moving).offset === 0);
-
-  const cur = DV2.currentHtml(moving);
-  check('current: exactly three dashes, no JS timers, aria-hidden',
-    (cur.match(/<i>/g) || []).length === 3 && !/setInterval|setTimeout/.test(cur) && /aria-hidden/.test(cur));
-  check('current: none under reduced motion', DV2.currentHtml(still) === '');
-
-  const segs = [
-    { start: 0, end: 99, downloaded: 100, state: 'done' },
-    { start: 100, end: 199, downloaded: 50, state: 'active' },
-    { start: 200, end: 299, downloaded: 0, state: 'pending' },
-  ];
-  const g = DV2.blockGridHtml(segs, (s) => s, { liquid: false, justDone: ['active', 'active', 'pending'] });
-  check('cells: only the just-completed cell is marked',
-    /block done just-done/.test(g) && !/block active just-done/.test(g) && !/block pending just-done/.test(g));
-  const g2 = DV2.blockGridHtml(segs, (s) => s, { liquid: false });
-  check('cells: no just-done without previous states', !/just-done/.test(g2));
-
-  const app2 = read('ui/app.js');
-  check('app: ring renders inside the file icon',
-    /file-icon">\$\{icon\}\$\{iconRingHtml\(dl\)\}/.test(app2));
-  check('app: patch path syncs the arc offset in place',
-    /function syncIconRing\(/.test(app2) && /syncIconRing\(tr, dl\)/.test(app2));
-  check('app: current added/removed on state flips',
-    /function syncCurrent\(/.test(app2) && /syncCurrent\(fill, isActive && motionOk\(\)\)/.test(app2));
-  check('app: segment states cached for the landing flash',
-    /segStatesCache/.test(app2) && /justDone: prev/.test(app2));
-  check('app: completion ripple self-cleans',
-    /done-ripple/.test(app2) && /ripple\.isConnected\) ripple\.remove\(\)/.test(app2));
-
-  const css2 = read('ui/styles.css');
-  check('css: spring easing is a native linear() curve',
-    /--spring-pop: linear\(/.test(css2));
-  check('css: ring comet rotates transform-only',
-    /@keyframes ring-comet \{ to \{ transform: rotate\(360deg\); \} \}/.test(css2));
-  check('css: ring arc transitions the dashoffset (morph, never jump)',
-    /transition: stroke-dashoffset \.45s/.test(css2));
-  check('css: current traverses by percentage (any fill width)',
-    /@keyframes current-flow[\s\S]*?from \{ transform: translateX\(-100%\); \}[\s\S]*?to \{ transform: translateX\(300%\); \}/.test(css2));
-  check('css: current speed follows the measured tier',
-    /tr\[data-glow="2"\] \.current \{ --dur: 1\.9s; \}/.test(css2) &&
-    /tr\[data-glow="3"\] \.current \{ --dur: 1\.1s; \}/.test(css2));
-  check('css: cell landing plays on the spring',
-    /animation: cell-land \.55s var\(--spring-pop\)/.test(css2));
-  check('css: the old icon pulse retired (ring owns "active")',
-    !/\.downloading \.file-icon \{ animation: pulse/.test(css2));
-  const rm2 = css2.slice(css2.indexOf('@media (prefers-reduced-motion: reduce)'));
-  check('reduced motion: comet/current/ripple/landing removed, static arc kept',
-    /\.icon-ring \.comet, \.current \{ display: none !important; \}/.test(rm2) &&
-    /\.done-ripple/.test(rm2) &&
-    /animation: none; background: var\(--success\);/.test(rm2));
+  const app = read('ui/app.js');
+  check('fires at most once per completion', /completionFxIds\.has\(tr\.dataset\.id\)/.test(app));
+  check('skipped entirely under reduced motion',
+    app.indexOf('completionFxIds.add(tr.dataset.id)') < app.indexOf('if (!motionOk()) return;'));
+  check('self-cleans with a fallback timeout',
+    /setTimeout\(\(\) => \{ if \(ring\.isConnected\) ring\.remove\(\); \}, 2500\)/.test(app));
+  check('resumed rows may tick again', /completionFxIds\.delete\(data\.id\)/.test(app));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

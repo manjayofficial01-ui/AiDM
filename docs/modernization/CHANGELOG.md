@@ -1,5 +1,26 @@
 # Changelog — modernization cycles
 
+## v5.7.1 (2026-10-25) — "One Motion" simplification (user feedback)
+
+User feedback on the Pulse Flow redesign: a downloading row ran SIX
+simultaneous effects (icon ring + comet, current dashes, shimmer, speed-glow
+halo, liquid waves, cell springs) — too noisy. The new contract: **an active
+download shows exactly ONE animation, the liquid wave floating on the main
+progress fill.** Removed: the icon progress ring (and its connecting comet),
+the flowing current, the speed-glow halo (`speedGlowTier` deleted from the
+viz surface), the shimmer overlays (main fill + block cells), the BlockGrid
+liquid waves and just-done landing springs, and the completion ripple +
+particle burst. Kept: the wave (moved INTO the main-bar fill — previously it
+lived only on the byte-map/block cells), the honest flow band for connecting
+rows, and the brief drawn success tick on completion.
+
+`test/download-animation.js` rewritten around the one-motion contract (33
+checks) — including NEGATIVE guards asserting none of the retired effects
+survive in markup, JS or CSS (no `.icon-ring`, `.current`, `data-glow`,
+shimmer `::after`s, `.just-done`, `--spring-pop`, `.burst`, `.done-ripple`),
+and the plexo-ui-wiring shimmer guard re-pinned to "cells are static".
+Full suite 76/76; render `05-row-pulseflow` confirms one clean wave.
+
 ## v5.7.0 (2026-10-25) — "Pulse Flow" animation redesign (user-requested)
 
 Second, deeper research pass over premium download animations — App Store

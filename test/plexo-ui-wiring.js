@@ -96,7 +96,10 @@ check('patchRow can create the conn chip mid-download',
 
 // ── 6. styles: BlockGrid, chip, reduced-motion gate ────────────────────────
 check('BlockGrid cells styled', /\.block-grid\s*\{/.test(css) && /\.block-fill\s*\{/.test(css));
-check('active block keeps the shimmer glow', /\.block\.active \.block-fill::after/.test(css));
+// v5.7.1 one-motion: block cells are deliberately STATIC — the liquid wave
+// on the row's main bar is the single downloading animation (user feedback).
+check('block cells are static (the main-bar wave is the one motion)',
+  !/\.block\.active \.block-fill::after/.test(css));
 check('done block is success-coloured', /\.block\.done \.block-fill\s*\{[^}]*var\(--success\)/.test(css));
 check('net chip styled distinctly from the conn chip', /\.net-chip\s*\{/.test(css) && /A78BFA/.test(css));
 check('byte map covers the paused/stalled states', /\.block\.paused \.block-fill/.test(css) && /\.block\.stalled \.block-fill/.test(css));
