@@ -242,3 +242,39 @@ Every change is additive and isolated:
 - The UI additions are three self-contained blocks (one toolbar button, two settings
   rows, one overlay) plus one action case.
 - No data migration. Settings files without the new keys fall back to `DEFAULT_SETTINGS`.
+
+---
+
+## v5.7.2 (2026-10-27) — the dialog rename is final
+
+Scope: the typed rename in the location dialog survived to the row but not
+always to the file on disk. Three revert vectors closed (see CHANGELOG.md).
+
+### Evidence (all commands run locally, exit codes observed)
+
+| Check | Command | Result |
+|---|---|---|
+| Regression (this bug) | `node test/dialog-rename.js` | 28 passed, 0 failed |
+| Naming authority | `node test/mydaddy-title.js` | 39 passed, 0 failed |
+| Server-name feature | `node test/filename-exact.js` | 25 passed, 0 failed |
+| Full suite (post manifest fix) | `npm test` | 77/77 suites, 87.1s |
+| Installer | `npm run dist:win` | `dist/AiDM-Setup-5.7.2.exe`, 150,336,843 B, sha512 c49819af…fe587c0 |
+| Packaged asar | `npx @electron/asar extract` | `nameLocked` forwarding present (1 match); package.json 5.7.2; chrome-extension not packaged (ships separately) |
+
+### Independent review (fresh subagent, diff + tests only, no builder summary)
+
+Verdict: acceptance criterion PASS (every post-approval name-mutation path
+now gates on `_userNamed`/`nameLocked`; gate survives restart — `_userNamed`
+persisted, restore path wholesale); server-name-wins PASS (filename-exact,
+mydaddy-title, control tasks in the new regression test); found and I fixed
+P1: `chrome-extension/manifest.json` was left at 5.7.1 → version-parity test
+failed and `npm test` aborted at 26/77 (commit abecde0 fixes it).
+
+### Known limits / non-blockers (reviewer findings, logged not fixed)
+
+- HLS/DASH container-truth extension swap still applies to user rows
+  (stem kept, only the extension follows the real container; `approveDownload`
+  already forces `.ts` on typed HLS names).
+- Extensionless typed names land as `<typed>.<mime ext>` (documented contract).
+- Pre-existing: 8s probe-race timeout can leave row/disk name divergence on
+  CD-less GETs; Windows reserved device names get a `_` prefix on disk.
