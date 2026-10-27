@@ -14,6 +14,7 @@ const { looksLikeAuthWall, looksLikeHtmlHead, sessionExpiredMessage, extensionOf
 const googleDrive = require('./google-drive-resolver');
 const { TorrentEngine, isTorrentUrl, magnetDisplayName } = require('./torrent-engine');
 const { listActiveInterfaces, eligibleForCombine } = require('./network-interfaces');
+const { BandwidthWatch } = require('./bandwidth-watch');
 // Archive auto-extract. Required defensively for the same reason as media-probe:
 // a broken extractor must degrade to "no extraction", never break completion.
 let archiveExtract = null;
@@ -551,6 +552,12 @@ const DEFAULT_SETTINGS = {
   // after they finished. 0 = never. Only the row leaves the list — the file
   // on disk is never touched.
   autoPurgeDays: 0,
+  // App-aware bandwidth (cycle 3): while ON, a polite cap is applied
+  // automatically when OTHER applications consume the network, and lifted
+  // again when they go idle. Never overrides an explicit speed limit,
+  // timetable or schedule — it only acts when the effective limit would be
+  // unlimited. Sampling uses Windows typeperf; inert elsewhere.
+  adaptiveBandwidth: false,
   queueMaxActive: 3, // historical default kept for settings-file compatibility (unused; concurrency uses maxConcurrentDownloads)
   // yt-dlp media pipeline (used by YouTube and DASH .mpd routing)
   youtubeMaxConcurrent: 2,
@@ -705,6 +712,7 @@ class DownloadManager extends EventEmitter {
     this._lastProgressPersist = 0;
     this.engine.on('download-progress', (data) => {
       const dl = this.downloads.get(data.id);
+      this._noteSpeed?.(data.id, data.speed);
       if (dl) {
         dl.downloaded = data.downloaded;
         dl.totalSize = data.totalSize;
@@ -841,6 +849,21 @@ class DownloadManager extends EventEmitter {
     try { this._purgeFinished(); } catch (e) { /* hygiene must never throw */ }
     this._startAutoPurge();
 
+    // App-aware bandwidth: own transfer speed is tracked from the progress
+    // events the manager already receives (HTTP/HLS via the engine, YouTube
+    // via its own onProgress, torrent via the torrent engine), so "other
+    // apps" traffic = machine total − AiDM's share. The watch emits samples
+    // only while enabled; a watch that cannot run (non-Windows, no typeperf)
+    // stays silent and the feature reads as not busy.
+    this.adaptiveBusy = false;
+    this._adaptiveRecent = [];
+    this._activeSpeeds = new Map();
+    this.bandwidthWatch = new BandwidthWatch();
+    this.bandwidthWatch.on('sample', (s) => {
+      try { this._onTrafficSample(s); } catch (e) { /* never break on a sample */ }
+    });
+    if (this.settings.adaptiveBandwidth === true) this.bandwidthWatch.start();
+
     // Torrent / magnet downloads ride the same row lifecycle as HTTP ones.
     // The engine emits manager-shaped events (progress/complete/error) so the
     // handlers below mirror the HTTP engine's — the UI never knows the
@@ -848,6 +871,7 @@ class DownloadManager extends EventEmitter {
     if (!this.torrent) this.torrent = new TorrentEngine();
     this.torrent.on('download-progress', (data) => {
       const dl = this.downloads.get(data.id);
+      this._noteSpeed?.(data.id, data.speed);
       if (dl) {
         dl.downloaded = data.downloaded;
         dl.totalSize = data.totalSize;
@@ -2045,6 +2069,7 @@ class DownloadManager extends EventEmitter {
           download.speed = p.speed;
           download.percent = p.percent;
           download.eta = (p.eta != null ? p.eta : null);
+          this._noteSpeed?.(download.id, p.speed);
           // Persist at most every 5s (same cadence as the engine path) so a
           // crash mid-download leaves a row with real bytes written instead of
           // a misleading 0 — yt-dlp's --continue then resumes the .part file.
@@ -2543,6 +2568,15 @@ class DownloadManager extends EventEmitter {
     // A freshly saved autoPurgeDays applies immediately (the hourly sweep
     // would otherwise wait up to an hour to enforce the new window).
     try { this._purgeFinished(); } catch (e) { /* hygiene must never throw */ }
+    // App-aware bandwidth follows its toggle live; disabling also drops any
+    // stale busy verdict so the next enable starts from a clean slate.
+    if (this.settings.adaptiveBandwidth === true) {
+      this.bandwidthWatch.start();
+    } else {
+      this.bandwidthWatch.stop();
+      this.adaptiveBusy = false;
+      this._adaptiveRecent = [];
+    }
     return this.settings;
   }
 
@@ -3162,6 +3196,47 @@ class DownloadManager extends EventEmitter {
     this._autoPurgeTimer.unref?.();
   }
 
+  // ── App-aware bandwidth (adaptiveBandwidth) ───────────────────────────────
+  // "Other apps need the network" = machine NIC total − AiDM's own transfer
+  // speed. At or above 1 MB/s for two consecutive samples → busy; below it
+  // twice → idle. The state flip emits 'adaptive-changed' and main.js folds
+  // it into the effective limit chain (timetable > schedule > user limit >
+  // adaptive polite cap — the cap only fills an otherwise-unlimited config).
+
+  _noteSpeed(id, speed) {
+    // Minimal contexts (tests drive _startYoutubeDownload with a bare stub
+    // `this`) never built the tracker — own-speed tracking is best-effort.
+    if (!id || !this._activeSpeeds) return;
+    const v = Number(speed);
+    if (!Number.isFinite(v) || v < 0) return;
+    this._activeSpeeds.set(id, { speed: v, at: Date.now() });
+  }
+
+  _aggregateSpeed(now = Date.now()) {
+    let sum = 0;
+    for (const [id, entry] of this._activeSpeeds) {
+      if (now - entry.at > 10000) { this._activeSpeeds.delete(id); continue; }
+      sum += entry.speed;
+    }
+    return sum;
+  }
+
+  _onTrafficSample(sample) {
+    if (!sample || this.settings.adaptiveBandwidth !== true) return;
+    const own = this._aggregateSpeed(sample.at || Date.now());
+    const other = Math.max(0, (sample.totalBytesPerSec || 0) - own);
+    const busy = other >= 1024 * 1024;
+    // Two consecutive verdicts: a single burst or a single quiet moment
+    // must not flip the cap.
+    this._adaptiveRecent.push(busy);
+    if (this._adaptiveRecent.length > 2) this._adaptiveRecent.shift();
+    const stable = (this._adaptiveRecent.length === 2 &&
+      this._adaptiveRecent[0] === this._adaptiveRecent[1]) ? this._adaptiveRecent[0] : null;
+    if (stable === null || stable === this.adaptiveBusy) return;
+    this.adaptiveBusy = stable;
+    this.emit('adaptive-changed', { busy: stable, otherBytesPerSec: other });
+  }
+
   _loadDownloads() {
     try {
       const dataPath = this._getStatePath();
@@ -3262,6 +3337,7 @@ class DownloadManager extends EventEmitter {
           // Numeric guard: a hand-edited or corrupt value must never make the
           // purge sweep see NaN and silently disable (or misbehave).
           autoPurgeDays: Math.max(0, parseInt(loaded.autoPurgeDays, 10) || 0),
+          adaptiveBandwidth: loaded.adaptiveBandwidth === true,
           categoryPaths: { ...DEFAULT_SETTINGS.categoryPaths, ...(loaded.categoryPaths || {}) },
           fileHosts: {
             ...DEFAULT_SETTINGS.fileHosts,

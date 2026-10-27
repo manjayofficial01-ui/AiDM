@@ -397,6 +397,11 @@
               <textarea id="setting-speed-rules" rows="2" placeholder="22:00-07:00=1024&#10;09:00-18:00=256"></textarea>
               <p class="settings-hint" style="margin-top:4px;">Overnight wraps allowed. Blank = always use the limit above.</p>
             </div>
+            <div class="form-group toggle">
+              <label>App-aware bandwidth</label>
+              <input type="checkbox" id="setting-adaptive-bandwidth" />
+            </div>
+            <p class="settings-hint">Only acts while the limit above is 0 (unlimited): when other applications consume the network, downloads are politely capped at 1 MB/s, and the cap lifts again when they go idle. Your own limit, timetable and schedules always win.</p>
             <h4>Post-download actions</h4>
             <p class="settings-hint">Run a command on every finished download (IDM-style antivirus hook). Use <code>{file}</code> where the file path goes. Empty = off.</p>
             <div class="form-group">

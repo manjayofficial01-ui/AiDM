@@ -288,6 +288,10 @@ function createWindow() {
     });
   });
 
+  // App-aware bandwidth: a busy<->idle flip must recompute the effective
+  // limit at once (the timetable timer alone would lag up to 30s).
+  downloadManager.on('adaptive-changed', () => applyTimetableSpeed());
+
   clipboardMonitor.on('link-found', (url) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('clipboard-link', url);
@@ -478,11 +482,22 @@ function applyTimetableSpeed() {
         source = 'timetable';
       }
     }
+    // App-aware bandwidth (cycle 3): only when NOTHING above imposed a limit
+    // — an explicit user limit, timetable entry or schedule always wins. When
+    // the config would otherwise be unlimited and other applications are
+    // consuming the network, hold a polite cap until they go idle again.
+    if (source === 'default' && desired === 0 &&
+        s.adaptiveBandwidth === true && downloadManager.adaptiveBusy) {
+      desired = 1024 * 1024; // 1 MB/s polite cap
+      source = 'adaptive';
+    }
     if (downloadManager.engine.globalSpeedLimit !== desired) {
       downloadManager.engine.setSpeedLimit(desired);
-      notifyScheduler(source === 'default'
-        ? 'Speed limit restored to default'
-        : `Speed limit: ${Math.round(desired / 1024)} KB/s (${source})`);
+      notifyScheduler(source === 'adaptive'
+        ? 'Network busy — download speed capped at 1 MB/s (app-aware)'
+        : source === 'default'
+          ? 'Speed limit restored to default'
+          : `Speed limit: ${Math.round(desired / 1024)} KB/s (${source})`);
     }
   } catch (e) { /* never break the app for a limit tweak */ }
 }
@@ -1233,6 +1248,9 @@ app.on('before-quit', () => {
   keepAwake.release();
   // Never leave a topmost window or a temporary owner behind on exit.
   locationDialog.teardown();
+  // Stop the app-aware bandwidth sampler — a live typeperf child must not
+  // outlive the app (it would keep sampling to nowhere).
+  try { downloadManager.bandwidthWatch.stop(); } catch (e) { /* not started */ }
   // Pooled keep-alive sockets hold the event loop open — release them so the
   // process exits promptly (engine connection reuse, see src/engine/agents.js).
   destroyAgents();
