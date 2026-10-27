@@ -1,6 +1,6 @@
 # PROGRESS — modernization cycles
 
-Last updated: 2026-10-27 (v5.7.2 cycle)
+Last updated: 2026-10-28 (v5.8.0 cycle 3)
 
 ## Capabilities (observed this cycle)
 
@@ -57,7 +57,40 @@ checklist satisfied for the fix scope, installer built and self-verified.
 
 ## Exact next step
 
-User installs `dist/AiDM-Setup-5.7.2.exe` (or restarts the dev copy — it
-runs from source) and retries the rename that failed. If a rename still
-reverts, capture the URL type + resulting filename; the next investigation
-starts from `_applyProbeResult` (2942) and `_startDownload` (2255).
+User installs `dist/AiDM-Setup-5.8.0.exe` (or restarts the dev copy) and
+tries: torrent download (webtorrent 3.x), Settings → auto-purge days, and
+Settings → app-aware bandwidth with another app streaming. If anything
+misbehaves, the investigation starts at `src/bandwidth-watch.js` (sampler)
+and `_onTrafficSample` (state machine).
+
+## Session log — 2026-10-28 (cycle 3: market research → integration)
+
+1. Deep research: IDM 6.43.1 / FDM 6.30.0 / Motrix / aria2 / 2026 trend
+   pieces. IDM's direct-MP4 grab is already exceeded by AiDM's yt-dlp muxing.
+   Chose: webtorrent 3.x (platform/security), auto-purge (FDM parity),
+   app-aware bandwidth (the 2026 smart-bandwidth trend, ABDM parity).
+   HTTP/3 stays rejected per `docs/HTTP3-ASSESSMENT.md`.
+2. webtorrent 3.0.21: the major did NOT clear the 4 high audit findings —
+   the abandoned `ip` dependency survives in every bittorrent-tracker
+   version. Closed with a local shim + npm overrides (audit 4 high → 0);
+   44-check contract suite; stale Node-18 pin comment corrected.
+3. autoPurgeDays list hygiene (16 checks) + app-aware bandwidth via the
+   typeperf sampler (28 checks, counter live-verified on this machine).
+   Mid-cycle, youtube-resolver/row-media caught the own-speed tracker
+   crashing stub test contexts — fixed with optional calls (`_noteSpeed?.()`).
+4. v5.8.0: BOTH version files bumped together (manifest-parity lesson),
+   changelog, 80/80 suites, installer built + asar-verified (shim hoisted to
+   `node_modules/ip`, tracker loads from inside the asar).
+
+## Buckets (v5.8.0)
+
+- **Completed and verified:** all three integrations (0af459e → c58df4e →
+  3023fc6 → d11b37a); 0 npm audit findings; 80/80 suites; installer
+  150,332,755 B, sha512 aaaf2cac…2176ca.
+- **Completed but unverified on real hardware:** app-aware bandwidth against
+  real competing traffic (state machine unit-verified; the typeperf counter
+  itself live-verified); auto-purge across a real multi-day window;
+  installer not installed over the user's copy.
+- **Planned:** winget/scoop manifest (needs a GitHub release — user
+  decision); transcode presets; queue-scoped scheduling (structural).
+- **Blocked:** none.

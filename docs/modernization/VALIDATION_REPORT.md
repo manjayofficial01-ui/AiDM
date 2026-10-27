@@ -278,3 +278,30 @@ failed and `npm test` aborted at 26/77 (commit abecde0 fixes it).
 - Extensionless typed names land as `<typed>.<mime ext>` (documented contract).
 - Pre-existing: 8s probe-race timeout can leave row/disk name divergence on
   CD-less GETs; Windows reserved device names get a `_` prefix on disk.
+
+---
+
+## v5.8.0 (2026-10-28) — cycle 3: market research → integration
+
+Research base: IDM 6.43.1 (direct-MP4 grab — already exceeded by AiDM's
+yt-dlp muxing), FDM 6.30.0 (maintenance), Motrix/aria2 (no HTTP/3, HTTP/3
+stays rejected per `docs/HTTP3-ASSESSMENT.md`), 2026 trend pieces (smart
+bandwidth, platform upgrades). Full command evidence:
+
+| Check | Command | Result |
+|---|---|---|
+| Advisories | `npm audit` | 4 high → **0** (webtorrent 3.0.21 + ip shim override) |
+| Shim contract | `node test/ip-shim.js` | 44 passed (advisory bypass addresses fail closed) |
+| Auto-purge | `node test/auto-purge.js` | 16 passed |
+| App-aware | `node test/app-aware-throttle.js` | 28 passed |
+| Live sampler | `typeperf "\Network Interface(*)\Bytes Total/sec" -si 1` | streams on this machine (2 NICs, expected CSV) |
+| Full suite | `npm test` | 80/80 suites, 65.8s |
+| Installer | `npm run dist:win` | 150,332,755 B, sha512 aaaf2cac…2176ca |
+| Packaged asar | `npx @electron/asar extract` + `ELECTRON_RUN_AS_NODE` import | shim hoisted to `node_modules/ip`, tracker loads and resolves it from inside the asar |
+
+Notes: the webtorrent 3.x major alone did NOT clear the audit (the roadmap's
+cycle-2 expectation was wrong — the `ip` dependency survives in every
+bittorrent-tracker version). The rename-related youtube-resolver/row-media
+regressions seen mid-cycle were caused by the own-speed tracker being called
+from stub test contexts (`_noteSpeed?.()` optional call fixes it) — caught by
+the suite, isolated by stash-diff, fixed.
