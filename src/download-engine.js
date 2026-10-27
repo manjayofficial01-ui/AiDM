@@ -701,6 +701,11 @@ class DownloadEngine extends EventEmitter {
     // Single-use-token URLs: skip the task's own Range probe so exactly one
     // plain GET reaches the server (see task.js prepare()).
     skipProbe = false,
+    // The file name was authored by the user (a rename in the location
+    // dialog) or is an explicit caller choice: the task must never retarget
+    // the final file from the response's Content-Disposition (see task.js
+    // finalize()).
+    nameLocked = false,
   }) {
     // 1. Handle data: URLs directly
     if (typeof url === 'string' && url.startsWith('data:')) {
@@ -750,6 +755,7 @@ class DownloadEngine extends EventEmitter {
       onConflict: ['rename', 'overwrite', 'fail'].includes(onConflict) ? onConflict : 'rename',
       singleConnection: wantsSingle,
       skipProbe: skipProbe === true,
+      nameLocked: nameLocked === true,
       resumable: resumable === false || resumeable === false ? false : true,
       // NOTE: no speedLimit here — the global bucket is injected via deps
       // below. Passing this.globalSpeedLimit as the per-task rate too made
@@ -1561,7 +1567,7 @@ class DownloadEngine extends EventEmitter {
       throw new Error(msg);
     };
 
-    // Generation token: bumped on cancel/pause so in-flight workers and the
+    // Generation counter: bumped on cancel/pause so in-flight workers and the
     // flusher stop touching `fd` and the file. Without it, cancelDownload
     // unlinked the file while a worker was still fs.writeSync-ing (EBADF →
     // spurious download-error for a deleted id) and a resume re-opened 'w'

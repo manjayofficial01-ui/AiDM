@@ -78,6 +78,13 @@ function resolveConfig(options, defaults = {}) {
     // one-shot token, so the real download 400s. When set, prepare() skips the
     // network probe entirely and the task streams ONE plain GET.
     skipProbe: merged.skipProbe === true,
+    // The file name was authored by the user (a rename in the location
+    // dialog) or by an explicit caller choice: the response's
+    // Content-Disposition must never retarget the final file. finalize()
+    // stands down for such tasks; the 'name' event still fires (the
+    // manager's download-name listener already stands down for _userNamed
+    // rows, so the row and the file on disk stay consistent).
+    nameLocked: merged.nameLocked === true,
     // Both spellings occur in the wild (`resumeable` in older manager rows).
     resumable: merged.resumable !== false && merged.resumeable !== false,
     fetch: merged.fetch ?? globalThis.fetch.bind(globalThis),
@@ -664,7 +671,12 @@ class DownloadTask extends EventEmitter {
     // file keeps its provisional name until this final rename, so swapping the
     // target here is safe: no open handle points at `finalPath` yet, and the
     // conflict policy below still guards the NEW name.
-    if (this._responseName) {
+    // A name the user chose in the location dialog is NEVER overridden: the
+    // row was renamed at approval time (`_userNamed` → `nameLocked`). Without
+    // this guard the file on disk silently reverted to the server's name
+    // while the row kept the user's choice (user report: "i can't rename the
+    // downloading file at downloading dialogue window").
+    if (this._responseName && !this.config.nameLocked) {
       const better = sanitizeFilename(this._responseName);
       if (better && better !== this.filename) {
         this.log('info', `Response names the file ${better} (was ${this.filename})`);

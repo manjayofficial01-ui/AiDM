@@ -2206,7 +2206,11 @@ class DownloadManager extends EventEmitter {
           // burst against it is refused. One connection, not resumable.
           download.singleConnection = true;
           download.resumable = false;
-          if (resolved.filename) {
+          // Drive's own name only fills a row the user did not personally
+          // name: a dialog rename (`_userNamed`) is the final authority, and
+          // this resolver runs after approval — an unconditional overwrite
+          // here was reverting the typed name on every Drive/Gmail row.
+          if (resolved.filename && !download._userNamed) {
             const clean = this._cleanFilename(resolved.filename);
             if (clean) {
               download.filename = clean;
@@ -2339,6 +2343,10 @@ class DownloadManager extends EventEmitter {
         // Single-use-token rows must make exactly ONE request: skip the
         // engine's own Range probe so only the download's plain GET fires.
         skipProbe: download.skipProbe === true,
+        // A name chosen in the location dialog (or by an explicit caller) is
+        // final: the task must not retarget the file to the response's
+        // Content-Disposition name at finalize time (test/dialog-rename.js).
+        nameLocked: download._userNamed === true,
         // "Combine networks": spread this download's connections across the
         // eligible physical NICs (Plexo). Gated off for one-connection rows
         // (nothing to spread). SpreadAuto=0 keeps the default route.
@@ -2681,24 +2689,24 @@ class DownloadManager extends EventEmitter {
     if (!meta) return false;
     const cur = String(dl.filename || '');
     const hasExt = /\.[A-Za-z0-9]{1,8}$/.test(cur);
-    const curGeneric = isGenericFilename(cur, dl.url);
 
     let next = cur;
     const cd = meta.suggestedFilename ? this._cleanFilename(meta.suggestedFilename) : null;
     const cdUsable = cd && /\.[A-Za-z0-9]{1,8}$/.test(cd) && !isGenericFilename(cd, dl.url);
     // The server's Content-Disposition name is the EXACT name. It replaces a
     // URL-derived guess (browsers do the same) and any generic name — but
-    // never a name the caller chose explicitly, which `_userNamed` records
-    // at add time.
-    if (cdUsable && (curGeneric || !dl._userNamed)) {
+    // never a name the user typed in the location dialog (`_userNamed`), even
+    // when that name looks generic ("video.mp4") or has no extension yet: the
+    // user's keystrokes outrank the server. This refine runs AFTER approval
+    // (the probe lands late), and _startDownload recomputes filepath from the
+    // name — letting CD through here is how a typed rename silently reverted.
+    if (cdUsable && !dl._userNamed) {
       next = cd;
     } else if (!hasExt) {
-      if (cdUsable) {
-        next = cd;
-      } else {
-        const ext = extFromMime(meta.contentType);
-        if (ext) next = cur + '.' + ext;
-      }
+      // Extensionless name: append the container the server reported (stem
+      // stays the user's / the detected one — never the server's full name).
+      const ext = extFromMime(meta.contentType);
+      if (ext) next = cur + '.' + ext;
     }
     if (!next || next === cur) return false;
 

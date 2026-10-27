@@ -1,5 +1,37 @@
 # Changelog — modernization cycles
 
+## v5.7.2 (2026-10-27) — the dialog rename is final (user report, repeat)
+
+User report (repeat of the v5.6.x-era bug): "i can't rename the downloading
+file at downloading dialogue window." The v5.6.x chain fixed the row side but
+the rename still lost on two more paths, both running AFTER approval and both
+recomputing `filepath` from the (overwritten) name — so the file landed under
+the server's name while the row showed the user's choice:
+
+1. **`nameLocked` never reached the engine.** The engine wrapper and
+   `DownloadTask` already stood down on `config.nameLocked` (uncommitted work
+   from the earlier fix), but `download-manager._startDownload` never passed
+   it — so a skipProbe/single-use-token response (Gmail/Drive attachments)
+   retargeted the finished file to the response's Content-Disposition name at
+   finalize. Now forwarded: `nameLocked: download._userNamed === true`.
+2. **`_refineFilename` generic escape hatch.** `cdUsable &&
+   (curGeneric || !dl._userNamed)` let the late probe's Content-Disposition
+   name replace a user-TYPED name whenever it looked generic ("video.mp4",
+   "download.pdf" — all in `GENERIC_BASENAMES`), and the `!hasExt` branch
+   replaced an extensionless typed name with the server's FULL name. Both
+   branches now stand down for `_userNamed` rows; only a mime-derived
+   extension is appended to a stem. Auto-derived rows keep the v5.5.0/v5.6.x
+   "real server name wins" behavior unchanged.
+3. **Google Drive resolver overwrote unconditionally.**
+   `resolveGoogleDriveUrl`'s `resolved.filename` replaced the name (and
+   filepath) on every Drive/Gmail row at start, typed rename or not. Now
+   gated on `!download._userNamed`.
+
+`test/dialog-rename.js` extended to 28 checks: generic-typed and
+extensionless-typed names survive refine, auto rows still refine, plus wiring
+pins for all three guards. `test/mydaddy-title.js` authority pin updated to
+the new `_refineFilename` wiring. Full suite 77/77.
+
 ## v5.7.1 (2026-10-25) — "One Motion" simplification (user feedback)
 
 User feedback on the Pulse Flow redesign: a downloading row ran SIX
