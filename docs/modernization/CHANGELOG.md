@@ -1,5 +1,39 @@
 # Changelog — modernization cycles
 
+## v5.8.0 (2026-10-28) — Cycle 3: market research → integration
+
+Deep research pass over the late-2026 download-manager market (IDM 6.43.1,
+FDM 6.30.0, Motrix/aria2, XDM, trend pieces): IDM's 2026 headline (direct MP4
+grab) is already exceeded by AiDM's yt-dlp muxing; FDM/Motrix shipped only
+maintenance; the live trends are smart bandwidth management and platform/
+security upgrades. Three integrations shipped:
+
+1. **webtorrent 2.8.5 → 3.0.21** (platform upgrade). Electron 45's Node
+   24.22 lifted the old Node 18 pin. The 4 high `npm audit` findings did NOT
+   clear with the major — every bittorrent-tracker version depends on the
+   abandoned `ip` package (GHSA-2p57-rm9w-gvfp, unpatched upstream, no
+   maintained npm fork). Closed with a local audited shim
+   (`tools/shims/node-ip`) wired via npm overrides: the tree's only call is
+   tracker-SERVER code a client never runs, and the security predicates fail
+   closed. `npm audit`: 4 high → **0**. `test/ip-shim.js` (44 checks) pins
+   the contract with the advisory's exact bypass addresses.
+2. **Auto-purge finished downloads** (FDM parity, backlog #14).
+   `autoPurgeDays` (0 = never, default): completed rows older than the
+   window leave the list on startup, on completion, on settings save and on
+   an hourly sweep. Files on disk are never touched.
+   `test/auto-purge.js` (16 checks).
+3. **App-aware bandwidth** (the 2026 smart-bandwidth trend, backlog #7).
+   While the machine is idle, downloads run unlimited; when OTHER
+   applications consume the network (NIC total − AiDM's own transfer speed
+   ≥ 1 MB/s, two consecutive samples), a polite 1 MB/s cap applies and lifts
+   on idle. Never overrides an explicit limit, timetable or schedule.
+   Sampling streams Windows typeperf (`src/bandwidth-watch.js`, injectable,
+   inert off-Windows); live-verified against the real counter on a dual-NIC
+   machine. `test/app-aware-throttle.js` (28 checks).
+
+Both version files bumped in lockstep (extension-manifest parity lesson from
+v5.7.2). Full suite **80/80**.
+
 ## v5.7.2 (2026-10-27) — the dialog rename is final (user report, repeat)
 
 User report (repeat of the v5.6.x-era bug): "i can't rename the downloading
