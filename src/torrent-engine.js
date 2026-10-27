@@ -9,10 +9,17 @@
  * resume, complete, remove — with progress events shaped exactly like the
  * HTTP engine's so the UI and persistence code are untouched.
  *
- * Version pin: WebTorrent 3.x requires Node >= 22, but Electron 28 bundles
- * Node 18, so we pin WebTorrent ^2.8 (engines: node >= 16). WebTorrent 2 is
- * ESM-only, hence the dynamic `import()` inside `_ensureClient()` — plain
- * `require()` fails with ERR_REQUIRE_ASYNC_MODULE.
+ * Version pin: WebTorrent 3.x requires Node >= 22. On Electron 28 (Node 18)
+ * we were pinned to ^2.8; the Electron 45 platform jump (Node 24.22) lifted
+ * that, so we track ^3 now. WebTorrent is ESM-only in both lines, hence the
+ * dynamic `import()` inside `_ensureClient()` — plain `require()` fails with
+ * ERR_REQUIRE_ASYNC_MODULE.
+ *
+ * Advisory note: webtorrent → torrent-discovery → bittorrent-tracker still
+ * depends on the abandoned `ip` package (GHSA-2p57-rm9w-gvfp, unpatched
+ * upstream). npm `overrides` in package.json swaps it for our audited shim
+ * tools/shims/node-ip (test/ip-shim.js pins the contract) — the only call the
+ * tree makes is tracker-SERVER code a client never runs.
  *
  * Persistence/resume: WebTorrent's chunk store (fs-chunk-store) keeps pieces
  * under the save path, so re-adding the same magnet after an app restart

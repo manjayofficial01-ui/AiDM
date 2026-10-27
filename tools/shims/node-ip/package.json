@@ -1,0 +1,7 @@
+{
+  "name": "aidm-node-ip-shim",
+  "version": "1.0.0",
+  "description": "Local, security-corrected replacement for the abandoned 'ip' package (GHSA-2p57-rm9w-gvfp has no upstream patch). Wired in via npm overrides for bittorrent-tracker.",
+  "main": "index.js",
+  "license": "MIT"
+}
