@@ -547,6 +547,10 @@ const DEFAULT_SETTINGS = {
   // Does NOT keep the display on, and does not wake an already-sleeping PC.
   preventSleep: true,
   speedLimit: 0,
+  // List hygiene (FDM parity): remove COMPLETED rows from the list N days
+  // after they finished. 0 = never. Only the row leaves the list — the file
+  // on disk is never touched.
+  autoPurgeDays: 0,
   queueMaxActive: 3, // historical default kept for settings-file compatibility (unused; concurrency uses maxConcurrentDownloads)
   // yt-dlp media pipeline (used by YouTube and DASH .mpd routing)
   youtubeMaxConcurrent: 2,
@@ -786,6 +790,9 @@ class DownloadManager extends EventEmitter {
       // then mux in a paired audio track when the row has one. Async, and
       // never allowed to throw into the completion path.
       this._finishRow(dl);
+      // List hygiene: a just-completed row can itself cross the purge
+      // threshold when the user set a small window (no-op for 0 = never).
+      try { this._purgeFinished(); } catch (e) { /* hygiene must never throw */ }
     });
 
     this.engine.on('download-error', (data) => {
@@ -829,6 +836,10 @@ class DownloadManager extends EventEmitter {
     });
 
     this._loadDownloads();
+    // List hygiene (autoPurgeDays): sweep stale completed rows at startup and
+    // on an hourly timer; completions also sweep inline (see download-complete).
+    try { this._purgeFinished(); } catch (e) { /* hygiene must never throw */ }
+    this._startAutoPurge();
 
     // Torrent / magnet downloads ride the same row lifecycle as HTTP ones.
     // The engine emits manager-shaped events (progress/complete/error) so the
@@ -884,6 +895,7 @@ class DownloadManager extends EventEmitter {
       this._processQueue();
       this.emit('download-complete', data);
       this._finishRow(dl);
+      try { this._purgeFinished(); } catch (e) { /* hygiene must never throw */ }
     });
     this.torrent.on('download-error', (data) => {
       const dl = this.downloads.get(data.id);
@@ -2528,6 +2540,9 @@ class DownloadManager extends EventEmitter {
     this._applyEngineSettings();
     this._ensureDirectories();
     this._saveSettings();
+    // A freshly saved autoPurgeDays applies immediately (the hourly sweep
+    // would otherwise wait up to an hour to enforce the new window).
+    try { this._purgeFinished(); } catch (e) { /* hygiene must never throw */ }
     return this.settings;
   }
 
@@ -3116,6 +3131,37 @@ class DownloadManager extends EventEmitter {
     } catch (e) {}
   }
 
+  /**
+   * List hygiene (FDM parity, `autoPurgeDays`): drop COMPLETED rows whose
+   * completion is older than N days. Only the row leaves the list — the file
+   * on disk is never touched. Unknown-age rows (no completedAt/addedAt) are
+   * never purged. Returns the purged ids.
+   */
+  _purgeFinished(now = Date.now()) {
+    const days = Number(this.settings && this.settings.autoPurgeDays) || 0;
+    if (!(days > 0)) return [];
+    const cutoff = now - days * 86400000;
+    const purged = [];
+    for (const [id, dl] of this.downloads) {
+      if (!dl || dl.status !== 'completed') continue;
+      const at = Number(dl.completedAt) || Number(dl.addedAt) || 0;
+      if (!at || at > cutoff) continue;
+      this.downloads.delete(id);
+      purged.push(id);
+      this.emit('download-removed', { id, purged: true });
+    }
+    if (purged.length) this._persistDownloads(true);
+    return purged;
+  }
+
+  _startAutoPurge() {
+    if (this._autoPurgeTimer) return;
+    this._autoPurgeTimer = setInterval(() => {
+      try { this._purgeFinished(); } catch (e) { /* hygiene must never throw */ }
+    }, 3600000);
+    this._autoPurgeTimer.unref?.();
+  }
+
   _loadDownloads() {
     try {
       const dataPath = this._getStatePath();
@@ -3213,6 +3259,9 @@ class DownloadManager extends EventEmitter {
         return {
           ...DEFAULT_SETTINGS,
           ...loaded,
+          // Numeric guard: a hand-edited or corrupt value must never make the
+          // purge sweep see NaN and silently disable (or misbehave).
+          autoPurgeDays: Math.max(0, parseInt(loaded.autoPurgeDays, 10) || 0),
           categoryPaths: { ...DEFAULT_SETTINGS.categoryPaths, ...(loaded.categoryPaths || {}) },
           fileHosts: {
             ...DEFAULT_SETTINGS.fileHosts,

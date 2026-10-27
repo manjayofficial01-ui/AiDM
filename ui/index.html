@@ -349,6 +349,13 @@
               <input type="checkbox" id="setting-prevent-sleep" checked />
             </div>
             <p class="settings-hint">Holds the OS suspension blocker only while bytes are moving, so an idle timer cannot kill a long overnight transfer. The display is never kept on, and an already-sleeping PC is not woken.</p>
+            <div class="form-group">
+              <label>Remove finished downloads from the list after</label>
+              <div style="display:flex; gap:8px; align-items:center;">
+                <input type="number" id="setting-autopurge-days" min="0" max="3650" style="width:90px;" />
+                <span class="settings-hint" style="margin:0;">days (0 = never). Files on disk are always kept — only the list entry disappears.</span>
+              </div>
+            </div>
             <div class="form-group toggle">
               <label>Start AiDM when Windows starts</label>
               <input type="checkbox" id="setting-launch-startup" checked />

@@ -2094,6 +2094,7 @@ async function showSettingsModal() {
   document.getElementById('setting-minimize-tray').checked = settings.minimizeToTray !== false;
   document.getElementById('setting-autoresume').checked = settings.autoResume !== false;
   document.getElementById('setting-prevent-sleep').checked = settings.preventSleep !== false;
+  document.getElementById('setting-autopurge-days').value = Math.max(0, parseInt(settings.autoPurgeDays, 10) || 0);
   // The status-bar clipboard dot must reflect the real toggle, not stay
   // statically "active" forever.
   const clipDot = document.getElementById('clipboard-dot');
@@ -2290,6 +2291,7 @@ async function saveSettings() {
     minimizeToTray: document.getElementById('setting-minimize-tray').checked,
     autoResume: document.getElementById('setting-autoresume').checked,
     preventSleep: document.getElementById('setting-prevent-sleep').checked,
+    autoPurgeDays: Math.max(0, parseInt(document.getElementById('setting-autopurge-days').value, 10) || 0),
     categoryPaths,
     jevAssist: document.getElementById('setting-jev-assist').checked,
     // File hosts (v4.5.0): only overwrite a stored secret when the user typed
