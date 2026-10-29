@@ -1,5 +1,65 @@
 # Changelog — modernization cycles
 
+## Uncommitted — recovery + identity cycle 6 (2026-10-29)
+
+- YouTube extraction restored by updating the managed `yt-dlp` binary from
+  2026.10.23 to **2026.10.26.220202** (`tools/fetch-yt-dlp.js`). Live
+  verification downloaded a 1080p MP4 with an audio track. Note: the update
+  replaced the per-user binary, so a running app must be restarted to pick it
+  up. `tools/fetch-yt-dlp.js --help` performs a default install/update rather
+  than printing help — do not use it to inspect options.
+- Downloads no longer lose their container extension. Added shared MIME →
+  extension and `ensureExtension()` helpers in `src/engine/probe.js`, applied
+  to `Content-Disposition` names, URL-derived names, approval-dialog names and
+  engine finalisation; the browser handover now forwards the page's MIME type.
+  RFC 6266 single-quoted `filename=` parses, `tar.gz`/`7z`/`docx` survive, and
+  a version path segment (`/releases/2.24`) is no longer mistaken for an
+  extension. Rendition-only names (`1080.mp4`) and bare-host names stay
+  generic so a real server name can still replace them.
+- Dark theme re-skinned to the **Qoder IDE dark palette**, taken from Qoder's
+  own compiled theme tokens (canvas `#080807`, container `#0E0E0E`, hover
+  `#22221F`, elevated `#1E1E1C`, borders `#292926`/`#3B3A35`, text
+  `#EEEEEB`/`#B4B4AC`/`#7B7B74`) with the brand green `#2ADB5C` read from
+  `qoderIdeLogo.svg`, plus Qoder's dark status ramp (`#8CCAA5`, `#FAAD14`,
+  `#FF6B70`, `#FA8125`, `#C3A0DF`). Every remaining hard-coded blue in
+  `ui/styles.css` and `ui/location-dialog.html` now reads a theme token
+  (`--accent-rgb`, `--success-rgb`, `--error-rgb`, `--warning-rgb`,
+  `--fresh-rgb`, `--on-accent`, `--on-danger`, `--progress-done-fill`), so
+  tints follow the active theme. The light theme keeps its own palette.
+- Solid accent buttons in dark now use near-black ink instead of white:
+  white on `#2ADB5C` measured 1.84:1, `#080807` measures 10.86:1.
+- Real-Chromium theme fixture `test/_theme-browser.js` passed 13/13 checks
+  with no page errors: every dark text/status colour clears WCAG AA 4.5:1 on
+  the canvas (muted 4.70:1 is the tightest), light theme unchanged. Evidence:
+  `evidence/p6-qoder-dark.png`, `evidence/p6-light-regression.png`.
+- `test/plexo-ui-wiring.js` no longer asserts a literal `#A78BFA`; it checks
+  that the net chip reads `--state-fresh` while the conn chip reads
+  `--state-info`, which is the distinction it meant to protect.
+- Full verification suite: **101/101 suites, 3191 checks, 0 failures**.
+
+## Uncommitted — engine upgrade cycle 5 (2026-10-29)
+
+- Added task/writer telemetry and a deterministic loopback benchmark.
+- Removed automatic TLS certificate bypasses from HTTP, probe, URL fetch, and
+  HTTPS proxy paths; certificate failures now fail closed.
+- Added persistent, credential-free server-performance profiles for mirror
+  selection and origin quarantine.
+- Added a weighted global scheduler with high/normal/low priority, aging,
+  per-task rate limits, capped-share redistribution, and queue selection.
+- Added Metalink v3/v4 expansion with mirror priority, size, whole-file
+  checksum, and piece-manifest intake.
+- Added piece-range verification with targeted re-download of only corrupt byte
+  ranges (up to two repair passes).
+- Added selective BitTorrent files, tracker/web-seed intake, upload cap, peer
+  and ratio telemetry, live selection API, and seed-policy API.
+- Added priority context actions, HIGH/CAP row chips, and a labelled Download
+  Options modal for per-task rate and torrent file/seed settings. Real Chromium
+  interaction passed 13 checks with no page errors; evidence is
+  `evidence/p5-http-options.png` and `evidence/p5-torrent-options.png`.
+- Deliberately did not add bounded write coalescing: benchmarks showed no
+  measured win while it would add crash-visibility risk.
+- Full verification suite: **100/100 suites green**.
+
 ## v5.8.0 (2026-10-28) — Cycle 3: market research → integration
 
 Deep research pass over the late-2026 download-manager market (IDM 6.43.1,

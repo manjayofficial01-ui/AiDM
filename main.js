@@ -11,6 +11,9 @@ const locationDialog = require('./src/location-dialog');
 const { Scheduler, parseSpeedRules, speedLimitAt, validateSchedule } = require('./src/scheduler');
 const cli = require('./src/cli');
 const { KeepAwake, countActiveTransfers } = require('./src/keep-awake');
+const { isAllowedSavePath } = require('./src/save-paths');
+const { publicSettings } = require('./src/settings-view');
+const { pairExtension } = require('./src/extension-pairing');
 const { exec } = require('child_process');
 
 let mainWindow;
@@ -20,6 +23,7 @@ let downloadManager;
 let clipboardMonitor;
 let ipcServer;
 let aiService;
+const approvedSaveFolders = new WeakMap();
 // Download scheduler (v4.3.0) + its active session, if any.
 let scheduler = null;
 let schedulerSession = null;
@@ -193,6 +197,53 @@ function syncAiConfig() {
   });
 }
 
+// Origins the user blocked this session. A denial is deliberately NOT
+// persisted: a mis-click must not lock the real extension out forever, and a
+// restart simply asks again.
+const deniedExtensionOrigins = new Set();
+
+/**
+ * Ask the user to allow a browser extension (AUD-012).
+ *
+ * The local API is reachable by every installed extension, so identity is
+ * proved by an explicit approval, not by the chrome-extension:// prefix. The
+ * server holds the requesting call during this dialog, so "Allow" completes
+ * the action the user just triggered.
+ */
+async function requestExtensionPairing(origin) {
+  const key = String(origin || '').trim().toLowerCase();
+  if (!key || deniedExtensionOrigins.has(key)) return false;
+  const opts = {
+    type: 'question',
+    buttons: ['Allow', 'Block'],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true,
+    title: 'Allow browser extension?',
+    message: 'A browser extension wants to control AiDM.',
+    detail: `${origin}\n\nAllow access only if this is the AiDM extension you installed. ` +
+      'Other extensions could otherwise read your download list and start downloads. ' +
+      'Blocking stops further prompts for this extension until AiDM restarts.',
+  };
+  let response = 1;
+  try {
+    // Parent only a VISIBLE window: a sheet attached to a hidden tray window
+    // would never be seen.
+    const parent = (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) ? mainWindow : null;
+    const result = parent ? await dialog.showMessageBox(parent, opts) : await dialog.showMessageBox(opts);
+    response = result.response;
+  } catch (e) { response = 1; }
+  if (response === 0) {
+    try {
+      const list = downloadManager.getSettings().trustedExtensionOrigins || [];
+      downloadManager.saveSettings({ trustedExtensionOrigins: pairExtension(list, origin) });
+      return true;
+    } catch (e) { return false; }
+  }
+  deniedExtensionOrigins.add(key);
+  return false;
+}
+
 function createWindow() {
   const iconPath = getAppIcon();
   mainWindow = new BrowserWindow({
@@ -207,7 +258,7 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
     },
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#080807',
     frame: false,
     titleBarStyle: 'hidden',
   });
@@ -225,7 +276,13 @@ function createWindow() {
     // Gate the Jev link-triage fallback on the settings toggle (live).
     jevAssist: () => downloadManager.getSettings().jevAssist !== false,
   });
-  ipcServer = new IPCServer(downloadManager);
+  ipcServer = new IPCServer(downloadManager, {
+    // AUD-012: only extension origins the user explicitly allowed may drive
+    // the local API. The allowlist is read live from settings so an approval
+    // takes effect without restarting the server.
+    pairedOrigins: () => downloadManager.getSettings().trustedExtensionOrigins || [],
+    onUnpairedExtension: (origin) => requestExtensionPairing(origin),
+  });
 
   // ── Download scheduler (v4.3.0, original implementation) ──────────────
   // Fires one-time/daily/weekly queue runs, enforces the timetabled speed
@@ -253,7 +310,7 @@ function createWindow() {
     'download-added', 'download-progress', 'download-complete',
     'download-error', 'download-paused', 'download-resumed',
     'download-removed', 'download-updated', 'download-ask-location', 'video-detected',
-    'download-hash',
+    'download-hash', 'persist-error', 'persist-recovered',
   ];
   events.forEach(event => {
     downloadManager.on(event, (data) => {
@@ -359,7 +416,7 @@ function onScheduleStart({ schedule }) {
       ? Number(schedule.speedLimitKBs) : NaN;
     if (Number.isFinite(overrideKBs) && overrideKBs >= 0) {
       speed = Math.round(overrideKBs * 1024);
-      try { downloadManager.engine.setSpeedLimit(speed); } catch (e) {}
+      try { downloadManager.engine.setSpeedLimit(speed); downloadManager.resyncScheduler(); } catch (e) {}
     }
     schedulerSession = {
       id: schedule.id,
@@ -383,7 +440,7 @@ function onScheduleStop({ schedule }) {
   if (!downloadManager) return;
   try {
     if (schedulerSession && schedulerSession.id === schedule.id) {
-      try { downloadManager.engine.setSpeedLimit(schedulerSession.prevSpeed || 0); } catch (e) {}
+      try { downloadManager.engine.setSpeedLimit(schedulerSession.prevSpeed || 0); downloadManager.resyncScheduler(); } catch (e) {}
       schedulerSession = null;
     }
     downloadManager.pauseQueue();
@@ -411,6 +468,7 @@ function maybeSchedulerComplete() {
   schedulerSession = null;
   refreshKeepAwake();
   try { downloadManager.engine.setSpeedLimit(sess.prevSpeed || 0); } catch (e) {}
+  downloadManager.resyncScheduler();
   applyTimetableSpeed();
   runCompletionAction(sess.onComplete, sess.name);
 }
@@ -493,6 +551,7 @@ function applyTimetableSpeed() {
     }
     if (downloadManager.engine.globalSpeedLimit !== desired) {
       downloadManager.engine.setSpeedLimit(desired);
+      downloadManager.resyncScheduler();
       notifyScheduler(source === 'adaptive'
         ? 'Network busy — download speed capped at 1 MB/s (app-aware)'
         : source === 'default'
@@ -540,7 +599,35 @@ function fileHostCredentials() {
   }
 }
 
+function assertAllowedSavePath(savePath, event) {
+  const settings = downloadManager ? downloadManager.getSettings() : null;
+  const approved = approvedSaveFolders.get(event.sender) || [];
+  if (!isAllowedSavePath(settings, savePath, approved)) {
+    throw new Error('savePath is outside the configured AiDM save folders. Use Browse to choose and approve a different folder.');
+  }
+}
+
+function assertAllowedImportPaths(items, event) {
+  if (!Array.isArray(items)) return;
+  for (const item of items) {
+    if (item && typeof item === 'object' && item.savePath != null) {
+      assertAllowedSavePath(item.savePath, event);
+    }
+  }
+}
+
+function assertAllowedSettingsPaths(settings, event) {
+  if (!settings || typeof settings !== 'object') throw new Error('settings must be an object');
+  if (Object.prototype.hasOwnProperty.call(settings, 'defaultSavePath')) {
+    assertAllowedSavePath(settings.defaultSavePath, event);
+  }
+  for (const folder of Object.values(settings.categoryPaths || {})) {
+    if (folder) assertAllowedSavePath(folder, event);
+  }
+}
+
 ipcMain.handle('add-download', async (event, opts) => {
+  if (opts && opts.savePath != null) assertAllowedSavePath(opts.savePath, event);
   // A page URL (e.g. a tweet) is not a file — adding it directly would
   // download HTML. The resolver layer turns it into normalised media variants
   // and the UI shows the normal quality picker instead. Provider support is
@@ -668,7 +755,20 @@ ipcMain.handle('remove-download', async (event, { id }) => {
   return downloadManager.removeDownload(id);
 });
 
+ipcMain.handle('set-download-priority', async (event, { id, priority }) => {
+  return downloadManager.setDownloadPriority(id, priority);
+});
+
+ipcMain.handle('set-download-speed-limit', async (event, { id, bytesPerSecond }) => {
+  return downloadManager.setDownloadSpeedLimit(id, bytesPerSecond);
+});
+
+ipcMain.handle('get-torrent-info', async (event, { id }) => downloadManager.getTorrentInfo(id));
+ipcMain.handle('set-torrent-selection', async (event, { id, selection }) => downloadManager.setTorrentSelection(id, selection));
+ipcMain.handle('set-torrent-seed-policy', async (event, { id, policy }) => downloadManager.setTorrentSeedPolicy(id, policy));
+
 ipcMain.handle('approve-download', async (event, { id, savePath, filename }) => {
+  assertAllowedSavePath(savePath, event);
   return downloadManager.approveDownload(id, savePath, filename);
 });
 
@@ -776,10 +876,16 @@ ipcMain.handle('request-location', async (event, { id }) => {
   return true;
 });
 
-ipcMain.handle('select-folder', async () => {
+ipcMain.handle('select-folder', async (event) => {
   // Owned by the topmost location dialog when one is open, otherwise by a
   // temporary topmost owner (created and destroyed inside pickFolder).
-  return locationDialog.pickFolder();
+  const selected = await locationDialog.pickFolder();
+  if (selected) {
+    const approved = approvedSaveFolders.get(event.sender) || new Set();
+    approved.add(selected);
+    approvedSaveFolders.set(event.sender, approved);
+  }
+  return selected;
 });
 
 /**
@@ -922,7 +1028,7 @@ ipcMain.handle('delete-file-from-disk', async (event, { filepath }) => {
 });
 
 ipcMain.handle('get-settings', async () => {
-  return downloadManager.getSettings();
+  return publicSettings(downloadManager.getSettings());
 });
 
 ipcMain.handle('get-network-interfaces', async () => {
@@ -938,6 +1044,7 @@ ipcMain.handle('get-network-interfaces', async () => {
 });
 
 ipcMain.handle('save-settings', async (event, settings) => {
+  assertAllowedSettingsPaths(settings, event);
   const saved = downloadManager.saveSettings(settings);
   syncAiConfig();
   // Keep the scheduler and the timetabled speed limit in sync with edits.
@@ -952,10 +1059,11 @@ ipcMain.handle('save-settings', async (event, settings) => {
     applyLoginItem(saved.launchAtStartup !== false);
   }
   if (tray && tray._rebuild) tray._rebuild();
-  return saved;
+  return publicSettings(saved);
 });
 
 ipcMain.handle('queue-download', async (event, opts) => {
+  if (opts && opts.savePath != null) assertAllowedSavePath(opts.savePath, event);
   return downloadManager.queueDownload(opts);
 });
 
@@ -1064,29 +1172,52 @@ ipcMain.handle('export-downloads', async () => {
 });
 
 ipcMain.handle('import-downloads', async (event, items) => {
+  assertAllowedImportPaths(items, event);
   return downloadManager.importDownloads(items);
 });
 
 ipcMain.handle('export-settings', async () => {
-  // Redacted: an exported settings file is a portable document — file-host
-  // passwords and the AI API key must never travel inside it.
-  const s = JSON.parse(JSON.stringify(downloadManager.getSettings()));
-  delete s.aiApiKey;
-  if (s.fileHosts && typeof s.fileHosts === 'object') {
-    for (const host of Object.keys(s.fileHosts)) {
-      if (s.fileHosts[host] && typeof s.fileHosts[host] === 'object') {
-        delete s.fileHosts[host].password;
-      }
-    }
-  }
-  return s;
+  return publicSettings(downloadManager.getSettings(), true);
 });
 
 ipcMain.handle('import-settings', async (event, settings) => {
-  if (!settings || typeof settings !== 'object') throw new Error('settings must be an object');
-  downloadManager.saveSettings(settings);
+  assertAllowedSettingsPaths(settings, event);
+  // Trust decisions are device-local (AUD-012): importing a settings file
+  // must never pre-approve an extension origin on this machine.
+  const payload = (settings && typeof settings === 'object' && !Array.isArray(settings))
+    ? { ...settings } : settings;
+  if (payload && typeof payload === 'object') delete payload.trustedExtensionOrigins;
+  downloadManager.saveSettings(payload);
   syncAiConfig();
-  return downloadManager.getSettings();
+  return publicSettings(downloadManager.getSettings());
+});
+
+// The renderer's extension indicator asks the main process instead of
+// fetching the local API itself. A file:// page sends `Origin: null`, which
+// the origin gate rightly refuses (AUD-012: `null` is forgeable by any
+// sandboxed page), so a direct fetch could only ever report "Degraded".
+ipcMain.handle('api-status', async () => {
+  const port = ipcServer && ipcServer.port;
+  if (!port) return { running: false };
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (value) => { if (!settled) { settled = true; resolve(value); } };
+    let req;
+    try {
+      req = require('http').get({ host: '127.0.0.1', port, path: '/api/status', timeout: 1500 }, (res) => {
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => { body += chunk; });
+        res.on('end', () => {
+          let parsed = null;
+          try { parsed = JSON.parse(body); } catch (e) { /* non-JSON → not running */ }
+          done({ running: res.statusCode === 200, status: res.statusCode, body: parsed });
+        });
+      });
+    } catch (e) { done({ running: false }); return; }
+    req.on('timeout', () => { try { req.destroy(); } catch (e) {} done({ running: false, timeout: true }); });
+    req.on('error', () => done({ running: false }));
+  });
 });
 
 ipcMain.handle('batch-urls', async (event, { urls }) => {
@@ -1251,9 +1382,15 @@ app.on('before-quit', () => {
   // Stop the app-aware bandwidth sampler — a live typeperf child must not
   // outlive the app (it would keep sampling to nowhere).
   try { downloadManager.bandwidthWatch.stop(); } catch (e) { /* not started */ }
+  // Persist any pending server-performance samples before sockets and timers
+  // are discarded, then release the pooled keep-alive connections.
+  try { downloadManager.engine.serverProfiles.close(); } catch (e) { /* not started */ }
   // Pooled keep-alive sockets hold the event loop open — release them so the
   // process exits promptly (engine connection reuse, see src/engine/agents.js).
   destroyAgents();
+  // Drop queued/retrying webhook deliveries (AUD-013) so no timer or socket
+  // outlives the app.
+  try { downloadManager.engine.webhooks.close(); } catch (e) { /* not started */ }
 });
 
 app.on('window-all-closed', () => {

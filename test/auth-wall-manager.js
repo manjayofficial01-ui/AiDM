@@ -20,17 +20,20 @@ function check(name, fn) {
   catch (e) { fail++; console.log('  FAIL', name, '—', e.message); }
 }
 
-// A minimal stand-in for `this` inside _enforceProbeGuards: it only touches
-// _persistDownloads / emit / _processQueue (observed in src/download-manager.js).
+// A minimal stand-in for `this` inside _enforceProbeGuards. It inherits the
+// real prototype (the guard delegates its terminal transition to _failRow)
+// and overrides only the side effects: persist / emit / queue.
 function fakeManager() {
-  return {
+  const mgr = Object.create(DownloadManager.prototype);
+  Object.assign(mgr, {
     persisted: 0,
     emits: [],
     processed: 0,
     _persistDownloads() { this.persisted++; },
     emit(ev, payload) { this.emits.push([ev, payload]); },
     _processQueue() { this.processed++; },
-  };
+  });
+  return mgr;
 }
 
 console.log('── 1. auth-wall probe fails the row and asks for a session ──');

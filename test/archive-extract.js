@@ -166,6 +166,61 @@ function writeZip(name, entries) {
   const dirB = await ae.uniqueDir(tmpRoot, 'x');
   check('uniqueDir increments', path.basename(dirB) === 'x (2)', dirB);
 
+  console.log('\n── bounded streaming (APP-010) ──');
+  // A real 16 MB entry must round-trip byte-exact through the streamed path.
+  {
+    const big = Buffer.alloc(16 * 1024 * 1024);
+    for (let i = 0; i < big.length; i += 4096) big[i] = i & 0xFF; // not all zeros
+    const p = writeZip('big.zip', [{ name: 'big.bin', data: big }]);
+    const res = await ae.extractZip(p);
+    const out = res.destDir ? fs.readFileSync(path.join(res.destDir, 'big.bin')) : Buffer.alloc(0);
+    check('16 MB deflated entry extracts byte-exact', res.ok && out.length === big.length && out.equals(big));
+  }
+  // A big STORED entry takes the no-inflater path.
+  {
+    const storedData = Buffer.alloc(4 * 1024 * 1024, 0x5A);
+    const p = writeZip('stored-big.zip', [{ name: 'plain.bin', data: storedData, method: 0 }]);
+    const res = await ae.extractZip(p);
+    const out = res.destDir ? fs.readFileSync(path.join(res.destDir, 'plain.bin')) : Buffer.alloc(0);
+    check('4 MB stored entry extracts byte-exact', res.ok && out.equals(storedData));
+  }
+  // Zip bomb: headers claim 1 KB, the stream actually inflates to 64 MB. The
+  // per-entry leak must stop it mid-stream and leave no partial file.
+  {
+    const bombData = Buffer.alloc(64 * 1024 * 1024, 0); // deflates to ~64 KB
+    const p = writeZip('bomb.zip', [{ name: 'bomb.bin', data: bombData, declaredSize: 1024 }]);
+    const before = process.memoryUsage().rss;
+    const res = await ae.extractZip(p, { maxEntryBytes: 1024 * 1024 });
+    const rssDelta = process.memoryUsage().rss - before;
+    const leaked = res.destDir ? fs.readdirSync(res.destDir) : [];
+    check('zip bomb is refused, not written',
+      !res.ok && res.skipped.some(s => s.reason === 'entry-size-cap'),
+      res.skipped.map(s => s.reason).join(','));
+    check('zip bomb leaves no partial file', leaked.length === 0, leaked.join(','));
+    check('zip bomb memory stays far below the real payload', rssDelta < 48 * 1024 * 1024,
+      `${(rssDelta / 1048576).toFixed(1)} MiB`);
+  }
+  // A cap that is hit exactly at a legit size still succeeds (>= vs >).
+  {
+    const exact = Buffer.alloc(1024 * 1024, 7);
+    const p = writeZip('exact.zip', [{ name: 'exact.bin', data: exact }]);
+    const res = await ae.extractZip(p, { maxEntryBytes: exact.length });
+    check('entry exactly at the cap extracts', res.ok && res.extracted.length === 1);
+  }
+  // EEXIST safety: an existing file is never deleted by the stream cleanup.
+  {
+    const existing = tmpPath('existing.bin');
+    fs.writeFileSync(existing, 'PRE-EXISTING');
+    const fh = await fs.promises.open(existing, 'r');
+    const verdict = await ae._streamEntryToFile(fh, 0, {
+      name: 'existing.bin', method: 0, compressedSize: 3,
+      uncompressedSize: 3, crc32: ae.crc32(Buffer.from('abc')),
+    }, existing, { overwrite: false, maxEntryBytes: 1024 });
+    await fh.close();
+    check('collision reports already-exists', verdict.ok === false && verdict.reason === 'already-exists', verdict.reason);
+    check('collision keeps the existing file', fs.readFileSync(existing, 'utf8') === 'PRE-EXISTING');
+  }
+
   console.log('\n── empty / degenerate archives ──');
   const emptyZip = tmpPath('empty.zip');
   const eocdOnly = Buffer.alloc(22);

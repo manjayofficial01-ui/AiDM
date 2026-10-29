@@ -14,6 +14,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   const mediaCount = document.getElementById('media-count');
   const scanStatus = document.getElementById('scan-status');
 
+  // Footer version — always the LIVE manifest version, never a hardcoded
+  // string (the old footer said v5.0.0 for eight releases). The manifest
+  // itself is synced to the app version by tools/sync-extension-version.js
+  // on every build, so this tracks the main application automatically.
+  const footerVersion = document.getElementById('footer-version');
+  if (footerVersion) {
+    try { footerVersion.textContent = chrome.runtime.getManifest().version; }
+    catch (e) { /* manifest unreadable — leave blank rather than lie */ }
+  }
+
   // ── Check Connection ─────────────────────────────────────────────────────────
 
   chrome.runtime.sendMessage({ action: 'check-connection' }, (response) => {
@@ -559,7 +569,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Extensionless CDN/videoplayback hashes and rendition-only labels
       // ("1080.mp4") are not real names — fall back to the video title +
       // quality so rows are distinguishable.
-      if (base && /\.[A-Za-z0-9]{2,4}$/.test(base) && !isGenericNameInline(base, item.url)) return base;
+      if (base && /\.[A-Za-z0-9]*[A-Za-z][A-Za-z0-9]{0,7}$/i.test(base) && !isGenericNameInline(base, item.url)) return base;
     } catch (e) {}
     const q = (item.quality && item.quality !== 'unknown') ? ` [${item.quality}]` : '';
     // Per-video title first, then the page title — but only when REAL. A bare
@@ -708,7 +718,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             btn.textContent = resp.duplicate ? '✓ In AiDM' : '✓ Sent';
             btn.classList.add('sent');
           } else {
-            btn.textContent = '✗ Failed';
+            // "AiDM offline" (app not running / restarting) is actionable;
+            // a bare "Failed" is not.
+            btn.textContent = (resp && resp.offline) ? 'AiDM offline' : '✗ Failed';
             btn.disabled = false;
           }
         });

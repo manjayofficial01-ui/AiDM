@@ -112,7 +112,7 @@ function specificUrlBasename(u) {
   try {
     const parts = new URL(String(u || '')).pathname.split('/').filter(Boolean);
     const base = decodeURIComponent(parts.pop() || '');
-    if (!base || !/\.[A-Za-z0-9]{2,4}$/.test(base)) return null;
+    if (!base || !/\.[A-Za-z0-9]*[A-Za-z][A-Za-z0-9]{0,7}$/i.test(base)) return null;
     if (isGenericFilename(base, u)) return null;
     return base;
   } catch {

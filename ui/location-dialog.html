@@ -25,7 +25,7 @@
   .ld-titlebar::after {
     content: '';
     position: absolute; left: 0; right: 0; bottom: 0; height: 1px;
-    background: linear-gradient(90deg, transparent, rgba(59, 130, 246, .45), transparent);
+    background: linear-gradient(90deg, transparent, rgba(var(--accent-rgb), .45), transparent);
   }
   .ld-titlebar h1 {
     font-size: 13px; font-weight: 650; letter-spacing: .2px;
@@ -33,7 +33,7 @@
   }
   .ld-close {
     -webkit-app-region: no-drag; width: 28px; height: 24px;
-    background: transparent; border: none; color: #D7E2F2;
+    background: transparent; border: none; color: rgba(255, 255, 255, .86);
     cursor: pointer; border-radius: 6px;
     display: flex; align-items: center; justify-content: center;
   }
@@ -60,7 +60,7 @@
   .ld-cat {
     display: inline-block; font-size: 11px; font-weight: 650;
     color: var(--accent-soft); background: var(--row-selected);
-    border: 1px solid rgba(59, 130, 246, .3);
+    border: 1px solid rgba(var(--accent-rgb), .3);
     border-radius: 999px;
     padding: 3px 10px; margin-bottom: 12px;
   }

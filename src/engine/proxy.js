@@ -85,10 +85,6 @@ function connectToProxyServer(proxy, timeoutMs = CONNECT_TIMEOUT_MS) {
         host: proxy.host,
         port: proxy.port,
         servername: proxy.host,
-        // Proxy endpoints are frequently served with a corporate CA cert;
-        // strict validation here would make such proxies unusable, and the
-        // tunneled payload is still TLS-validated end-to-end by the engine.
-        rejectUnauthorized: false,
       });
       socket.once('secureConnect', () => done(resolve, socket));
     } else {

@@ -214,6 +214,75 @@ async function fallbackTests() {
     await withProbeError('missing', () => yt.resolveYouTubeVideos(CANON)).then(() => false, () => true));
 }
 
+// ── 4b. Stale captured session → anonymous retry ────────────────────────────
+// The extension forwards the browser's YouTube session into the probe. When
+// that session goes stale, YouTube answers PUBLIC videos with errors that
+// classify as non-retryable (outdated / bot-check / private …) — the picker
+// used to die on videos anyone can watch. These tests lock the retry: probe
+// once with the session, and when the failure is one a bad session can cause,
+// probe once WITHOUT it; a genuinely inaccessible video still errors.
+
+async function sessionRetryTests() {
+  const realProbe = ytdlp.probe;
+  const calls = [];
+  try {
+    // Stale session: every probe that carries cookies fails "outdated", the
+    // session-less one succeeds — the verified live signature.
+    ytdlp.probe = async (url, opts) => {
+      calls.push(opts);
+      if (opts.cookies) throw Object.assign(new Error('probe refused'), { code: 'outdated' });
+      return INFO;
+    };
+    const r = await yt.resolveYouTubeVideos(CANON, { cookies: 'SID=stale' });
+    eq('stale session → second probe runs without it', calls.length, 2);
+    eq('retry drops the session cookies', calls[1].cookies, null);
+    check('retry still lists the real formats', (r.pickerVideos || []).length > 1);
+    eq('payload flags the session as rejected', r.sessionRejected, true);
+
+    // bot-check used to mean "give up, offer the fallback row"; when the
+    // session is the culprit the retry recovers the REAL listing.
+    calls.length = 0;
+    ytdlp.probe = async (url, opts) => {
+      calls.push(opts);
+      if (opts.cookies) throw Object.assign(new Error('bot refused'), { code: 'bot-check' });
+      return INFO;
+    };
+    const b = await yt.resolveYouTubeVideos(CANON, { cookies: 'SID=stale' });
+    check('bot-check with a session upgrades to a real listing (not the fallback)',
+      (b.pickerVideos || []).length > 1);
+    eq('bot-check retry probed exactly twice', calls.length, 2);
+
+    // A genuinely inaccessible video: the retry fails too — the honest error
+    // survives, and there is never a second retry.
+    calls.length = 0;
+    ytdlp.probe = async (url, opts) => {
+      calls.push(opts);
+      throw Object.assign(new Error('probe refused'), { code: opts.cookies ? 'outdated' : 'private' });
+    };
+    const err = await yt.resolveYouTubeVideos(CANON, { cookies: 'SID=stale' }).then(() => null, e => e);
+    check('genuinely private video still errors after the retry',
+      !!err && err.code === 'private', err && err.code);
+    eq('exactly one retry — never a loop', calls.length, 2);
+
+    // No session in the options: an "outdated" failure is the REAL engine
+    // being stale — no retry, straight error (do not mask updater guidance).
+    calls.length = 0;
+    ytdlp.probe = async (url, opts) => {
+      calls.push(opts);
+      throw Object.assign(new Error('player changed'), { code: 'outdated' });
+    };
+    const err2 = await yt.resolveYouTubeVideos(CANON).then(() => null, e => e);
+    check('without a session "outdated" stays an honest error (no retry)',
+      !!err2 && err2.code === 'outdated');
+    eq('no session → no retry probes', calls.length, 1);
+  } finally {
+    ytdlp.probe = realProbe;
+  }
+  check('SESSION_SUSPECT_CODES covers the session-induced classes',
+    ['bot-check', 'signin', 'private', 'age', 'members', 'forbidden', 'outdated']
+      .every(c => ytdlp.SESSION_SUSPECT_CODES.has(c)));
+}
+
 console.log('\nPicker payload');
 const picker = yt.toPickerVideos(INFO, { canonicalUrl: CANON, id: 'dQw4w9WgXcQ', title: INFO.title });
 eq('one row per choice (incl. both audio picks)', picker.length, 5);
@@ -511,6 +580,47 @@ try {
   eq('failed job releases its slot', ctx7._ytActive, 0);
   eq('failed job is reported', row7.status, 'error');
 
+  // 9d2b. A stale captured session fails the job — the session-less retry
+  // succeeds. Same failure class the picker probe hits (see 4b above).
+  ytdlp.detectRunner = async () => ({ argv: ['stub'], source: 'stub', version: 'stub' });
+  const dlCalls = [];
+  ytdlp.download = async (o) => {
+    dlCalls.push({ cookies: o.cookies, cookiesFromBrowser: o.cookiesFromBrowser, cookieFile: o.cookieFile });
+    if (o.cookies) throw Object.assign(new Error("Sign in to confirm you're not a bot"), { code: 'bot-check' });
+    fs.writeFileSync(o.outputTemplate.replace('%(ext)s', 'mp4') + '.mp4', Buffer.alloc(2048, 'v'));
+    return { ok: true, sawProgress: true };
+  };
+  const row7b = stubRow(HANDOFF_TMP, { cookies: 'SID=stale' });
+  const ctx7b = stubContext(row7b);
+  await DownloadManager.prototype._startYoutubeDownload.call(ctx7b, row7b);
+  eq('stale session → download retried without it', dlCalls.length, 2);
+  eq('retry carries no cookies', dlCalls[1].cookies, null);
+  eq('retry carries no browser-cookie setting', dlCalls[1].cookiesFromBrowser, null);
+  eq('retry carries no cookies.txt fallback', dlCalls[1].cookieFile, null);
+  eq('stale-session row still completes', row7b.status, 'completed');
+
+  // 9d2c. Without session material a session-suspect failure is NOT retried:
+  // "outdated" then really means the engine is stale — say so, once.
+  dlCalls.length = 0;
+  ytdlp.download = async (o) => { dlCalls.push(o); const e = new Error('player changed'); e.code = 'outdated'; throw e; };
+  const row7c = stubRow(HANDOFF_TMP);
+  const ctx7c = stubContext(row7c);
+  await DownloadManager.prototype._startYoutubeDownload.call(ctx7c, row7c);
+  eq('no session → no retry attempt', dlCalls.length, 1);
+  eq('row reports the real cause', row7c.ytErrorCode, 'outdated');
+
+  // 9d2d. Genuinely stale engine WITH a session: the retry runs once and the
+  // honest error survives it.
+  dlCalls.length = 0;
+  ytdlp.download = async (o) => { dlCalls.push(o); const e = new Error('player changed'); e.code = 'outdated'; throw e; };
+  const row7d = stubRow(HANDOFF_TMP, { cookies: 'SID=x' });
+  const ctx7d = stubContext(row7d);
+  await DownloadManager.prototype._startYoutubeDownload.call(ctx7d, row7d);
+  eq('session-suspect failure retries exactly once', dlCalls.length, 2);
+  eq('genuinely stale engine → row errors', row7d.status, 'error');
+  eq('error code stays honest after the retry', row7d.ytErrorCode, 'outdated');
+  eq('failed retry still releases its slot', ctx7d._ytActive, 0);
+
   // 9d3. Speed limit reaches yt-dlp (the scheduler must apply here too)
   let seenRate = null;
   ytdlp.download = async (o) => { seenRate = o.limitRate; return { ok: true }; };
@@ -634,6 +744,7 @@ try {
 
 (async () => {
   await fallbackTests();
+  await sessionRetryTests();
   await handoffTests();
 
   const runner = await ytdlp.detectRunner();

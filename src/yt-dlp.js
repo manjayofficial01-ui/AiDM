@@ -165,11 +165,11 @@ function quarantinedRemnantName(dirs) {
 }
 
 /** Actionable, non-fatal guidance shown when the engine is not installed. */
-function ytdlpMissingMessage() {
+function ytdlpMissingMessage(dirs) {
   const dir = IS_WIN
     ? (process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'AiDM', 'bin') : '%LOCALAPPDATA%\\AiDM\\bin')
     : '~/.local/share/aidm/bin';
-  const remnant = quarantinedRemnantName();
+  const remnant = quarantinedRemnantName(dirs);
   const quarantineHint = remnant
     ? ' NOTE: a renamed copy (' + remnant + ') was found next to the expected ' +
       'location — your antivirus/security suite (e.g. IObit) has QUARANTINED ' +
@@ -357,6 +357,26 @@ function classifyError(raw) {
 }
 
 /**
+ * Error codes where the CAPTURED SESSION itself is the plausible culprit.
+ *
+ * The browser extension forwards the browser's YouTube cookies into the probe
+ * and the download. When that session goes stale (logout, password change,
+ * consent re-prompt, server-side invalidation), YouTube answers requests that
+ * carry it with errors that classify exactly like a broken engine or an
+ * inaccessible video — while the SAME video lists fine without any session
+ * (verified live: the cookie-less probe of the same URL returns every format).
+ * Without this distinction a stale session reads as "update yt-dlp" /
+ * "age-restricted" and the picker dies on videos anyone can watch.
+ *
+ * Deliberately broad: a genuinely session-dependent video (private, age,
+ * members) fails the session-less retry with the SAME code, so the retry only
+ * ever costs one extra extraction and never changes the honest answer.
+ */
+const SESSION_SUSPECT_CODES = new Set([
+  'bot-check', 'signin', 'private', 'age', 'members', 'forbidden', 'outdated',
+]);
+
+/**
  * Write a short, REDACTED diagnostic log for a failed job.
  *
  * The generic message shown in the UI is deliberately short, which makes a
@@ -385,6 +405,69 @@ function writeDiagnosticLog(logPath, { code, url, formatSpec, runner, tail }) {
     ].join('\n');
     require('fs').writeFileSync(logPath, body, 'utf8');
     return logPath;
+  } catch (e) {
+    return null;
+  }
+}
+
+// ── Resolve-failure diagnostics ──────────────────────────────────────────────
+// Probe-stage failures (the quality PICKER) used to vanish without a trace:
+// only the download stage wrote a diagnostic log, so a failed resolve left
+// the user with "Failed" or an empty picker and nothing on disk — the
+// literal "again not able to download, and nobody knows why" loop. Every
+// resolver failure now lands next to the download logs: same folder, same
+// redaction, bounded retention (newest 20, nothing older than a day).
+
+function resolveLogDir() {
+  const base = process.platform === 'win32'
+    ? (process.env.LOCALAPPDATA || path.join(process.env.USERPROFILE || '.', 'AppData', 'Local'))
+    : (process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share'));
+  return path.join(base, process.platform === 'win32' ? 'AiDM' : 'aidm', 'logs');
+}
+
+/**
+ * Persist a redacted diagnostic log for a failed resolveMedia call.
+ * Never throws — logging must not mask the original error.
+ * @param {Error} err the thrown resolver error (uses .code/.raw/.message)
+ * @param {string} url the page URL that was being resolved
+ * @returns {string|null} the log path, or null
+ */
+function logResolveFailure(err, url) {
+  try {
+    const e = err || {};
+    const dir = resolveLogDir();
+    fs.mkdirSync(dir, { recursive: true });
+    let id = '';
+    try { id = String(new URL(String(url)).searchParams.get('v') || ''); } catch (e2) { /* not a watch url */ }
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const p = path.join(dir, 'resolve-' + (id ? id + '-' : '') + stamp + '.log');
+    const written = writeDiagnosticLog(p, {
+      code: e.code || 'extract',
+      url,
+      formatSpec: '-',
+      runner: 'resolver',
+      tail: (e.raw ? String(e.raw) + '\n' : '') + String((e && e.message) || e),
+    });
+    // Prune AFTER the write so the cap counts the log this call just made
+    // (newest 20 survive, nothing older than a day).
+    try {
+      const now = Date.now();
+      fs.readdirSync(dir)
+        .filter((n) => /^resolve-.*\.log$/i.test(n))
+        .map((n) => {
+          const p2 = path.join(dir, n);
+          let t = 0;
+          try { t = fs.statSync(p2).mtimeMs; } catch (e3) { /* gone */ }
+          return { p: p2, t };
+        })
+        .sort((a, b) => b.t - a.t)
+        .forEach((f, i) => {
+          if (i >= 20 || (f.t && now - f.t > 24 * 3600 * 1000)) {
+            try { fs.unlinkSync(f.p); } catch (e3) { /* gone */ }
+          }
+        });
+    } catch (e2) { /* best effort */ }
+    return written;
   } catch (e) {
     return null;
   }
@@ -1145,8 +1228,11 @@ module.exports = {
   quarantinedRemnantName,
   redact,
   classifyError,
+  SESSION_SUSPECT_CODES,
   parseProgressLine,
   writeDiagnosticLog,
+  logResolveFailure,
+  resolveLogDir,
   probe,
   download,
   killTree,

@@ -1,0 +1,162 @@
+{
+  "version": 1,
+  "generatedAt": "2026-10-29T09:33:28.926Z",
+  "fixture": {
+    "transport": "loopback-http1",
+    "payloadBytes": 2097152,
+    "requests": 6,
+    "rangeRequests": 6,
+    "bytesSent": 6291458,
+    "peakActive": 1,
+    "perPath": {
+      "/file.bin": {
+        "requests": 3,
+        "bytesSent": 3145729
+      },
+      "/slow.bin": {
+        "requests": 2,
+        "bytesSent": 2097153
+      },
+      "/fast.bin": {
+        "requests": 1,
+        "bytesSent": 1048576
+      }
+    }
+  },
+  "scenarios": [
+    {
+      "name": "ranged",
+      "state": "completed",
+      "bytes": 2097152,
+      "wallMs": 43,
+      "throughputMbps": 390.168,
+      "telemetry": {
+        "state": "completed",
+        "bytes": 2097152,
+        "totalBytes": 2097152,
+        "elapsedMs": 43,
+        "timeToFirstByteMs": 34,
+        "tail5Ms": 4,
+        "tail1Ms": 3,
+        "connectionLaunches": 2,
+        "peakConnections": 2,
+        "targetConnections": 2,
+        "retries": 0,
+        "slowDrops": 0,
+        "backoffs": 0,
+        "rampExpands": 0,
+        "rampCollapses": 0,
+        "rampShrinks": 0,
+        "restarts": 0,
+        "pieceRepairs": 0,
+        "badPieceCount": 0,
+        "mirrors": [
+          {
+            "host": "127.0.0.1:50598",
+            "active": 0,
+            "failures": 0,
+            "banned": false,
+            "tested": true,
+            "speed": 101997847.27272728
+          }
+        ],
+        "writer": {
+          "writeCalls": 18,
+          "writeOperations": 18,
+          "bytesWritten": 2097152,
+          "maxWriteBytes": 131072,
+          "syncCalls": 1,
+          "syncTotalMs": 2.333500000000001,
+          "syncMaxMs": 2.333500000000001
+        }
+      },
+      "progress": [
+        {
+          "at": 1793266408890,
+          "downloadedBytes": 0,
+          "speed": 0,
+          "connections": 0,
+          "targetConnections": 2
+        },
+        {
+          "at": 1793266408905,
+          "downloadedBytes": 2097152,
+          "speed": 8388608,
+          "connections": 0,
+          "targetConnections": 2
+        }
+      ]
+    },
+    {
+      "name": "mirrors",
+      "state": "completed",
+      "bytes": 2097152,
+      "wallMs": 15,
+      "throughputMbps": 1118.481,
+      "telemetry": {
+        "state": "completed",
+        "bytes": 2097152,
+        "totalBytes": 2097152,
+        "elapsedMs": 15,
+        "timeToFirstByteMs": 7,
+        "tail5Ms": 3,
+        "tail1Ms": 3,
+        "connectionLaunches": 2,
+        "peakConnections": 2,
+        "targetConnections": 2,
+        "retries": 0,
+        "slowDrops": 0,
+        "backoffs": 0,
+        "rampExpands": 0,
+        "rampCollapses": 0,
+        "rampShrinks": 0,
+        "restarts": 0,
+        "pieceRepairs": 0,
+        "badPieceCount": 0,
+        "mirrors": [
+          {
+            "host": "127.0.0.1:50598",
+            "active": 0,
+            "failures": 0,
+            "banned": false,
+            "tested": true,
+            "speed": 104857600
+          },
+          {
+            "host": "127.0.0.1:50598",
+            "active": 0,
+            "failures": 0,
+            "banned": false,
+            "tested": true,
+            "speed": 104857600
+          }
+        ],
+        "writer": {
+          "writeCalls": 18,
+          "writeOperations": 18,
+          "bytesWritten": 2097152,
+          "maxWriteBytes": 131072,
+          "syncCalls": 1,
+          "syncTotalMs": 1.8712000000000018,
+          "syncMaxMs": 1.8712000000000018
+        }
+      },
+      "progress": [
+        {
+          "at": 1793266408911,
+          "downloadedBytes": 0,
+          "speed": 0,
+          "connections": 0,
+          "targetConnections": 2
+        },
+        {
+          "at": 1793266408924,
+          "downloadedBytes": 2097152,
+          "speed": 8388608,
+          "connections": 0,
+          "targetConnections": 2
+        }
+      ]
+    }
+  ]
+}

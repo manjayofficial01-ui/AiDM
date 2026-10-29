@@ -10,14 +10,29 @@ const { EventEmitter } = require('events');
 const { agentFor, destroyAgents, setProxyUrl } = require('./engine/agents');
 const { HostGate } = require('./engine/host-gate');
 const { DomainConnCaps } = require('./engine/ramp-controller');
+const { ServerProfileStore } = require('./engine/server-profiles');
 const { WebhookManager } = require('./webhooks');
 const { isRetryableStatus } = require('./engine/errors');
 const { makeH2AwareFetch } = require('./engine/http2-fetch');
+const {
+  filenameFromContentDisposition,
+  extFromMime,
+} = require('./engine/probe');
 const { isSameRegistrableDomain } = require('./url-hygiene');
 
 /** Unref'd sleep — a probe backoff must never keep the Electron loop alive. */
 function sleep(ms) {
   return new Promise((r) => { const t = setTimeout(r, ms); t.unref?.(); });
+}
+
+function writeJsonAtomically(filePath, data) {
+  const tmp = `${filePath}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(data));
+    fs.renameSync(tmp, filePath);
+  } finally {
+    try { fs.rmSync(tmp, { force: true }); } catch (_) { /* already renamed */ }
+  }
 }
 
 const {
@@ -136,7 +151,9 @@ function abortErrorFor(signal) {
 
 /**
  * Fetch-compatible wrapper around Node http/https that preserves the robust
- * transport the old engine had: DoH DNS fallback and insecure-TLS retry.
+ * transport the old engine had: DoH DNS fallback. TLS certificate validation
+ * is always enabled; a certificate error is a terminal transport failure, never
+ * a reason to silently open an unauthenticated connection.
  * Node's built-in `fetch` (undici) uses its own TLS stack and DNS, so sites
  * that worked with http.request silently started failing after the V4 rewrite.
  *
@@ -165,7 +182,7 @@ function robustFetch(url, init = {}) {
     // it back on the next one — a plain client drops it and gets refused.
     const jar = (init._jar && typeof init._jar.cookies === 'string') ? init._jar : { cookies: '' };
 
-    const doRequest = (insecure, attempt = 0) => {
+    const doRequest = (attempt = 0) => {
       const client = parsed.protocol === 'https:' ? https : http;
       /** @type {ReadableStreamDefaultController | null} */
       let bodyCtl = null;
@@ -189,9 +206,8 @@ function robustFetch(url, init = {}) {
         path: parsed.pathname + parsed.search,
         headers: jarHeader(jar, headers),
         timeout: Number.isFinite(init.timeoutMs) && init.timeoutMs > 0 ? init.timeoutMs : 30000,
-        rejectUnauthorized: !insecure,
         lookup: dohFallbackLookup,
-        agent: agentFor(parsed, { insecure }),
+        agent: agentFor(parsed),
         // Source-address binding for "Combine networks" (spread connections
         // across physical NICs). Left undefined on the default route; the
         // pooled Agent keys sockets by source address, so each interface keeps
@@ -279,12 +295,8 @@ function robustFetch(url, init = {}) {
       });
 
       req.on('error', (err) => {
-        if (!insecure && isTlsError(err)) {
-          doRequest(true, attempt);
-          return;
-        }
         if (!responded && attempt === 0 && isTransientNetError(err)) {
-          doRequest(insecure, attempt + 1);
+          doRequest(attempt + 1);
           return;
         }
         if (responded) { failStream(err); return; }
@@ -311,7 +323,7 @@ function robustFetch(url, init = {}) {
       req.end();
     };
 
-    doRequest(false);
+    doRequest();
   });
 }
 
@@ -391,55 +403,6 @@ function parseHlsMediaSequence(text) {
   return m ? parseInt(m[1], 10) : 0;
 }
 
-/**
- * Pull the server's own file name out of a `Content-Disposition` header.
- */
-function filenameFromContentDisposition(cd) {
-  if (!cd) return null;
-  const star = /filename\*\s*=\s*[^']*'[^']*'([^;]+)/i.exec(cd);
-  if (star && star[1]) {
-    try {
-      const n = decodeURIComponent(star[1].trim());
-      if (n) return n;
-    } catch (e) { /* fall through to plain filename */ }
-  }
-  const quoted = /filename\s*=\s*"([^"]*)"/i.exec(cd);
-  if (quoted && quoted[1].trim()) return quoted[1].trim();
-  const bare = /filename\s*=\s*([^;]+)/i.exec(cd);
-  if (bare && bare[1].trim()) return bare[1].trim();
-  return null;
-}
-
-/** Map common MIME types to an extension. */
-const MIME_EXTENSIONS = {
-  'video/mp4': 'mp4',
-  'video/webm': 'webm',
-  'video/x-matroska': 'mkv',
-  'video/quicktime': 'mov',
-  'video/x-msvideo': 'avi',
-  'video/mp2t': 'ts',
-  'audio/mpeg': 'mp3',
-  'audio/mp4': 'm4a',
-  'audio/ogg': 'ogg',
-  'audio/wav': 'wav',
-  'audio/flac': 'flac',
-  'audio/webm': 'weba',
-  'application/zip': 'zip',
-  'application/x-zip-compressed': 'zip',
-  'application/x-rar-compressed': 'rar',
-  'application/x-7z-compressed': '7z',
-  'application/x-tar': 'tar',
-  'application/gzip': 'gz',
-  'application/pdf': 'pdf',
-  'application/octet-stream': '',
-};
-
-function extFromMime(ct) {
-  if (!ct) return null;
-  const clean = ct.split(';')[0].trim().toLowerCase();
-  return MIME_EXTENSIONS[clean] || null;
-}
-
 const CHROME_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
 // Facebook's CDN rate-limits downloads that carry a browser User-Agent (see
 // yt-dlp's facebook extractor, which pins this UA for the same reason). An
@@ -489,13 +452,6 @@ class HttpError extends Error {
   }
 }
 
-function isTlsError(err) {
-  const code = (err && err.code) || '';
-  const msg = (err && err.message) || '';
-  return /SELF_SIGNED|CERT_|DEPTH_ZERO_SELF_SIGNED|UNABLE_TO_VERIFY_LEAF_SIGNATURE|ERR_TLS_CERT_ALTNAME_INVALID/i.test(code) ||
-         /certificate|ssl|tls/i.test(msg);
-}
-
 function hlsFetchError(what, err) {
   if (err instanceof HttpError) {
     if (err.status === 403 || err.status === 401) {
@@ -540,6 +496,10 @@ class DownloadEngine extends EventEmitter {
     // a host that sustained N connections without a collapse starts future
     // tasks there; a host that punished extra connections is rolled back.
     this.domainConnCaps = this._loadConnCaps();
+    // Cross-download aria2-style feedback: origin throughput, confidence, and
+    // failure quarantine. Keys are only schemes/hosts/ports, never paths or
+    // credentials.
+    this.serverProfiles = this._loadServerProfiles();
     // Task-event webhooks (FluxDown-style feature). Best-effort; never blocks
     // the download it observes.
     this.webhooks = this._loadWebhooks();
@@ -626,6 +586,38 @@ class DownloadEngine extends EventEmitter {
     });
   }
 
+  _serverProfilesPath() {
+    try {
+      const os = require('os');
+      return path.join(os.homedir(), '.aidm_server_profiles.json');
+    } catch (_) {
+      return null;
+    }
+  }
+
+  _loadServerProfiles() {
+    const p = this._serverProfilesPath();
+    let seed = null;
+    if (p) {
+      try {
+        seed = JSON.parse(fs.readFileSync(p, 'utf8'));
+      } catch (_) {
+        /* missing/corrupt -> start fresh */
+      }
+    }
+    const store = new ServerProfileStore({
+      persist: (json) => {
+        if (!p) return;
+        try {
+          writeJsonAtomically(p, json);
+        } catch (_) {
+          /* best-effort */
+        }
+      },
+    });
+    return store.load(seed);
+  }
+
   /**
    * Route all pooled engine traffic through a proxy ('' = direct).
    * @param {string} rawUrl http/https/socks5/socks5h, optional user:pass.
@@ -667,6 +659,14 @@ class DownloadEngine extends EventEmitter {
     this.coordinator.setGlobalSpeedLimit(this.globalSpeedLimit);
   }
 
+  /** Apply the scheduler's share to one live task without touching other tasks. */
+  setTaskSpeedLimit(id, bytesPerSecond) {
+    const task = this.activeTasks.get(id);
+    if (!task) return false;
+    task.setSpeedLimit(bytesPerSecond);
+    return true;
+  }
+
   /** Parallel segment fetches used by the HLS downloader (1-16). */
   setHlsConcurrency(n) {
     this.hlsConcurrency = Math.max(1, Math.min(parseInt(n, 10) || 6, 16));
@@ -706,6 +706,9 @@ class DownloadEngine extends EventEmitter {
     // the final file from the response's Content-Disposition (see task.js
     // finalize()).
     nameLocked = false,
+    speedLimit = 0,
+    pieces = null,
+    pieceRepair = true,
   }) {
     // 1. Handle data: URLs directly
     if (typeof url === 'string' && url.startsWith('data:')) {
@@ -757,14 +760,16 @@ class DownloadEngine extends EventEmitter {
       skipProbe: skipProbe === true,
       nameLocked: nameLocked === true,
       resumable: resumable === false || resumeable === false ? false : true,
-      // NOTE: no speedLimit here — the global bucket is injected via deps
-      // below. Passing this.globalSpeedLimit as the per-task rate too made
-      // BOTH buckets charge every chunk, halving the effective limit.
+      // Only the caller/scheduler supplies a per-task rate. Passing the global
+      // rate here would charge the same bytes to both buckets and halve it.
+      speedLimit: Math.max(0, Math.floor(Number(speedLimit) || 0)),
+      pieces: pieces || null,
+      pieceRepair: pieceRepair !== false,
       checksum: checksum || undefined,
       resumeOffsets: resumeOffsets || null,
       resumeSegments: Array.isArray(resumeSegments) ? resumeSegments : null,
-      // Use the robust http/https transport (DoH fallback + insecure-TLS retry)
-      // instead of Node's built-in fetch, which uses undici's stricter TLS/DNS.
+      // Use the robust http/https transport (DoH fallback + strict TLS) instead
+      // of Node's built-in fetch, which uses undici's stricter DNS behavior.
       // When the HTTP/2 setting is on, ranged streams ride one multiplexed h2
       // session per origin (falling back to HTTP/1.1 when ALPN refuses h2).
       fetch: this.engineHttp2 ? makeH2AwareFetch(robustFetch) : robustFetch,
@@ -774,6 +779,7 @@ class DownloadEngine extends EventEmitter {
       globalLimiter: this.globalLimiter,
       hostGate: this.hostGate,
       domainConnCaps: this.domainConnCaps,
+      serverProfiles: this.serverProfiles,
     });
     this.activeTasks.set(id, task);
 
@@ -1045,7 +1051,7 @@ class DownloadEngine extends EventEmitter {
     } catch (e) {}
   }
 
-  _openRequest(url, { method = 'HEAD', headers = {}, timeout = 15000, insecure = false } = {}) {
+  _openRequest(url, { method = 'HEAD', headers = {}, timeout = 15000 } = {}) {
     return new Promise((resolve, reject) => {
       let parsed;
       try {
@@ -1064,9 +1070,8 @@ class DownloadEngine extends EventEmitter {
         path: parsed.pathname + parsed.search,
         headers: buildRequestHeaders(url, headers),
         timeout,
-        rejectUnauthorized: !insecure,
         lookup: dohFallbackLookup,
-        agent: agentFor(parsed, { insecure }),
+        agent: agentFor(parsed),
       }, (res) => {
         resolve({
           status: res.statusCode,
@@ -1115,14 +1120,7 @@ class DownloadEngine extends EventEmitter {
   }
 
   async _openRequestAuto(url, opts = {}) {
-    try {
-      return await this._openRequest(url, opts);
-    } catch (e) {
-      if (isTlsError(e) && !opts.insecure) {
-        return this._openRequest(url, { ...opts, insecure: true });
-      }
-      throw e;
-    }
+    return this._openRequest(url, opts);
   }
 
   /**
@@ -1389,12 +1387,12 @@ class DownloadEngine extends EventEmitter {
     }
   }
 
-  _fetchUrl(url, { headers = {}, timeoutMs = 30000, maxRedirects = 5, onRequest = null, insecure = false, method = 'GET' } = {}) {
+  _fetchUrl(url, { headers = {}, timeoutMs = 30000, maxRedirects = 5, onRequest = null, method = 'GET' } = {}) {
     return new Promise((resolve, reject) => {
       // Replay cookies set mid-redirect-chain on later hops (token/session
       // issuers on /get_file/-style flows) — a plain client would drop them.
       const jar = { cookies: '' };
-      const doFetch = (currentUrl, redirectsLeft, allowInsecure) => {
+      const doFetch = (currentUrl, redirectsLeft) => {
         let parsed;
         try {
           parsed = new URL(currentUrl);
@@ -1414,9 +1412,8 @@ class DownloadEngine extends EventEmitter {
           path: parsed.pathname + parsed.search,
           headers: buildRequestHeaders(currentUrl, jarHeader(jar, headers)),
           timeout: timeoutMs,
-          rejectUnauthorized: !allowInsecure,
           lookup: dohFallbackLookup,
-          agent: agentFor(parsed, { insecure: allowInsecure }),
+          agent: agentFor(parsed),
         }, (res) => {
           jarNote(jar, res.headers);
           if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirectsLeft > 0) {
@@ -1431,7 +1428,7 @@ class DownloadEngine extends EventEmitter {
                 }
                 jar.cookies = '';
               }
-              doFetch(nextLoc, redirectsLeft - 1, allowInsecure);
+              doFetch(nextLoc, redirectsLeft - 1);
             } catch (e) {
               reject(e);
             }
@@ -1469,18 +1466,12 @@ class DownloadEngine extends EventEmitter {
           });
           res.on('error', reject);
         });
-        req.on('error', (e) => {
-          if (isTlsError(e) && !allowInsecure) {
-            doFetch(currentUrl, redirectsLeft, true);
-            return;
-          }
-          reject(e);
-        });
+        req.on('error', (e) => reject(e));
         req.on('timeout', () => { req.destroy(); reject(new Error('Request timeout for ' + currentUrl)); });
         if (onRequest) onRequest(req);
         req.end();
       };
-      doFetch(url, maxRedirects, insecure);
+      doFetch(url, maxRedirects);
     });
   }
 

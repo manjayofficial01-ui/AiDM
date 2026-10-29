@@ -132,7 +132,8 @@ if (!m) {
   check('/api/resolve-youtube exists', !!ep);
   if (ep) {
     check('rate limited like every resolve endpoint', /RESOLVE_LIMITERS\[req\.url\]\?\.allow\(\)/.test(ep[0]));
-    check('uses the resolver registry (provider dispatch)', /resolvers\.resolveMedia\(/.test(ep[0]));
+    check('uses the resolver registry (provider dispatch)',
+      /resolvers\.resolveMedia\(/.test(ep[0]) || /this\._resolveMedia\(/.test(ep[0]));
     check('emits video-detected for the capsule', /emit\('video-detected'/.test(ep[0]));
     check('page url is the canonical watch url', /pageUrl: r\.canonicalUrl \|\| url/.test(ep[0]));
     check('shows the real video title', /pageTitle: pageTitle \|\| r\.title/.test(ep[0]));

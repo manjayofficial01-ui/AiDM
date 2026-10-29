@@ -41,7 +41,7 @@ check('aiHint stored on row', /download\.aiHint/.test(mgrSrc));
 check('AI is fail-open (catch empty)', /catch \(e\) \{ \/\* fail-open \*\/ \}/.test(mgrSrc));
 
 console.log('── Export / Import / Batch ──');
-check('exportDownloads scrubs cookies', /exportDownloads\(/.test(mgrSrc) && /withoutCookieHeader/.test(mgrSrc));
+check('exportDownloads uses shared privacy sanitizer', /exportDownloads\(\)[\s\S]*?return sanitizeDownloadPayload\(/.test(mgrSrc));
 check('importDownloads accepts strings + objects', /importDownloads\(items\)/.test(mgrSrc));
 check('main wires export-downloads', /ipcMain\.handle\('export-downloads'/.test(mainSrc));
 check('main wires import-downloads', /ipcMain\.handle\('import-downloads'/.test(mainSrc));

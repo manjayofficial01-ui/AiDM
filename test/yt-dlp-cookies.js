@@ -179,9 +179,9 @@ console.log('── wiring ──');
   check('download() forwards the browser setting', /cookiesFromBrowser:\s*String\(this\.settings\.youtubeCookiesFromBrowser/.test(dm));
   check('download() forwards the user cookies.txt (verified to exist)', /cookieFile:\s*ytdlp\.resolveUserCookieFile\(this\.settings\.youtubeCookiesFile\)/.test(dm));
   check('probe() forwards cookies too (picker must list private videos)',
-    /ytdlp\.probe\(canonical,[\s\S]{0,200}cookies:\s*opts\.cookies/.test(yr));
+    /cookies:\s*withSession \? \(opts\.cookies \|\| null\) : null/.test(yr));
   check('probe() forwards the user cookies.txt too',
-    /ytdlp\.probe\(canonical,[\s\S]{0,260}cookieFile:\s*opts\.cookieFile/.test(yr));
+    /cookieFile:\s*withSession \? \(opts\.cookieFile \|\| null\) : null/.test(yr));
   check('module exports the cookie helpers',
     ['cookieArgs', 'netscapeCookieFile', 'writeCookieFile', 'deleteCookieFile', 'resolveUserCookieFile']
       .every(k => typeof ytdlp[k] === 'function'));

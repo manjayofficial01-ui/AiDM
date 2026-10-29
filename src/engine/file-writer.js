@@ -19,6 +19,19 @@ class SegmentFileWriter {
     this.handle = handle;
     this.path = path;
     this.closed = false;
+    this.stats = {
+      writeCalls: 0,
+      writeOperations: 0,
+      bytesWritten: 0,
+      maxWriteBytes: 0,
+      syncCalls: 0,
+      syncTotalMs: 0,
+      syncMaxMs: 0,
+    };
+  }
+
+  getStats() {
+    return { ...this.stats };
   }
 
   /**
@@ -53,10 +66,14 @@ class SegmentFileWriter {
    */
   async write(chunk, position) {
     if (this.closed) throw new DownloadError('IO', 'Writer is closed');
+    this.stats.writeCalls++;
+    this.stats.maxWriteBytes = Math.max(this.stats.maxWriteBytes, chunk.byteLength);
     let offset = 0;
     while (offset < chunk.byteLength) {
+      this.stats.writeOperations++;
       const { bytesWritten } = await this.handle.write(chunk, offset, chunk.byteLength - offset, position + offset);
       if (bytesWritten <= 0) throw new DownloadError('IO', `Short write at offset ${position + offset}`);
+      this.stats.bytesWritten += bytesWritten;
       offset += bytesWritten;
     }
   }
@@ -71,7 +88,15 @@ class SegmentFileWriter {
 
   async sync() {
     if (this.closed) return;
-    await this.handle.sync();
+    const startedAt = performance.now();
+    this.stats.syncCalls++;
+    try {
+      await this.handle.sync();
+    } finally {
+      const elapsed = performance.now() - startedAt;
+      this.stats.syncTotalMs += elapsed;
+      this.stats.syncMaxMs = Math.max(this.stats.syncMaxMs, elapsed);
+    }
   }
 
   async close() {

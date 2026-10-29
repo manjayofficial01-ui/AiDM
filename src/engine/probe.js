@@ -202,10 +202,12 @@ function filenameFromContentDisposition(header) {
       /* fall through */
     }
   }
-  const plain = /filename\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^;]+))/i.exec(header);
+  const plain = /filename\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|([^;]+))/i.exec(header);
   if (plain) {
-    const quoted = plain[1] !== undefined;
-    const raw = (quoted ? plain[1].replace(/\\(.)/g, '$1') : plain[2].trim());
+    const quoted = plain[1] !== undefined || plain[2] !== undefined;
+    const raw = quoted
+      ? String(plain[1] ?? plain[2]).replace(/\\(.)/g, '$1')
+      : plain[3].trim();
     let value = raw;
     // A quoted value is literal per RFC 6266 — percent-decoding it corrupts
     // exact names like "Report%202026.pdf". Bare tokens are literal too, but
@@ -247,6 +249,102 @@ function filenameFromUrl(url) {
 
 const RESERVED_NAMES = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
 const MAX_FILENAME_LENGTH = 200;
+
+/**
+ * The one authority for turning a trustworthy MIME response into a file
+ * extension. Keeping this beside Content-Disposition parsing means a server
+ * name and a Content-Type are always reconciled the same way.
+ */
+const MIME_EXTENSIONS = {
+  'video/mp4': 'mp4',
+  'video/webm': 'webm',
+  'video/x-matroska': 'mkv',
+  'video/quicktime': 'mov',
+  'video/x-msvideo': 'avi',
+  'video/mp2t': 'ts',
+  'video/x-flv': 'flv',
+  'video/3gpp': '3gp',
+  'audio/mpeg': 'mp3',
+  'audio/mp4': 'm4a',
+  'audio/x-m4a': 'm4a',
+  'audio/aac': 'aac',
+  'audio/ogg': 'ogg',
+  'audio/wav': 'wav',
+  'audio/x-wav': 'wav',
+  'audio/flac': 'flac',
+  'audio/webm': 'weba',
+  'audio/x-mpegurl': 'm3u8',
+  'application/vnd.apple.mpegurl': 'm3u8',
+  'application/dash+xml': 'mpd',
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/pjpeg': 'jpg',
+  'image/avif': 'avif',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+  'image/svg+xml': 'svg',
+  'image/tiff': 'tiff',
+  'image/bmp': 'bmp',
+  'image/x-icon': 'ico',
+  'image/vnd.microsoft.icon': 'ico',
+  'image/heic': 'heic',
+  'image/heif': 'heif',
+  'application/pdf': 'pdf',
+  'application/zip': 'zip',
+  'application/x-zip-compressed': 'zip',
+  'application/x-rar-compressed': 'rar',
+  'application/vnd.rar': 'rar',
+  'application/x-7z-compressed': '7z',
+  'application/x-tar': 'tar',
+  'application/gzip': 'gz',
+  'application/x-bzip2': 'bz2',
+  'application/x-xz': 'xz',
+  'application/epub+zip': 'epub',
+  'application/json': 'json',
+  'application/xml': 'xml',
+  'text/xml': 'xml',
+  'text/plain': 'txt',
+  'text/csv': 'csv',
+  'text/html': 'html',
+  'application/x-msdownload': 'exe',
+  'application/vnd.microsoft.portable-executable': 'exe',
+  'application/x-ms-msi': 'msi',
+  'application/x-msi': 'msi',
+  'application/vnd.android.package-archive': 'apk',
+  'application/x-apple-diskimage': 'dmg',
+  'application/x-iso9660-image': 'iso',
+  'application/vnd.debian.binary-package': 'deb',
+  'application/wasm': 'wasm',
+  'font/woff': 'woff',
+  'font/woff2': 'woff2',
+  'font/ttf': 'ttf',
+  'font/otf': 'otf',
+  'application/msword': 'doc',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+  'application/vnd.ms-excel': 'xls',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+  'application/vnd.ms-powerpoint': 'ppt',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
+  'application/octet-stream': '',
+};
+
+function extFromMime(contentType) {
+  if (!contentType) return null;
+  const clean = String(contentType).split(';')[0].trim().toLowerCase();
+  return MIME_EXTENSIONS[clean] || null;
+}
+
+function hasFilenameExtension(name) {
+  const value = String(name || '');
+  return /\.(?:tar\.(?:gz|bz2|xz)|[A-Za-z0-9]{1,12})$/i.test(value);
+}
+
+function ensureExtension(name, contentType) {
+  const clean = String(name || '').trim();
+  if (!clean || hasFilenameExtension(clean)) return clean;
+  const ext = extFromMime(contentType);
+  return ext ? `${clean}.${ext}` : clean;
+}
 
 /**
  * @param {string} input
@@ -303,4 +401,8 @@ module.exports = {
   sanitizeFilename,
   splitCredentials,
   basicAuthHeader,
+  MIME_EXTENSIONS,
+  extFromMime,
+  ensureExtension,
+  hasFilenameExtension,
 };

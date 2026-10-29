@@ -62,10 +62,90 @@ const CRC_TABLE = (() => {
  * @param {number} [end]
  * @returns {number} unsigned CRC-32
  */
-function crc32(buf, start = 0, end = buf.length) {
-  let c = 0xFFFFFFFF;
+function crc32Update(crc, buf, start = 0, end = buf.length) {
+  let c = crc >>> 0;
   for (let i = start; i < end; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xFF] ^ (c >>> 8);
-  return (c ^ 0xFFFFFFFF) >>> 0;
+  return c >>> 0;
+}
+
+function crc32(buf, start = 0, end = buf.length) {
+  return (crc32Update(0xFFFFFFFF, buf, start, end) ^ 0xFFFFFFFF) >>> 0;
+}
+
+/**
+ * Stream one entry's bytes to disk, verifying size and CRC without ever
+ * holding the whole entry in memory (APP-010). Returns `{ ok, reason? }`.
+ *
+ * A 2 GB entry used to be fully materialized twice (compressed read + inflated
+ * output) in the Electron main process before the output cap could help;
+ * memory here stays O(chunk) and the byte cap aborts mid-stream.
+ */
+function streamEntryToFile(fh, dataStart, entry, destAbs, { overwrite = false, maxEntryBytes }) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let failedReason = null;
+    let opened = false;
+    let crc = 0xFFFFFFFF;
+    let produced = 0;
+    const done = (result) => { if (!settled) { settled = true; resolve(result); } };
+
+    if (!entry.compressedSize) {
+      // Empty entry: nothing to stream. Never touches a pre-existing file.
+      try {
+        fs.writeFileSync(destAbs, Buffer.alloc(0), { flag: overwrite ? 'w' : 'wx' });
+        done(entry.uncompressedSize === 0 && entry.crc32 === 0 ? { ok: true } : { ok: false, reason: 'crc-mismatch' });
+      } catch (e) {
+        done({ ok: false, reason: e.code === 'EEXIST' ? 'already-exists' : 'write-failed' });
+      }
+      return;
+    }
+
+    const source = fh.createReadStream({
+      start: dataStart,
+      end: dataStart + entry.compressedSize - 1,
+      autoClose: false,
+    });
+    const inflater = entry.method === 0 ? null : zlib.createInflateRaw();
+    const sink = inflater || source;
+    const out = fs.createWriteStream(destAbs, { flags: overwrite ? 'w' : 'wx' });
+
+    out.on('open', () => { opened = true; });
+    const fail = (reason) => {
+      if (failedReason) return;
+      failedReason = reason;
+      try { source.destroy(); } catch (e) {}
+      try { if (inflater) inflater.destroy(); } catch (e) {}
+      out.destroy();
+    };
+
+    if (inflater) source.pipe(inflater);
+    sink.on('data', (chunk) => {
+      crc = crc32Update(crc, chunk);
+      produced += chunk.length;
+      if (produced > maxEntryBytes) fail('entry-size-cap');
+    });
+    source.on('error', () => fail('read-failed'));
+    if (inflater) inflater.on('error', () => fail('decompress-failed'));
+    out.on('error', (e) => fail(e.code === 'EEXIST' ? 'already-exists' : 'write-failed'));
+    out.on('close', () => {
+      if (failedReason) {
+        // Only remove a file THIS stream created — an existing file refused
+        // with EEXIST was never opened and must survive untouched.
+        if (opened) { try { fs.unlinkSync(destAbs); } catch (e) {} }
+        done({ ok: false, reason: failedReason });
+        return;
+      }
+      const finalCrc = (crc ^ 0xFFFFFFFF) >>> 0;
+      if (produced !== entry.uncompressedSize || finalCrc !== entry.crc32) {
+        try { fs.unlinkSync(destAbs); } catch (e) {}
+        done({ ok: false, reason: 'crc-mismatch' });
+        return;
+      }
+      done({ ok: true });
+    });
+
+    sink.pipe(out);
+  });
 }
 
 // ── Container detection ─────────────────────────────────────────────────────
@@ -426,33 +506,17 @@ async function extractZip(archivePath, opts = {}) {
         continue;
       }
 
-      const raw = Buffer.alloc(entry.compressedSize);
-      if (entry.compressedSize > 0) {
-        await fh.read(raw, 0, entry.compressedSize, dataStart);
-      }
-
-      /** @type {Buffer} */
-      let out;
-      try {
-        out = entry.method === 0 ? raw : zlib.inflateRawSync(raw, { maxOutputLength: maxEntryBytes });
-      } catch (e) {
-        result.skipped.push({ name: entry.name, reason: 'decompress-failed' });
-        continue;
-      }
-      if (out.length !== entry.uncompressedSize || crc32(out) !== entry.crc32) {
-        // A CRC mismatch means the bytes are not what the archive promised.
-        // Writing them would hand the user a corrupt file that looks fine.
-        result.skipped.push({ name: entry.name, reason: 'crc-mismatch' });
-        continue;
-      }
-
       await fsp.mkdir(path.dirname(resolved.abs), { recursive: true });
-      await fsp.writeFile(resolved.abs, out, { flag: opts.overwrite ? 'w' : 'wx' })
-        .catch(async (e) => {
-          if (e.code !== 'EEXIST') throw e;
-          result.skipped.push({ name: entry.name, reason: 'already-exists' });
-          return null;
-        });
+      // Streamed, bounded write (APP-010): the entry is never fully buffered.
+      // A CRC mismatch (or a size/cap violation) leaves no partial file.
+      const write = await streamEntryToFile(fh, dataStart, entry, resolved.abs, {
+        overwrite: opts.overwrite === true,
+        maxEntryBytes,
+      });
+      if (!write.ok) {
+        result.skipped.push({ name: entry.name, reason: write.reason });
+        continue;
+      }
       result.extracted.push(resolved.rel);
     }
 
@@ -491,6 +555,8 @@ async function extractArchive(archivePath, opts = {}) {
 }
 
 module.exports = {
+  // Exposed for the bounded-streaming tests (not used by the app).
+  _streamEntryToFile: streamEntryToFile,
   sniffArchiveFormat,
   sniffFileFormat,
   findEocd,

@@ -879,12 +879,83 @@ function normalizeStreamUrl(u) {
     return list;
   }
 
+  // ── YouTube: canonical page handoff ──────────────────────────────────────────
+  // Sniffing a YouTube player produces a DOZEN signed googlevideo URLs (one
+  // per DASH rendition plus ad/quality probes). Offered as rows they all go
+  // stale within minutes and die with HTTP 403 in the desktop engine — the
+  // "11 downloadable links, one Failed" report. YouTube is a PAGE the desktop
+  // already resolves properly: hand over the canonical watch URL ONCE and the
+  // app's yt-dlp pipeline picks formats, merges picture+sound and renews the
+  // signatures itself. One video → one row, on every surface (popup, pill
+  // panel, pill badge). Same philosophy as stripFbRange: rewrite BEFORE any
+  // consumer sees the URL.
+  const YT_PAGE_RE = /(?:^|\.)youtube\.com$|(?:^|\.)youtube-nocookie\.com$|^youtu\.be$/i;
+
+  function isYouTubePage() {
+    try { return YT_PAGE_RE.test(location.hostname || ''); } catch (e) { return false; }
+  }
+
+  /** The 11-char video id from any YouTube page form, or null. */
+  function youTubePageVideoId() {
+    try {
+      const h = String(location.hostname || '');
+      const p = String(location.pathname || '');
+      let m;
+      if (/(?:^|\.)youtube\.com$/i.test(h) || /youtube-nocookie\.com$/i.test(h)) {
+        if ((m = /[?&]v=([\w-]{11})(?![\w-])/.exec(location.search || ''))) return m[1];
+        if ((m = /^\/(?:shorts|live|embed|v)\/([\w-]{11})(?![\w-])(?:[/?#]|$)/.exec(p))) return m[1];
+      } else if (/^youtu\.be$/i.test(h)) {
+        if ((m = /^\/([\w-]{11})(?![\w-])(?:[/?#]|$)/.exec(p))) return m[1];
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function youTubeCanonicalUrl() {
+    const id = youTubePageVideoId();
+    return id ? 'https://www.youtube.com/watch?v=' + id : null;
+  }
+
+  /** Page title without the " - YouTube" suffix (null when nothing real). */
+  function youTubeRowTitle() {
+    try {
+      const t = String(document.title || '').replace(/\s*-\s*YouTube\s*$/i, '').trim();
+      return t || null;
+    } catch (e) { return null; }
+  }
+
+  /** The single row a YouTube page offers (null → fail open to sniffing). */
+  function youTubeCanonicalRow() {
+    const url = youTubeCanonicalUrl();
+    if (!url) return null;
+    const title = youTubeRowTitle();
+    return {
+      url,
+      type: 'video',
+      source: 'youtube-page',
+      title: title || undefined,
+      filename: title ? title + '.mp4' : undefined,
+      quality: 'Best',
+      format: 'mp4',
+      playing: true,
+      ytCanonical: true,
+    };
+  }
+
   /**
    * Detected video rows destined for popup/picker/desktop on this tab.
+   * YouTube: the canonical watch-URL row only — never the sniffed rendition
+   * set (signed URLs that expire in minutes; the desktop re-extracts).
    * Facebook: playing video's links only (fail-open when playing).
    * Every other site: as scanned.
    */
   function videosForDownloadList() {
+    try {
+      if (isYouTubePage()) {
+        const ytRow = youTubeCanonicalRow();
+        if (ytRow) return [ytRow];
+      }
+    } catch (e) { /* fail open to the generic list */ }
     const all = Array.from(detectedVideos.values());
     // Harvest audio-only Facebook tracks BEFORE filtering — they never appear
     // as rows but must stay available as audioUrl for post-download mux.
@@ -987,30 +1058,113 @@ function normalizeStreamUrl(u) {
     }
   }
 
+  function parseKvsFlashvars(source) {
+    const truncated = source.length > 262144;
+    source = source.slice(0, 262144);
+    let position = 0;
+    const whitespace = /(?:\s+|\/\/[^\r\n]*|\/\*[\s\S]*?\*\/)*/y;
+    const identifier = /[A-Za-z_$][\w$]*/y;
+    const scalar = /(?:true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)/y;
+    function skip() {
+      whitespace.lastIndex = position;
+      const match = whitespace.exec(source);
+      if (match) position = whitespace.lastIndex;
+    }
+    function invalid() { throw new SyntaxError('Invalid flashvars data'); }
+    function string() {
+      const quote = source[position++];
+      let value = '';
+      while (position < source.length) {
+        let char = source[position++];
+        if (char === quote) return value;
+        if (char === '\r' || char === '\n') invalid();
+        if (char === '\\') {
+          char = source[position++];
+          if (char === 'u' || char === 'x') {
+            const length = char === 'u' ? 4 : 2;
+            const hex = source.slice(position, position + length);
+            if (hex.length !== length || !/^[0-9a-f]+$/i.test(hex)) invalid();
+            value += String.fromCharCode(parseInt(hex, 16));
+            position += length;
+          } else if (char === '\r' || char === '\n') {
+            if (char === '\r' && source[position] === '\n') position++;
+          } else {
+            const escapes = { "'": "'", '"': '"', '\\': '\\', '/': '/', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t', v: '\v', '0': '\0' };
+            if (!Object.prototype.hasOwnProperty.call(escapes, char) || (char === '0' && /\d/.test(source[position] || ''))) invalid();
+            value += escapes[char];
+          }
+        } else {
+          value += char;
+        }
+      }
+      invalid();
+    }
+    function value(depth) {
+      if (depth > 32) invalid();
+      skip();
+      const char = source[position];
+      if (char === '"' || char === "'") return string();
+      if (char === '{' || char === '[') {
+        const object = char === '{';
+        const result = object ? Object.create(null) : [];
+        const close = object ? '}' : ']';
+        position++;
+        skip();
+        while (source[position] !== close) {
+          if (object) {
+            let key;
+            if (source[position] === '"' || source[position] === "'") key = string();
+            else {
+              identifier.lastIndex = position;
+              const match = identifier.exec(source);
+              if (!match) invalid();
+              key = match[0];
+              position = identifier.lastIndex;
+            }
+            skip();
+            if (source[position++] !== ':') invalid();
+            result[key] = value(depth + 1);
+          } else {
+            result.push(value(depth + 1));
+          }
+          skip();
+          if (source[position] === close) break;
+          if (source[position++] !== ',') invalid();
+          skip();
+        }
+        position++;
+        return result;
+      }
+      scalar.lastIndex = position;
+      const match = scalar.exec(source);
+      if (!match) invalid();
+      position = scalar.lastIndex;
+      return JSON.parse(match[0]);
+    }
+    try {
+      skip();
+      if (source[position] !== '{') return null;
+      const result = value(0);
+      skip();
+      if (position === source.length && truncated) return null;
+      if (position < source.length && source[position] !== ';') return null;
+      return result;
+    } catch { return null; }
+  }
+
   function extractKvsFlashvars() {
     const videos = [];
     try {
       const scripts = document.querySelectorAll('script:not([src])');
       for (const s of scripts) {
         const text = s.textContent || '';
-        // Match: var flashvars = { ... }; or flashvars = { ... };
-        const m = text.match(/(?:var\s+)?flashvars\s*=\s*(\{[\s\S]+?\});/);
+        const m = /\bflashvars\s*=\s*(?=\{)/.exec(text);
         if (!m) continue;
-        let fv;
-        try {
-          // js_to_json style: single quotes → double, unquoted keys
-          const raw = m[1]
-            .replace(/'/g, '"')
-            .replace(/,\s*([\]}])/g, '$1');
-          fv = JSON.parse(raw);
-        } catch {
-          // Try eval as last resort (flashvars is plain JS object literal)
-          try { fv = new Function('return ' + m[1])(); } catch { continue; }
-        }
-        if (!fv || typeof fv !== 'object') continue;
+        const fv = parseKvsFlashvars(text.slice(m.index + m[0].length));
+        if (!fv) continue;
 
-        const licenseCode = fv.license_code || '';
-        const title = fv.video_title || fv.alt_video_title || document.title || '';
+        const licenseCode = typeof fv.license_code === 'string' ? fv.license_code : '';
+        const title = [fv.video_title, fv.alt_video_title, document.title].find(value => typeof value === 'string' && value) || '';
 
         // Collect all video_url / video_alt_url* keys (video_url is primary!)
         const urlKeys = Object.keys(fv).filter(k => /^video(?:_url|_alt_url\d*)?$/.test(k));
@@ -1023,7 +1177,7 @@ function normalizeStreamUrl(u) {
           // Decode obfuscated KVS URLs
           url = kvsDecodeUrl(url, licenseCode);
 
-          const label = fv[key + '_text'] || key.replace(/_/g, ' ');
+          const label = typeof fv[key + '_text'] === 'string' ? fv[key + '_text'] : key.replace(/_/g, ' ');
           // Try to extract resolution from label or URL
           const resMatch = label.match(/(\d{3,4})p/i) || url.match(/_(\d{3,4})p/);
           const height = resMatch ? parseInt(resMatch[1], 10) : 0;
@@ -2307,6 +2461,16 @@ function normalizeStreamUrl(u) {
 
   const CAPSULE_CSS = `
     :host { all: initial; }
+    /* Semantic state contract (APP-012 / AUD-017): same token NAMES as the
+       popup and the desktop renderer; capsule-appropriate values. Declared
+       after the reset so nothing can shadow them. */
+    :host {
+      --state-success: #15803d;
+      --state-warning: #b45309;
+      --state-danger: #b91c1c;
+      --state-info: #1a5cb0;
+      --state-warning-bg: rgba(251, 191, 36, .95);
+    }
     .aidm-cap-wrap {
       position: fixed;
       z-index: 2147483647;
@@ -2377,7 +2541,7 @@ function normalizeStreamUrl(u) {
       height: 16px;
       padding: 0 4px;
       border-radius: 8px;
-      background: rgba(255,210,62,.95);
+      background: var(--state-warning-bg);
       color: #1a2b4a;
       font-size: 10px;
       font-weight: 700;
@@ -2678,7 +2842,7 @@ function normalizeStreamUrl(u) {
     try {
       const parts = new URL(String(u || '')).pathname.split('/').filter(Boolean);
       const base = decodeURIComponent(parts.pop() || '');
-      if (!base || !/\.[A-Za-z0-9]{2,4}$/.test(base)) return null;
+      if (!base || !/\.[A-Za-z0-9]*[A-Za-z][A-Za-z0-9]{0,7}$/i.test(base)) return null;
       if (isGenericName(base, u)) return null;
       return base;
     } catch (e) { return null; }
@@ -3400,6 +3564,19 @@ function normalizeStreamUrl(u) {
     if (!st) return;
     const title = getVideoTitle(video);
 
+    // Superseded-build guard. A build is ASYNC (panel data + the CDN
+    // liveness probe take seconds) and media events re-trigger builds while
+    // one is still in flight — the old "openCapsuleVideo !== video" checks
+    // only caught a DIFFERENT video or a closed panel, so an older build
+    // resumed after its await and appended its rows too. The panel then read
+    // row, foot, row, foot… with one row-set per overlapping build (the
+    // "duplicate rows" report). Each new build bumps the generation; older
+    // ones drop out at their next await.
+    st.buildGen = (st.buildGen || 0) + 1;
+    const buildGen = st.buildGen;
+    const superseded = () => st.buildGen !== buildGen ||
+      openCapsuleVideo !== video || !capsuleState.get(video);
+
     // Header immediately so the panel opens without delay
     st.panel.innerHTML = '';
     const head = document.createElement('div');
@@ -3424,7 +3601,7 @@ function normalizeStreamUrl(u) {
     const direct = getVideoVariants(video);
     let pd = { streams: [], sent: [] };
     try { pd = await requestPanelData(); } catch (e) {}
-    if (openCapsuleVideo !== video || !capsuleState.get(video)) return; // closed meanwhile
+    if (superseded()) return; // closed, or a newer build took over
 
     // Facebook feed ranking (mirrors the Twitter per-video scoping, but
     // non-destructive): a feed or watch page holds EVERY related video's
@@ -3564,7 +3741,7 @@ function normalizeStreamUrl(u) {
       if (/\.m3u8($|\?|#)/i.test(v.url)) {
         try {
           const ex = await expandHls(v.url);
-          if (openCapsuleVideo !== video) return;
+          if (superseded()) return;
           if (ex.encrypted) { expanded.push({ ...v, hls: true, encrypted: true }); continue; }
           if (ex.variants && ex.variants.length) {
             ex.variants.forEach(x => expanded.push(x));
@@ -3611,7 +3788,7 @@ function normalizeStreamUrl(u) {
         });
       });
     } catch (e) { probes = null; }
-    if (!capsuleState.get(video)) return;
+    if (superseded()) return;
     if (probes) {
       rows = rows.filter((v) => {
         const p = probes[v.url];
@@ -3639,7 +3816,7 @@ function normalizeStreamUrl(u) {
       rows = [...collapsed.values()];
     }
 
-    if (!capsuleState.get(video)) return;
+    if (superseded()) return;
     loading.remove();
 
     // Per-video scoping for the capsule pill:
@@ -3649,8 +3826,14 @@ function normalizeStreamUrl(u) {
     //    only its links are shown; otherwise all rows stay so the user is
     //    never stranded with an empty panel.
     const isFbHost = isFacebookPage() || /facebook|instagram|fb\.watch/i.test(location.hostname || '');
+    const ytCanonical = isYouTubePage() ? youTubeCanonicalRow() : null;
     let ordered;
-    if (isFbHost) {
+    if (ytCanonical) {
+      // YouTube: the single canonical watch-URL row. The sniffed googlevideo
+      // rendition set is signed and expires in minutes — offering it here is
+      // how one video showed 11 links and every Download 403'd.
+      ordered = [ytCanonical];
+    } else if (isFbHost) {
       ordered = filterFacebookPlayingOnly(rows, video);
       if (!ordered.length) {
         // Fail-open: this pill belongs to a playing <video>. Never leave it
@@ -3853,6 +4036,9 @@ function normalizeStreamUrl(u) {
           liveName,
           (fmt || 'mp4').replace(/[^a-z0-9]/gi, '') || 'mp4'
         );
+        // Resolver-backed handoffs take seconds (the desktop extracts real
+        // qualities first) — say what is happening instead of a frozen pill.
+        dl.textContent = v.ytCanonical ? '⏳ Resolving…' : '⏳ Sending…';
         // Refresh the URL at click time: signed CDN links expire within
         // minutes, and the player may already hold a re-signed equivalent.
         let sendUrl = v.url;
@@ -3880,8 +4066,12 @@ function normalizeStreamUrl(u) {
             },
           }, (resp) => {
             if (chrome.runtime.lastError || !resp || !resp.success) {
-              dl.textContent = 'Failed';
-              setTimeout(() => { dl.textContent = '⬇ Download'; }, 2000);
+              // "AiDM offline" (app not running / restarting) is the number-
+              // one cause — say so instead of a meaningless "Failed". A
+              // resolver-backed handoff also shows what it is doing while it
+              // waits for the desktop's extraction to answer.
+              dl.textContent = resp && resp.offline ? 'AiDM offline' : 'Failed';
+              setTimeout(() => { dl.textContent = '⬇ Download'; }, resp && resp.offline ? 6000 : 2000);
               return;
             }
             dl.textContent = resp.duplicate ? '✓ In AiDM' : '✓ Sent';
@@ -4048,6 +4238,10 @@ function normalizeStreamUrl(u) {
           ...getVideoVariants(video),
         ].filter(x => x && x.url), video);
         scoped.forEach(v => { if (v && v.url) countUrl(v.url); });
+      } else if (isYouTubePage() && youTubeCanonicalUrl()) {
+        // One video → one link: the badge must never count the sniffed
+        // rendition set (it read 23 for a single playing video).
+        countUrl(youTubeCanonicalUrl());
       } else {
         getVideoVariants(video).forEach(v => { if (v && v.url) countUrl(v.url); });
         // Generalised scoping: when this element's own file family is known,
@@ -4173,7 +4367,7 @@ function normalizeStreamUrl(u) {
       if (!filename) {
         try {
           const last = decodeURIComponent(new URL(link.href).pathname.split('/').filter(Boolean).pop() || '');
-          if (/\.[A-Za-z0-9]{2,4}$/.test(last)) filename = last;
+          if (/\.[A-Za-z0-9]*[A-Za-z][A-Za-z0-9]{0,7}$/i.test(last)) filename = last;
         } catch (err) {}
       }
       // Record it so the capsule panel can offer the exact file too.

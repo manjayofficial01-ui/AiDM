@@ -190,8 +190,68 @@ async function verifyChecksum(path, checksum, signal) {
   }
 }
 
+const { open } = require('fs/promises');
+
+const MAX_PIECE_BYTES = 64 * 1024 * 1024;
+const MAX_PIECE_COUNT = 100_000;
+
+function cleanDigestValue(raw) {
+  return String(raw == null ? '' : raw).replace(/^0x/i, '').replace(/\s+/g, '').toLowerCase();
+}
+
+function normalizePieceManifest(raw, totalSize = null) {
+  if (!raw || typeof raw !== 'object' || !Array.isArray(raw.hashes) || raw.hashes.length === 0) return null;
+  const algorithm = ALGORITHM_ALIASES[String(raw.algorithm || '').toLowerCase()];
+  if (!algorithm) return null;
+  const pieceLengthBytes = Math.floor(Number(raw.pieceLengthBytes || raw.pieceLength || raw.piece_length) || 0);
+  if (!Number.isFinite(pieceLengthBytes) || pieceLengthBytes <= 0 || pieceLengthBytes > MAX_PIECE_BYTES) return null;
+  if (raw.hashes.length > MAX_PIECE_COUNT) return null;
+  const expectedLength = DIGEST_HEX_LENGTHS[algorithm];
+  const hashes = raw.hashes.map(cleanDigestValue);
+  if (!hashes.every((hash) => /^[0-9a-f]+$/.test(hash) && hash.length === expectedLength)) return null;
+  const size = Number(totalSize);
+  if (Number.isFinite(size) && size > 0 && Math.ceil(size / pieceLengthBytes) !== hashes.length) return null;
+  return { algorithm, pieceLengthBytes, hashes };
+}
+
+async function verifyPieceRanges(path, manifest, totalSize, signal) {
+  const pieces = normalizePieceManifest(manifest, totalSize);
+  const size = Math.floor(Number(totalSize) || 0);
+  if (!pieces || !Number.isFinite(size) || size <= 0) return { ok: true, badPieces: [] };
+  const handle = await open(path, 'r');
+  const badPieces = [];
+  try {
+    for (let index = 0; index < pieces.hashes.length; index++) {
+      if (signal?.aborted) throw new DownloadError('CANCELLED', 'Piece verification aborted');
+      const start = index * pieces.pieceLengthBytes;
+      const end = Math.min(size - 1, start + pieces.pieceLengthBytes - 1);
+      const length = end - start + 1;
+      const buffer = Buffer.allocUnsafe(length);
+      let offset = 0;
+      while (offset < length) {
+        const { bytesRead } = await handle.read(buffer, offset, length - offset, start + offset);
+        if (bytesRead <= 0) {
+          badPieces.push({ index, start, end, size: length, reason: 'short-read' });
+          offset = length;
+          break;
+        }
+        offset += bytesRead;
+      }
+      const digest = createHash(pieces.algorithm).update(buffer).digest('hex');
+      if (digest !== pieces.hashes[index] && !badPieces.some((piece) => piece.index === index)) {
+        badPieces.push({ index, start, end, size: length, reason: 'hash-mismatch' });
+      }
+    }
+  } finally {
+    await handle.close().catch(() => {});
+  }
+  return { ok: badPieces.length === 0, badPieces, algorithm: pieces.algorithm };
+}
+
 module.exports = {
   normalizeChecksum,
+  normalizePieceManifest,
+  verifyPieceRanges,
   hashFile,
   verifyChecksum,
   // Exported for the UI and for tests: lets a caller show "detected SHA-256"

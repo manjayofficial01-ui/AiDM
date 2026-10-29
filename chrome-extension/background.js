@@ -1399,11 +1399,22 @@ async function sendToAiDM(url, filename, opts = {}) {
         if (all.length) body.cookies = all.join('; ');
       } catch (e) { /* cookies API unavailable or blocked */ }
     }
+    // Resolver-backed page handoffs (YouTube / Twitter / Facebook) run a
+    // FULL server-side extraction before answering — 5-20s normally, minutes
+    // under a bot-check. The old 5s timeout aborted while the desktop was
+    // still probing: the row showed "Failed" while the quality picker opened
+    // anyway. A plain file URL (native engine) answers in milliseconds, and
+    // an unreachable app refuses the connection instantly — so the long
+    // budget never masks either.
+    let pageResolve = false;
+    try {
+      pageResolve = /youtube\.com|youtu\.be|youtube-nocookie\.com|twitter\.com|x\.com|facebook\.com|fb\.watch|instagram\.com|cdninstagram\.com/i.test(String(url));
+    } catch (e) {}
     const resp = await fetch(`${AIDM_API_BASE}/api/download`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(pageResolve ? 180000 : 5000),
     });
     const data = await resp.json();
     if (data.success) {
@@ -1411,9 +1422,12 @@ async function sendToAiDM(url, filename, opts = {}) {
       markSent(url);
       return { sent: !data.duplicate, success: true, duplicate: !!data.duplicate };
     }
-    return { sent: false, success: false };
+    return { sent: false, success: false, error: (data && data.error) || undefined };
   } catch {
-    return { sent: false, success: false };
+    // No answer at all (connection refused / abort). The pill and popup turn
+    // this into the actionable "AiDM offline" instead of a meaningless
+    // "Failed" — the number-one cause is the app simply not running yet.
+    return { sent: false, success: false, offline: true };
   }
 }
 
@@ -1976,7 +1990,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // caller has none — mirrors the name a native browser download would use.
     const sniff = getStreamMeta(msg.url);
     const filename = msg.filename || (sniff && sniff.filename) || undefined;
-    sendToAiDM(msg.url, filename, msg.opts).then(r => sendResponse({ success: !!(r && r.success), duplicate: !!(r && r.duplicate) }));
+    sendToAiDM(msg.url, filename, msg.opts).then(r => sendResponse({
+      success: !!(r && r.success),
+      duplicate: !!(r && r.duplicate),
+      offline: !!(r && r.offline),
+      error: (r && r.error) || undefined,
+    }));
     return true;
   }
 

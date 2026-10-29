@@ -3,28 +3,36 @@ class Mirror {
   /**
    * @param {string} url
    * @param {string} host
+   * @param {string} origin
+   * @param {number} initialScore
    */
-  constructor(url, host) {
+  constructor(url, host, origin, initialScore = 0) {
     this.url = url;
     this.host = host;
+    this.origin = origin;
     this.active = 0;
     this.failures = 0;
     this.consecutiveFailures = 0;
     this.tested = false;
     this.banned = false;
     this.speedEma = 0;
+    this.initialScore = Math.max(0, initialScore);
     this.lastError = null;
+  }
+
+  effectiveSpeed() {
+    return this.speedEma > 0 ? this.speedEma : this.initialScore;
   }
 
   snapshot() {
     return {
-      url: this.url,
+      origin: this.origin,
       host: this.host,
       active: this.active,
       failures: this.failures,
       banned: this.banned,
       tested: this.tested,
-      speed: this.speedEma,
+      speed: this.effectiveSpeed(),
     };
   }
 }
@@ -38,16 +46,20 @@ class MirrorPool {
    * @param {string[]} urls
    * @param {number} maxPerServer
    * @param {number} [banAfterConsecutive]
+   * @param {{ serverProfiles?: import('./server-profiles').ServerProfileStore }} [opts]
    */
-  constructor(urls, maxPerServer, banAfterConsecutive = 3) {
+  constructor(urls, maxPerServer, banAfterConsecutive = 3, opts = {}) {
     this.maxPerServer = maxPerServer;
     this.banAfterConsecutive = banAfterConsecutive;
+    this.serverProfiles = opts.serverProfiles || null;
     const seen = new Set();
     this.mirrors = [];
     for (const url of urls) {
       if (seen.has(url)) continue;
       seen.add(url);
-      this.mirrors.push(new Mirror(url, safeHost(url)));
+      const origin = safeOrigin(url);
+      const score = origin && this.serverProfiles ? this.serverProfiles.score(origin) : 0;
+      this.mirrors.push(new Mirror(url, safeHost(url), origin, score));
     }
   }
 
@@ -95,8 +107,10 @@ class MirrorPool {
     const avail = this.available();
     if (avail.length === 0) return null;
     const untested = avail.filter((m) => !m.tested);
-    if (untested.length > 0) return untested[0];
-    avail.sort((a, b) => b.speedEma - a.speedEma || a.active - b.active);
+    if (untested.length > 0) {
+      return untested.sort((a, b) => b.effectiveSpeed() - a.effectiveSpeed() || a.active - b.active)[0];
+    }
+    avail.sort((a, b) => b.effectiveSpeed() - a.effectiveSpeed() || a.active - b.active);
     return avail[0];
   }
 
@@ -126,6 +140,7 @@ class MirrorPool {
       const speed = bytes / (elapsedMs / 1000);
       m.speedEma = m.speedEma === 0 ? speed : 0.7 * m.speedEma + 0.3 * speed;
     }
+    if (this.serverProfiles && m.origin) this.serverProfiles.observeSuccess(m.origin, bytes, elapsedMs);
   }
 
   /**
@@ -137,6 +152,7 @@ class MirrorPool {
     m.failures++;
     m.consecutiveFailures++;
     m.lastError = err.message;
+    if (this.serverProfiles && m.origin) this.serverProfiles.observeFailure(m.origin, err.retryable === true);
     const hasOthers = this.hasAlternative(m);
     if (hasOthers && (!err.retryable || m.consecutiveFailures >= this.banAfterConsecutive)) {
       m.banned = true;
@@ -164,6 +180,15 @@ function safeHost(url) {
     return new URL(url).host;
   } catch {
     return url;
+  }
+}
+
+function safeOrigin(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.origin : null;
+  } catch {
+    return null;
   }
 }
 

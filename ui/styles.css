@@ -1,36 +1,82 @@
-/* AiDM — premium dark glass (Arc / Linear / pro-tool) + light twin via data-theme="light" */
+/* AiDM — Qoder IDE dark (extracted from Qoder's own compiled theme tokens)
+   + light twin via data-theme="light" */
 :root, html[data-theme="dark"] {
-  --bg-primary: #0B1220;
-  --bg-secondary: #121A2B;
-  --bg-tertiary: #1A2438;
-  --bg-surface: #121A2B;
-  --bg-elevated: #1A2438;
-  --bg-hover: #1A2438;
-  --accent: #3B82F6;
-  --accent-soft: #60A5FA;
-  --accent-glow: rgba(59, 130, 246, .28);
-  --accent-dark: #2563EB;
-  --success: #34D399;
-  --warning: #FBBF24;
-  --error: #F87171;
-  --text-primary: #E6EDF7;
-  --text-secondary: #B7C4D9;
-  --text-muted: #8B9BB4;
-  --border: #243047;
-  --border-light: #32415E;
-  --progress-bg: #1A2438;
-  --progress-fill: linear-gradient(90deg, #2563EB, #60A5FA 70%, #93C5FD);
-  --shadow: 0 12px 40px rgba(0, 0, 0, .45), 0 0 0 1px rgba(255, 255, 255, .03);
+  /* Qoder dark chrome: layout #080807, container #0E0E0E, highlight #111110,
+     hover #22221F, border #31312D/#3B3A35, text #EEEEEB/#B4B4AC/#7B7B74. */
+  --bg-primary: #080807;
+  --bg-secondary: #0E0E0E;
+  --bg-tertiary: #141412;
+  --bg-surface: #111110;
+  --bg-elevated: #1E1E1C;
+  --bg-hover: #22221F;
+  /* Brand accent is the Qoder logo green (#2ADB5C); the pale #8EE5A1 is the
+     top of the same ramp, so progress and focus stay in-brand. */
+  --accent: #2ADB5C;
+  --accent-rgb: 42, 219, 92;
+  --accent-soft: #8EE5A1;
+  --accent-glow: rgba(42, 219, 92, .28);
+  --accent-dark: #1FA04A;
+  /* Qoder dark status ramp (#FF6B70 danger, #FAAD14 warning, #FA8125 pending,
+     #8CCAA5 success). Bright fills need near-black ink, not white. */
+  --success: #8CCAA5;
+  --success-rgb: 140, 202, 165;
+  --warning: #FAAD14;
+  --warning-rgb: 250, 173, 20;
+  --error: #FF6B70;
+  --error-rgb: 255, 107, 112;
+  --on-accent: #080807;
+  --on-danger: #080807;
+  --text-primary: #EEEEEB;
+  --text-secondary: #B4B4AC;
+  --text-muted: #7B7B74;
+  --border: #292926;
+  --border-light: #3B3A35;
+  --progress-bg: #20201E;
+  --progress-fill: linear-gradient(90deg, #1FA04A, #2ADB5C 70%, #8EE5A1);
+  --progress-done-fill: linear-gradient(90deg, #3FAF72, var(--success));
+  --shadow: 0 12px 40px rgba(0, 0, 0, .55), 0 0 0 1px rgba(255, 255, 255, .04);
   --radius: 10px;
   --radius-lg: 14px;
   --radius-pill: 999px;
   --font: "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
   --font-mono: "Cascadia Code", "Cascadia Mono", Consolas, "Fira Code", monospace;
-  --glass: rgba(18, 26, 43, .72);
+  --glass: rgba(14, 14, 14, .72);
   --glass-border: rgba(255, 255, 255, .06);
-  --titlebar-grad: linear-gradient(180deg, #152038 0%, #0E1628 100%);
-  --row-selected: rgba(59, 130, 246, .14);
+  --titlebar-grad: linear-gradient(180deg, #111110 0%, #080807 100%);
+  --row-selected: rgba(42, 219, 92, .12);
   --row-hover: rgba(255, 255, 255, .035);
+
+  /* ── Semantic state contract (APP-012 / AUD-017) ──────────────────────────
+     Badges, toasts, inline validation and status text all read THESE tokens.
+     Raw rgba() per rule is what let the same "warning" drift across surfaces. */
+  --state-success: var(--success);
+  --state-success-bg: rgba(140, 202, 165, .13);
+  --state-success-border: rgba(140, 202, 165, .32);
+  --state-warning: var(--warning);
+  --state-warning-bg: rgba(250, 173, 20, .12);
+  --state-warning-border: rgba(250, 173, 20, .32);
+  --state-danger: var(--error);
+  --state-danger-bg: rgba(255, 107, 112, .12);
+  --state-danger-border: rgba(255, 107, 112, .32);
+  --state-info: var(--accent-soft);
+  --state-info-bg: rgba(42, 219, 92, .14);
+  --state-info-border: rgba(42, 219, 92, .32);
+  --state-neutral: var(--text-secondary);
+  --state-neutral-bg: rgba(180, 180, 172, .10);
+  --state-neutral-border: var(--border-light);
+  --state-fresh: #C3A0DF;
+  --state-fresh-bg: rgba(195, 160, 223, .13);
+  --state-fresh-border: rgba(195, 160, 223, .32);
+  --state-pending: #FA8125;
+  --state-pending-bg: rgba(250, 129, 37, .12);
+  --state-pending-border: rgba(250, 129, 37, .32);
+  --fresh-rgb: 195, 160, 223;
+
+  /* Elevation + focus contract: modals/toasts/controls share one scale. */
+  --elevation-1: 0 1px 2px rgba(0, 0, 0, .35), 0 0 0 1px rgba(255, 255, 255, .04);
+  --elevation-2: var(--shadow);
+  --focus-ring: 0 0 0 3px var(--accent-glow);
+  --radius-sm: 8px;
 }
 
 html[data-theme="light"] {
@@ -41,12 +87,19 @@ html[data-theme="light"] {
   --bg-elevated: #FFFFFF;
   --bg-hover: #E8EFF8;
   --accent: #2563EB;
+  --accent-rgb: 37, 99, 235;
   --accent-soft: #3B82F6;
   --accent-glow: rgba(37, 99, 235, .18);
   --accent-dark: #1D4ED8;
   --success: #059669;
+  --success-rgb: 5, 150, 105;
   --warning: #D97706;
+  --warning-rgb: 217, 119, 6;
   --error: #DC2626;
+  --error-rgb: 220, 38, 38;
+  --on-accent: #FFFFFF;
+  --on-danger: #FFFFFF;
+  --fresh-rgb: 124, 58, 237;
   --text-primary: #0F1B2D;
   --text-secondary: #33445C;
   --text-muted: #6B7C93;
@@ -54,12 +107,41 @@ html[data-theme="light"] {
   --border-light: #BCC9DB;
   --progress-bg: #E2EAF5;
   --progress-fill: linear-gradient(90deg, #2563EB, #60A5FA 70%, #93C5FD);
+  --progress-done-fill: linear-gradient(90deg, #059669, var(--success));
   --shadow: 0 16px 48px rgba(15, 27, 45, .14), 0 0 0 1px rgba(15, 27, 45, .04);
   --glass: rgba(255, 255, 255, .86);
   --glass-border: rgba(15, 27, 45, .06);
   --titlebar-grad: linear-gradient(180deg, #0F1B2D 0%, #16233A 100%);
   --row-selected: rgba(37, 99, 235, .10);
   --row-hover: rgba(37, 99, 235, .05);
+
+  /* Semantic state contract — light-theme values (same roles, darker ink). */
+  --state-success: var(--success);
+  --state-success-bg: rgba(5, 150, 105, .10);
+  --state-success-border: rgba(5, 150, 105, .30);
+  --state-warning: var(--warning);
+  --state-warning-bg: rgba(217, 119, 6, .10);
+  --state-warning-border: rgba(217, 119, 6, .30);
+  --state-danger: var(--error);
+  --state-danger-bg: rgba(220, 38, 38, .09);
+  --state-danger-border: rgba(220, 38, 38, .28);
+  --state-info: var(--accent);
+  --state-info-bg: rgba(37, 99, 235, .09);
+  --state-info-border: rgba(37, 99, 235, .28);
+  --state-neutral: var(--text-secondary);
+  --state-neutral-bg: rgba(100, 116, 139, .10);
+  --state-neutral-border: var(--border-light);
+  --state-fresh: #7C3AED;
+  --state-fresh-bg: rgba(124, 58, 237, .09);
+  --state-fresh-border: rgba(124, 58, 237, .28);
+  --state-pending: #EA580C;
+  --state-pending-bg: rgba(234, 88, 12, .10);
+  --state-pending-border: rgba(234, 88, 12, .30);
+
+  --elevation-1: 0 1px 2px rgba(15, 27, 45, .08), 0 0 0 1px rgba(15, 27, 45, .04);
+  --elevation-2: var(--shadow);
+  --focus-ring: 0 0 0 3px var(--accent-glow);
+  --radius-sm: 8px;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -68,8 +150,8 @@ body {
   font-family: var(--font);
   font-size: 12.5px;
   background:
-    radial-gradient(1200px 600px at 80% -10%, rgba(59, 130, 246, .12), transparent 55%),
-    radial-gradient(900px 500px at 10% 110%, rgba(52, 211, 153, .06), transparent 50%),
+    radial-gradient(1200px 600px at 80% -10%, rgba(var(--accent-rgb), .10), transparent 55%),
+    radial-gradient(900px 500px at 10% 110%, rgba(var(--success-rgb), .05), transparent 50%),
     var(--bg-primary);
   color: var(--text-primary);
   overflow: hidden;
@@ -111,7 +193,7 @@ svg.icon, .btn-icon svg, .cat-icon svg, .empty-icon svg, .modal-header svg, .ctx
 .titlebar::after {
   content: '';
   position: absolute; left: 0; right: 0; bottom: 0; height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(59, 130, 246, .45), transparent);
+  background: linear-gradient(90deg, transparent, rgba(var(--accent-rgb), .45), transparent);
   opacity: .7;
   pointer-events: none;
 }
@@ -119,16 +201,16 @@ svg.icon, .btn-icon svg, .cat-icon svg, .empty-icon svg, .modal-header svg, .ctx
 .app-icon { display: flex; align-items: center; justify-content: center; -webkit-app-region: no-drag; }
 .app-icon-img { width: 22px; height: 22px; border-radius: 6px; display: block; object-fit: contain; box-shadow: 0 0 0 1px rgba(255,255,255,.08); }
 .app-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; font-weight: 650; color: #fff; letter-spacing: .2px; }
-.app-subtitle { color: rgba(230, 237, 247, .55); font-weight: 450; font-size: 11px; letter-spacing: .3px; }
+.app-subtitle { color: rgba(255, 255, 255, .58); font-weight: 450; font-size: 11px; letter-spacing: .3px; }
 .app-version {
   display: inline-block; margin-left: 8px; padding: 1px 8px;
   background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.12);
-  border-radius: var(--radius-pill); font-family: var(--font-mono); font-size: 10px; font-weight: 600; color: #C9D7EC;
+  border-radius: var(--radius-pill); font-family: var(--font-mono); font-size: 10px; font-weight: 600; color: rgba(255, 255, 255, .8);
   letter-spacing: .3px; vertical-align: middle;
 }
 .titlebar-controls { display: flex; gap: 2px; -webkit-app-region: no-drag; }
 .title-btn {
-  background: transparent; border: none; color: #D7E2F2;
+  background: transparent; border: none; color: rgba(255, 255, 255, .86);
   width: 38px; height: 28px; display: flex; align-items: center; justify-content: center;
   cursor: pointer; border-radius: 8px; transition: background .15s, color .15s;
 }
@@ -179,21 +261,21 @@ svg.icon, .btn-icon svg, .cat-icon svg, .empty-icon svg, .modal-header svg, .ctx
 .tool-btn.primary {
   background: linear-gradient(180deg, var(--accent-soft), var(--accent));
   border-color: transparent;
-  color: #fff;
+  color: var(--on-accent);
   font-weight: 600;
-  box-shadow: 0 4px 14px rgba(37, 99, 235, .35);
+  box-shadow: 0 4px 14px rgba(var(--accent-rgb), .35);
 }
-.tool-btn.primary:hover { filter: brightness(1.06); box-shadow: 0 6px 18px rgba(37, 99, 235, .45); }
-.tool-btn.primary .btn-icon { color: #fff; }
+.tool-btn.primary:hover { filter: brightness(1.06); box-shadow: 0 6px 18px rgba(var(--accent-rgb), .45); }
+.tool-btn.primary .btn-icon { color: var(--on-accent); }
 .tool-btn.small { padding: 4px 10px; font-size: 11px; height: 28px; }
 .tool-btn.ghost { background: transparent; }
-.tool-btn.danger-ghost { color: var(--error); border-color: rgba(248, 113, 113, .35); }
-.tool-btn.danger-ghost:hover { background: rgba(248, 113, 113, .12); border-color: var(--error); box-shadow: none; }
+.tool-btn.danger-ghost { color: var(--error); border-color: rgba(var(--error-rgb), .35); }
+.tool-btn.danger-ghost:hover { background: rgba(var(--error-rgb), .12); border-color: var(--error); box-shadow: none; }
 .tool-btn.danger-btn {
-  background: linear-gradient(180deg, #FB7185, var(--error));
-  border-color: transparent; color: #fff; font-weight: 600;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--error) 82%, #fff), var(--error));
+  border-color: transparent; color: var(--on-danger); font-weight: 600;
 }
-.tool-btn.danger-btn:hover { filter: brightness(1.05); box-shadow: 0 6px 16px rgba(248, 113, 113, .35); }
+.tool-btn.danger-btn:hover { filter: brightness(1.05); box-shadow: 0 6px 16px rgba(var(--error-rgb), .35); }
 .btn-icon { font-size: 14px; display: inline-flex; align-items: center; justify-content: center; color: inherit; }
 .speed-display, .status-display {
   display: flex; align-items: center; gap: 8px;
@@ -269,7 +351,14 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
   transition: background .15s, color .15s;
   border-radius: 10px;
   margin-bottom: 2px;
+  /* Real <button> reset: category filters are keyboard focusable controls,
+     not pointer-only divs (APP-006). */
+  width: 100%;
+  background: none;
+  border: 0;
   border-left: 2px solid transparent;
+  font-family: inherit;
+  text-align: left;
 }
 .sidebar-item:hover { background: var(--row-hover); color: var(--text-primary); }
 .sidebar-item.active {
@@ -288,7 +377,7 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
   font-size: 10px; color: var(--text-muted);
   min-width: 22px; text-align: center;
 }
-.sidebar-item.active .cat-count { color: var(--accent-soft); border-color: rgba(59, 130, 246, .35); }
+.sidebar-item.active .cat-count { color: var(--accent-soft); border-color: rgba(var(--accent-rgb), .35); }
 
 .download-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
 .search-bar {
@@ -310,7 +399,7 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
 .search-bar input::placeholder { color: var(--text-muted); }
 .search-clear {
   position: absolute; right: 24px;
-  width: 22px; height: 22px; padding: 0;
+  width: 26px; height: 26px; padding: 0;
   display: flex; align-items: center; justify-content: center;
   background: transparent; border: none; border-radius: 50%;
   color: var(--text-muted); font-size: 15px; line-height: 1;
@@ -325,7 +414,7 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
   padding: 8px 12px;
   background: var(--glass);
   backdrop-filter: blur(14px);
-  border: 1px solid rgba(59, 130, 246, .35);
+  border: 1px solid rgba(var(--accent-rgb), .35);
   border-radius: var(--radius-pill);
   box-shadow: 0 8px 28px rgba(0, 0, 0, .25);
   flex-wrap: wrap;
@@ -346,7 +435,7 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
 /* Photoshop-style marquee (rubber-band) selection rectangle */
 .marquee-rect {
   position: absolute; z-index: 50; pointer-events: none;
-  background: rgba(59, 130, 246, .14);
+  background: rgba(var(--accent-rgb), .14);
   border: 1px solid var(--accent);
   border-radius: 4px;
 }
@@ -354,13 +443,21 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
 .download-table thead { position: sticky; top: 0; z-index: 10; }
 .download-table th { position: relative; }
 
-/* Draggable column-resize handles */
+/* Draggable column-resize handles. A 14px grab strip plus an explicit
+   keyboard path (Arrow keys resize, Home resets) — the pointer-only 9px
+   sliver failed both target-size and keyboard use (AUD-015). */
 .col-resizer {
-  position: absolute; top: 0; right: -4px; width: 9px; height: 100%;
+  position: absolute; top: 0; right: -7px; width: 14px; height: 100%;
+  padding: 0; margin: 0; background: transparent; border: 0;
   cursor: col-resize; user-select: none; z-index: 20; border-radius: 2px;
+  touch-action: none;
 }
-.col-resizer:hover { background: rgba(59, 130, 246, .35); }
-.col-resizer.dragging { background: rgba(59, 130, 246, .55); }
+.col-resizer::after {
+  content: ''; position: absolute; top: 20%; bottom: 20%; left: 6px; width: 2px;
+  background: transparent; border-radius: 1px;
+}
+.col-resizer:hover::after { background: rgba(var(--accent-rgb), .55); }
+.col-resizer.dragging::after { background: rgba(var(--accent-rgb), .85); }
 .download-table th {
   background: color-mix(in srgb, var(--bg-secondary) 92%, var(--accent) 8%);
   padding: 9px 12px; text-align: left;
@@ -417,7 +514,7 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
 }
 .file-quality-badge {
   display: inline-block; font-size: 9px; font-weight: 700;
-  background: rgba(59, 130, 246, .16); color: var(--accent-soft);
+  background: rgba(var(--accent-rgb), .16); color: var(--accent-soft);
   padding: 1px 5px; border-radius: 4px; margin-left: 5px; vertical-align: middle;
   letter-spacing: .3px;
 }
@@ -433,8 +530,8 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
 .audio-missing-badge {
   display: inline-block; margin-left: 4px; padding: 0 5px;
   font-size: 10px; line-height: 15px; vertical-align: middle;
-  background: rgba(251, 191, 36, .12); color: var(--warning);
-  border: 1px solid rgba(251, 191, 36, .35); border-radius: 4px; cursor: help;
+  background: rgba(var(--warning-rgb), .12); color: var(--warning);
+  border: 1px solid rgba(var(--warning-rgb), .35); border-radius: 4px; cursor: help;
 }
 
 .progress-cell { display: flex; align-items: center; gap: 8px; }
@@ -452,7 +549,7 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
    fill while downloading) is the single motion on an active row. */
 @keyframes shimmer { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
 .progress-fill.is-done {
-  background: linear-gradient(90deg, #059669, var(--success));
+  background: var(--progress-done-fill);
   transition: width .2s cubic-bezier(.2, .8, .2, 1), background .2s;
 }
 .progress-text {
@@ -468,8 +565,8 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
 .segment.done .segment-fill { background: var(--success); }
 .segment.pending .segment-fill { background: transparent; }
 /* FluxDown tail micro-split: a small straggler slice that keeps idle workers busy */
-.segment.tail { height: 3px; background: rgba(167, 139, 250, .22); }
-.segment.tail .segment-fill { background: #A78BFA; }
+.segment.tail { height: 3px; background: rgba(var(--fresh-rgb), .22); }
+.segment.tail .segment-fill { background: var(--state-fresh); }
 
 /* Plexo BlockGrid: the segment map in byte space — a wide chunk is a wide
    block (flex-basis is set inline from its share of the file), and each
@@ -487,8 +584,8 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
 .block.done .block-fill { background: var(--success); }
 .block.pending .block-fill { background: transparent; }
 /* Tail micro-split (FluxDown): straggler slice that keeps idle workers busy */
-.block.tail { background: rgba(167, 139, 250, .22); }
-.block.tail .block-fill { background: #A78BFA; }
+.block.tail { background: rgba(var(--fresh-rgb), .22); }
+.block.tail .block-fill { background: var(--state-fresh); }
 /* Single-chunk byte map (yt-dlp / torrent / single-connection HTTP): the
    whole file as ONE wide block. paused holds its fill without the glow;
    stalled (error) drains to the muted tone so it reads as "stopped here". */
@@ -568,35 +665,49 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
   display: inline-block; padding: 2px 9px; border-radius: var(--radius-pill);
   font-size: 10px; font-weight: 650; text-transform: uppercase; letter-spacing: .5px;
 }
-.status-badge.downloading { background: rgba(59, 130, 246, .16); color: var(--accent-soft); border: 1px solid rgba(59, 130, 246, .35); }
-.status-badge.completed  { background: rgba(52, 211, 153, .14); color: var(--success); border: 1px solid rgba(52, 211, 153, .35); }
-.status-badge.paused     { background: rgba(251, 191, 36, .12); color: var(--warning); border: 1px solid rgba(251, 191, 36, .35); }
-.status-badge.error      { background: rgba(248, 113, 113, .12); color: var(--error); border: 1px solid rgba(248, 113, 113, .35); }
-.status-badge.queued     { background: rgba(148, 163, 184, .12); color: var(--text-secondary); border: 1px solid var(--border-light); }
-.status-badge.queued-paused { background: rgba(148, 163, 184, .12); color: var(--text-secondary); border: 1px solid var(--border-light); }
-.status-badge.connecting { background: rgba(167, 139, 250, .14); color: #A78BFA; border: 1px solid rgba(167, 139, 250, .35); }
-.status-badge.pending-approval { background: rgba(251, 146, 60, .12); color: #FB923C; border: 1px solid rgba(251, 146, 60, .35); }
+.status-badge.downloading { background: var(--state-info-bg); color: var(--state-info); border: 1px solid var(--state-info-border); }
+.status-badge.completed  { background: var(--state-success-bg); color: var(--state-success); border: 1px solid var(--state-success-border); }
+.status-badge.paused     { background: var(--state-warning-bg); color: var(--state-warning); border: 1px solid var(--state-warning-border); }
+.status-badge.error      { background: var(--state-danger-bg); color: var(--state-danger); border: 1px solid var(--state-danger-border); }
+.status-badge.queued     { background: var(--state-neutral-bg); color: var(--state-neutral); border: 1px solid var(--state-neutral-border); }
+.status-badge.queued-paused { background: var(--state-neutral-bg); color: var(--state-neutral); border: 1px solid var(--state-neutral-border); }
+.status-badge.connecting { background: var(--state-fresh-bg); color: var(--state-fresh); border: 1px solid var(--state-fresh-border); }
+.status-badge.pending-approval { background: var(--state-pending-bg); color: var(--state-pending); border: 1px solid var(--state-pending-border); }
 
 /* Live adaptive-connection chip: FluxDown-style worker count (active / target) */
 .conn-chip {
   display: inline-block; margin-left: 7px; padding: 1px 7px; border-radius: var(--radius-pill);
   font-size: 10px; font-weight: 600; font-family: var(--font-mono); letter-spacing: .2px;
-  color: var(--accent-soft); background: rgba(59, 130, 246, .10);
-  border: 1px solid rgba(59, 130, 246, .28); vertical-align: middle;
+  color: var(--state-info); background: var(--state-info-bg);
+  border: 1px solid var(--state-info-border); vertical-align: middle;
+}
+.priority-chip {
+  display: inline-block; margin-left: 5px; padding: 1px 7px; border-radius: var(--radius-pill);
+  font-size: 10px; font-weight: 700; letter-spacing: .2px;
+  vertical-align: middle;
+}
+.priority-chip.high { color: var(--state-warning); background: var(--state-warning-bg); border: 1px solid var(--state-warning-border); }
+.priority-chip.low { color: var(--state-neutral); background: var(--state-neutral-bg); border: 1px solid var(--state-neutral-border); }
+.limit-chip {
+  display: inline-block; margin-left: 5px; padding: 1px 7px; border-radius: var(--radius-pill);
+  font-size: 10px; font-weight: 600; font-family: var(--font-mono); letter-spacing: .2px;
+  color: var(--state-fresh); background: var(--state-fresh-bg);
+  border: 1px solid var(--state-fresh-border); vertical-align: middle;
 }
 /* "Combine networks" chip (Plexo multi-NIC): connections spread across
-   several physical networks — purple, distinct from the blue conn chip. */
+   several physical networks — distinct from the blue conn chip. */
 .net-chip {
   display: inline-block; margin-left: 5px; padding: 1px 7px; border-radius: var(--radius-pill);
   font-size: 10px; font-weight: 600; font-family: var(--font-mono); letter-spacing: .2px;
-  color: #A78BFA; background: rgba(167, 139, 250, .12);
-  border: 1px solid rgba(167, 139, 250, .35); vertical-align: middle;
+  color: var(--state-fresh); background: var(--state-fresh-bg);
+  border: 1px solid var(--state-fresh-border); vertical-align: middle;
 }
 /* Status badge + live chips (connections / multi-network) stack on two lines
    so the fixed-width column never clips them */
 .col-status { white-space: normal; }
 .col-status .status-badge { display: inline-block; }
-.col-status .conn-chip, .col-status .net-chip { margin-left: 0; margin-top: 3px; }
+.col-status .conn-chip, .col-status .net-chip,
+.col-status .priority-chip, .col-status .limit-chip { margin-left: 0; margin-top: 3px; }
 
 .action-btns { display: flex; gap: 4px; }
 .action-btn {
@@ -615,11 +726,40 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
   padding: 80px 20px; color: var(--text-muted);
   gap: 6px;
 }
-.empty-icon { font-size: 64px; margin-bottom: 12px; opacity: .45; color: var(--accent-soft); }
+/* Startup state (APP-007) — occupies the table area while the library loads
+   or after a failed load, so the empty state is never shown prematurely. */
+.boot-state {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: 80px 20px; color: var(--text-muted); gap: 12px;
+}
+.boot-state[data-state="error"] .boot-text { color: var(--warning); }
+.boot-spinner {
+  width: 22px; height: 22px; border-radius: 50%;
+  border: 2px solid var(--border); border-top-color: var(--accent);
+  animation: boot-spin .8s linear infinite;
+}
+.boot-state[data-state="error"] .boot-spinner { display: none; }
+@keyframes boot-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .boot-spinner { animation: none; }
+}
+/* Fluent-style empty canvas: the icon sits in a soft glass medallion so the
+   state reads as intentional, not as a missing table. */
+.empty-icon {
+  width: 84px; height: 84px; display: flex; align-items: center; justify-content: center;
+  margin-bottom: 14px; border-radius: 50%;
+  color: var(--accent-soft);
+  background:
+    radial-gradient(circle at 30% 25%, var(--accent-glow), transparent 65%),
+    var(--bg-elevated);
+  border: 1px solid var(--border);
+  box-shadow: var(--elevation-1);
+}
+.empty-icon svg { width: 40px; height: 40px; opacity: .9; }
 .empty-text { font-size: 18px; font-weight: 650; margin-bottom: 4px; color: var(--text-primary); letter-spacing: -.2px; }
-.empty-hint { font-size: 13px; text-align: center; max-width: 420px; line-height: 1.5; }
+.empty-hint { font-size: 13px; text-align: center; max-width: 440px; line-height: 1.55; }
 .empty-actions {
-  display: flex; align-items: center; gap: 12px; margin-top: 16px; flex-wrap: wrap; justify-content: center;
+  display: flex; align-items: center; gap: 12px; margin-top: 18px; flex-wrap: wrap; justify-content: center;
 }
 .empty-kbd-hint { font-size: 11px; color: var(--text-muted); }
 .empty-kbd-hint kbd {
@@ -628,6 +768,40 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
   background: var(--bg-elevated); border: 1px solid var(--border);
 }
 .sched-empty { text-align: center; padding: 20px; color: var(--text-muted); font-size: 13px; }
+
+/* Inline validation (AUD-014 / APP-012): a field-level error the user can see
+   and a screen reader can announce, instead of a silent no-op submit. */
+.form-group.has-error input,
+.form-group.has-error select {
+  border-color: var(--state-danger-border);
+  box-shadow: 0 0 0 3px var(--state-danger-bg);
+}
+/* Focus must not paint the error field with the neutral accent ring. */
+.form-group.has-error input:focus,
+.form-group.has-error select:focus,
+.form-group.has-error input:focus-visible {
+  border-color: var(--state-danger-border);
+  box-shadow: 0 0 0 3px var(--state-danger-bg);
+  outline: none;
+}
+.field-error {
+  display: none;
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: var(--state-danger);
+  line-height: 1.45;
+}
+.field-error.visible { display: block; }
+.settings-hint.is-error { color: var(--state-danger); }
+@keyframes field-shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-3px); }
+  75% { transform: translateX(3px); }
+}
+.form-group.has-error.field-reject { animation: field-shake .18s ease-in-out; }
+@media (prefers-reduced-motion: reduce) {
+  .form-group.has-error.field-reject { animation: none; }
+}
 
 /* ── Status Bar ────────────────────────────────────────────────────────────── */
 
@@ -638,8 +812,46 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
 }
 .status-left, .status-right { display: flex; gap: 16px; flex-wrap: wrap; min-width: 0; }
 .status-item { display: flex; align-items: center; gap: 6px; font-family: var(--font-mono); letter-spacing: .2px; }
+/* Visible keyboard focus for every custom control (APP-006 / AUD-015). */
+.sidebar-item:focus-visible,
+.quality-option:focus-visible,
+.download-table th[data-sortable="1"]:focus-visible,
+.tool-btn:focus-visible,
+.title-btn:focus-visible,
+.settings-tab:focus-visible,
+.col-resizer:focus-visible,
+.search-clear:focus-visible,
+.modal-close:focus-visible,
+.action-btn:focus-visible,
+.ctx-item:focus-visible,
+.sidebar-collapse:focus-visible,
+.selection-bar button:focus-visible,
+input[type="checkbox"]:focus-visible,
+input[type="radio"]:focus-visible,
+input[type="text"]:focus-visible,
+input[type="number"]:focus-visible,
+input[type="date"]:focus-visible,
+input[type="time"]:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* The custom switch sets `outline: none` at (0,3,1) specificity, so the
+   shared focus rule cannot win — repeat the full outline here. */
+.form-group.toggle input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.quality-option:focus-visible { outline-offset: -2px; }
+.download-table th[data-sortable="1"] { cursor: pointer; }
+
 .indicator-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-muted); display: inline-block; }
-.indicator-dot.active { background: var(--success); box-shadow: 0 0 8px rgba(52, 211, 153, .55); }
+.indicator-dot.active { background: var(--success); box-shadow: 0 0 8px rgba(var(--success-rgb), .55); }
+/* Persistent (not a toast) warning: download state could not be saved to disk.
+   Stays until a later write succeeds, so a disk-full/permission problem is
+   never mistaken for a healthy session. */
+.status-item.persist-warning { color: var(--warning); }
 
 /* ── Modals ────────────────────────────────────────────────────────────────── */
 
@@ -671,6 +883,31 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
 }
 .delete-checkbox input { accent-color: var(--error); width: 15px; height: 15px; cursor: pointer; }
 .delete-hint { font-size: 11px; color: var(--text-muted); margin-top: 8px; line-height: 1.45; }
+.options-modal { width: 540px; }
+.options-file {
+  min-width: 0; overflow-wrap: anywhere; font-size: 12.5px;
+  color: var(--text-secondary); margin-bottom: 16px;
+}
+.options-fieldset {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 10px 12px 8px;
+}
+.options-fieldset legend {
+  font-size: 11.5px; font-weight: 600; color: var(--text-secondary); padding: 0 5px;
+}
+.option-radio {
+  display: flex; align-items: center; gap: 8px; padding: 5px 0;
+  font-size: 12.5px; color: var(--text-primary); cursor: pointer;
+}
+.option-radio input { accent-color: var(--accent); width: 16px; height: 16px; cursor: pointer; }
+.option-files { display: flex; flex-direction: column; gap: 3px; max-height: 220px; overflow-y: auto; }
+.option-file-row {
+  display: flex; align-items: center; gap: 8px; min-width: 0; padding: 5px 0;
+  font-size: 12px; color: var(--text-primary); cursor: pointer;
+}
+.option-file-row input { accent-color: var(--accent); width: 16px; height: 16px; flex: 0 0 auto; cursor: pointer; }
+.option-file-name { min-width: 0; overflow-wrap: anywhere; }
+.option-file-size { margin-left: auto; color: var(--text-muted); white-space: nowrap; }
 .modal-header {
   display: flex; justify-content: space-between; align-items: center;
   padding: 12px 18px;
@@ -690,7 +927,7 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
   cursor: pointer; width: 30px; height: 30px;
   display: flex; align-items: center; justify-content: center; border-radius: 8px;
 }
-.modal-close:hover { background: rgba(248, 113, 113, .15); color: var(--error); }
+.modal-close:hover { background: rgba(var(--error-rgb), .15); color: var(--error); }
 .modal-body { padding: 20px; }
 .modal-footer {
   display: flex; justify-content: flex-end; gap: 8px;
@@ -753,14 +990,15 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
 }
 .form-group.toggle label { margin-bottom: 0; }
 .form-group.toggle input[type="checkbox"] {
-  width: 38px; height: 22px; -webkit-appearance: none; appearance: none;
+  /* 40×24 keeps the switch on the WCAG 2.2 24px target minimum. */
+  width: 40px; height: 24px; -webkit-appearance: none; appearance: none;
   background: var(--bg-primary); border: 1px solid var(--border);
   border-radius: 999px; position: relative; cursor: pointer; outline: none;
   transition: background .2s, border-color .2s;
 }
 .form-group.toggle input[type="checkbox"]::before {
   content: ''; position: absolute; top: 2px; left: 2px;
-  width: 16px; height: 16px; background: var(--text-muted);
+  width: 18px; height: 18px; background: var(--text-muted);
   border-radius: 50%; transition: all .2s;
 }
 .form-group.toggle input[type="checkbox"]:checked { background: var(--accent); border-color: var(--accent); }
@@ -779,6 +1017,23 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
   font-family: var(--font-mono); font-size: 10.5px;
   background: var(--bg-tertiary); padding: 1px 5px; border-radius: 4px;
 }
+
+/* Trusted extensions (AUD-012): one row per explicitly allowed origin. */
+.trusted-extensions { display: flex; flex-direction: column; gap: 8px; }
+.trusted-extension-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.trusted-extension-origin {
+  flex: 1; min-width: 0;
+  font-family: var(--font-mono); font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.trusted-extension-empty { font-size: 11.5px; color: var(--text-muted); line-height: 1.5; }
 
 /* Settings left-nav tabs */
 .settings-layout {
@@ -859,7 +1114,7 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
    like a broken quality list. */
 .quality-page-note {
   margin-top: 8px; padding: 7px 9px;
-  font-size: 11px; line-height: 1.45; color: var(--text-secondary, #cbd5e1);
+  font-size: 11px; line-height: 1.45; color: var(--text-secondary);
   background: rgba(245, 158, 11, 0.12);
   border: 1px solid rgba(245, 158, 11, 0.35);
   border-radius: 6px;
@@ -894,7 +1149,7 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
 }
 .quality-option.selected .quality-icon {
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   border-color: transparent;
 }
 .quality-info { flex: 1; min-width: 0; }
@@ -941,11 +1196,11 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
 .ctx-item svg { color: var(--text-muted); flex-shrink: 0; }
 .ctx-item:hover { background: var(--row-hover); }
 .ctx-item:hover svg { color: var(--accent-soft); }
-.ctx-item.danger:hover { background: rgba(248, 113, 113, .14); color: var(--error); }
+.ctx-item.danger:hover { background: rgba(var(--error-rgb), .14); color: var(--error); }
 .ctx-item.danger:hover svg { color: var(--error); }
 .ctx-divider { height: 1px; background: var(--border); margin: 6px 8px; }
 
-input[type="checkbox"] { accent-color: var(--accent); width: 14px; height: 14px; cursor: pointer; }
+input[type="checkbox"] { accent-color: var(--accent); width: 16px; height: 16px; cursor: pointer; }
 
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .5; } }
 /* v5.7.0: the downloading icon no longer pulses — the icon progress ring is

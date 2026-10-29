@@ -22,18 +22,72 @@ const searchInput = document.getElementById('search-input');
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
-document.addEventListener('DOMContentLoaded', async () => {
-  downloads = await window.aidm.getDownloads();
-  settings = await window.aidm.getSettings();
+let bootState = 'loading';
+
+/**
+ * Explicit startup states (APP-007): loading / ready / error.
+ *
+ * The old init awaited IPC before wiring anything, so a slow or failed call
+ * left a dead shell with the "No downloads yet" copy already on screen —
+ * indistinguishable from a genuinely empty library. The shell now wires
+ * itself first and owns its boot state; the empty state is only shown after
+ * a successful load proved the list empty.
+ */
+function setBootState(state, message) {
+  bootState = state;
+  const boot = document.getElementById('boot-state');
+  const text = document.getElementById('boot-text');
+  const retry = document.getElementById('btn-boot-retry');
+  const table = document.getElementById('download-table');
+  if (boot) {
+    boot.style.display = state === 'ready' ? 'none' : 'flex';
+    boot.dataset.state = state;
+  }
+  if (text) {
+    text.textContent = message ||
+      (state === 'error' ? 'Could not load your downloads.' : 'Loading your library…');
+  }
+  if (retry) retry.style.display = state === 'error' ? '' : 'none';
+  if (table) table.style.display = state === 'ready' ? '' : 'none';
+  if (emptyState) emptyState.style.display = 'none';
+}
+
+async function bootstrapLibrary() {
+  setBootState('loading');
+  try {
+    // One round of IPC; each call is guarded so a settings failure does not
+    // discard a perfectly good download list.
+    const [rows, loadedSettings] = await Promise.all([
+      window.aidm.getDownloads(),
+      window.aidm.getSettings().catch(() => ({})),
+    ]);
+    downloadsGeneration++;
+    downloads = Array.isArray(rows) ? rows : [];
+    settings = loadedSettings || {};
+    setBootState('ready');
+    renderDownloads();
+    updateStats();
+  } catch (e) {
+    const detail = e && e.message ? e.message : '';
+    setBootState('error', 'Could not load your downloads.' + (detail ? ' ' + detail : ''));
+    // Keep the shell usable: Add URL / Settings still work with defaults.
+    settings = settings || {};
+    renderDownloads();
+    updateStats();
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
   initTheme();
+  setBootState('loading');
   setupEventListeners();
   setupIPCListeners();
-  renderDownloads();
   updateStats();
   updateExtensionStatus();
   loadAppVersion();
   // Poll extension connectivity every 30s so the status bar stays honest
   setInterval(updateExtensionStatus, 30000);
+  bootstrapLibrary();
 });
 
 /** Show the app version in the title bar (e.g. "v3.0.0"). */
@@ -62,6 +116,16 @@ async function updateExtensionStatus() {
     el.appendChild(span);
   };
   try {
+    // Ask the MAIN process: a file:// page cannot read the local API (its
+    // forged-able `Origin: null` is refused by the gate), so the old direct
+    // fetch could only report Degraded. Older preloads fall back to it.
+    if (window.aidm.getApiStatus) {
+      const result = await window.aidm.getApiStatus();
+      if (result && result.running) setState('Connected', 'var(--success)');
+      else if (result && result.status) setState('Degraded', 'var(--warning)');
+      else setState('Disconnected', 'var(--error)');
+      return;
+    }
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 2000);
     const res = await fetch('http://127.0.0.1:' + aidmApiPort + '/api/status', { signal: ctrl.signal });
@@ -334,6 +398,11 @@ function updateSortHeaders() {
     const active = sortState.col && th.dataset.col === sortState.col;
     th.classList.toggle('sort-active', !!active);
     if (ind) ind.textContent = active ? (sortState.dir === 1 ? '▲' : '▼') : '';
+    if (th.dataset.sortable === '1') {
+      // Announced by assistive tech; kept on the th itself so the column
+      // header semantics survive (a role="button" would erase them).
+      th.setAttribute('aria-sort', active ? (sortState.dir === 1 ? 'ascending' : 'descending') : 'none');
+    }
   });
 }
 
@@ -349,16 +418,76 @@ function toggleSort(col) {
   renderDownloads();
 }
 
+/**
+ * Empty canvas states (APP-012 / AUD-014): "the library is empty" and "your
+ * filter matched nothing" are different situations and used to share the same
+ * "No downloads yet" copy — telling a user with 500 downloads that they have
+ * none because they typed a search term.
+ */
+function categoryLabel(category) {
+  const el = document.querySelector(`.sidebar-item[data-category="${category}"] .cat-label`);
+  return (el && el.textContent || category || '').trim();
+}
+
+function hasActiveFilters() {
+  return activeCategory !== 'all' || !!(searchInput.value || '').trim();
+}
+
+function renderEmptyState() {
+  const title = document.getElementById('empty-title');
+  const hint = document.getElementById('empty-hint');
+  const addBtn = document.getElementById('btn-empty-add');
+  const clearBtn = document.getElementById('btn-empty-clear');
+  const kbd = document.getElementById('empty-kbd-hint');
+  if (!title || !hint) return;
+  const term = (searchInput.value || '').trim();
+  const filtered = hasActiveFilters();
+  if (filtered) {
+    title.textContent = term ? 'No downloads match your search' : 'Nothing in this category';
+    hint.textContent = term
+      ? `Nothing matches “${term}”. Try a shorter term, or clear the filter.`
+      : `There are no ${categoryLabel(activeCategory).toLowerCase()} downloads right now. Pick another category, or clear the filter.`;
+  } else {
+    title.textContent = 'No downloads yet';
+    hint.textContent = 'Add a URL, paste a link, or browse the web — AiDM intercepts downloads automatically.';
+  }
+  if (addBtn) addBtn.style.display = filtered ? 'none' : '';
+  if (clearBtn) clearBtn.style.display = filtered ? '' : 'none';
+  if (kbd) kbd.style.display = filtered ? 'none' : '';
+}
+
+function activateCategory(category) {
+  activeCategory = category;
+  document.querySelectorAll('.sidebar-item').forEach(i => {
+    const on = i.dataset.category === category;
+    i.classList.toggle('active', on);
+    i.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+  renderDownloads();
+}
+
+function clearFilters() {
+  searchInput.value = '';
+  const clear = document.getElementById('search-clear');
+  if (clear) clear.style.display = 'none';
+  activateCategory('all');
+}
+
 function renderDownloads() {
   const filtered = sortDownloads(filterDownloads(downloads));
   downloadList.innerHTML = '';
   rowEls.clear();
 
   if (filtered.length === 0) {
-    emptyState.style.display = 'flex';
+    // While loading or after a failed load, "No downloads yet" is a lie — the
+    // boot state owns this area until a successful load proves the list empty
+    // (APP-007). Rows arriving through IPC also prove the library is live.
+    if (bootState === 'ready') renderEmptyState();
+    emptyState.style.display = bootState === 'ready' ? 'flex' : 'none';
     updateSelectionBar();
     return;
   }
+  if (bootState !== 'ready') setBootState('ready');
   emptyState.style.display = 'none';
 
   filtered.forEach(dl => {
@@ -526,7 +655,7 @@ function renderDownloadRow(dl) {
     const fillClass = isDone ? 'is-done' : (isActive ? 'is-active' : '');
 
     tr.innerHTML = `
-      <td class="col-check"><input type="checkbox" ${selectedIds.has(dl.id) ? 'checked' : ''} /></td>
+      <td class="col-check"><input type="checkbox" aria-label="Select ${escapeAttr(dl.filename)}" ${selectedIds.has(dl.id) ? 'checked' : ''} /></td>
       <td class="col-name">
         <div class="file-info">
           <div class="file-icon">${icon}</div>
@@ -556,6 +685,7 @@ function renderDownloadRow(dl) {
       </td>
       <td class="col-status">
         <span class="status-badge ${dl.status}">${formatStatus(dl.status)}</span>
+        ${priorityChipHtml(dl)}${limitChipHtml(dl)}
         ${(dl.connections != null || dl.targetConnections != null) ? connChipHtml(dl) : ''}
         ${dl.networkSpread ? netChipHtml(dl) : ''}
       </td>
@@ -569,6 +699,7 @@ function renderDownloadRow(dl) {
           ${dl.status === 'completed' && dl.extractDir ? `<button class="action-btn" data-action="open-extract" title="${escapeAttr(dl.extractNote || 'Open extracted folder')}"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-archive"></use></svg></button>` : ''}
           ${dl.status === 'error' && dl.aiHint ? `<button class="action-btn" data-action="ai-hint" title="${escapeAttr(dl.aiHint)}"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><use href="#i-sparkles"></use></svg></button>` : ''}
           ${dl.status === 'error' && dl.ytLogPath ? `<button class="action-btn" data-action="open-log" title="Open error log"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-clipboard"></use></svg></button>` : ''}
+          ${dl.status !== 'completed' ? `<button class="action-btn" data-action="options" title="Download options" aria-label="Download options for ${escapeAttr(dl.filename)}"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-gear"></use></svg></button>` : ''}
           <button class="action-btn danger" data-action="remove" title="Remove from list (file stays on disk)"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-list-x"></use></svg></button>
         </div>
       </td>
@@ -754,6 +885,18 @@ function netChipHtml(dl) {
   return `<span class="net-chip" title="Combining ${escapeAttr(label)} — connections spread across ${n} networks">NET ${n}×</span>`;
 }
 
+function priorityChipHtml(dl) {
+  if (dl.priority === 'high') return '<span class="priority-chip high" title="High queue priority">HIGH</span>';
+  if (dl.priority === 'low') return '<span class="priority-chip low" title="Low queue priority">LOW</span>';
+  return '';
+}
+
+function limitChipHtml(dl) {
+  const bytes = Number(dl.speedLimit) || 0;
+  if (!bytes) return '';
+  return `<span class="limit-chip" title="This download has its own speed cap">CAP ${escapeHtml(formatSpeed(bytes))}</span>`;
+}
+
 function formatStatus(status) {
   const labels = {
     'downloading': 'Downloading',
@@ -802,6 +945,19 @@ async function handleAction(action, id) {
     case 'pause': await window.aidm.pauseDownload(id); break;
     case 'resume': await window.aidm.resumeDownload(id); break;
     case 'cancel': await window.aidm.cancelDownload(id); break;
+    case 'options': {
+      const dl = downloads.find((d) => d.id === id);
+      if (dl) showOptionsModal(dl);
+      break;
+    }
+    case 'priority-high':
+    case 'priority-normal':
+    case 'priority-low': {
+      const priority = action.slice(9);
+      const ok = await window.aidm.setDownloadPriority(id, priority);
+      if (ok) applyLocalPriority(id, priority);
+      break;
+    }
     case 'approve': {
       const dl = downloads.find(d => d.id === id);
       if (dl) showApprovalModal(dl);
@@ -907,9 +1063,136 @@ function hideDeleteModal() {
   deleteTargetIds = [];
 }
 
+let optionsTargetId = null;
+let optionsTorrentFiles = [];
+
+function applyLocalPriority(id, priority) {
+  const dl = downloads.find((d) => d.id === id);
+  if (!dl) return;
+  dl.priority = priority;
+  renderDownloads();
+}
+
+function updateLocalRow(id, fields) {
+  const dl = downloads.find((d) => d.id === id);
+  if (!dl) return;
+  Object.assign(dl, fields);
+  renderDownloads();
+}
+
+function formatBytesForOptions(bytes) {
+  const n = Number(bytes);
+  if (!Number.isFinite(n)) return '';
+  if (n < 1024) return `${n} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let value = n / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
+  return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unit]}`;
+}
+
+async function showOptionsModal(dl) {
+  optionsTargetId = dl.id;
+  optionsTorrentFiles = [];
+  document.getElementById('options-file-name').textContent = dl.filename || dl.url || 'Download';
+  const priority = dl.priority || 'normal';
+  document.querySelectorAll('input[name="option-priority"]').forEach((input) => {
+    input.checked = input.value === priority;
+  });
+  const speed = Math.round((Number(dl.speedLimit) || 0) / 1024);
+  document.getElementById('option-speed-limit').value = String(speed);
+  const rateSupported = !dl.isTorrent && dl.provider !== 'youtube' && !dl.isHls && !dl.isDash;
+  const speedInput = document.getElementById('option-speed-limit');
+  const speedHint = document.getElementById('option-speed-hint');
+  speedInput.disabled = !rateSupported;
+  speedHint.textContent = rateSupported
+    ? 'Applies to HTTP, HTTPS and Metalink transfers; 0 follows the global limit.'
+    : 'This transfer type uses its own engine-wide limit. The global and schedule limits still apply.';
+  const filesGroup = document.getElementById('option-files-group');
+  const fileList = document.getElementById('option-files-list');
+  const seedGroup = document.getElementById('option-seed-group');
+  fileList.replaceChildren();
+  filesGroup.hidden = true;
+  seedGroup.hidden = !dl.isTorrent;
+  document.getElementById('option-seed-policy').value = dl.seedPolicy === 'stop' ? 'stop' : 'unlimited';
+
+  if (dl.isTorrent) {
+    let info = null;
+    try { info = await window.aidm.getTorrentInfo(dl.id); } catch (e) { info = null; }
+    optionsTorrentFiles = Array.isArray(info && info.files) ? info.files
+      : Array.isArray(dl.torrentFiles) ? dl.torrentFiles : [];
+    if (optionsTorrentFiles.length > 1) {
+      filesGroup.hidden = false;
+      const selectedByIndex = new Map(optionsTorrentFiles.map((file) => [file.index, file.selected !== false]));
+      (Array.isArray(dl.fileSelection) ? dl.fileSelection : []).forEach((selected, index) => {
+        if (selectedByIndex.has(index)) selectedByIndex.set(index, selected !== false);
+      });
+      optionsTorrentFiles.forEach((file) => {
+        const label = document.createElement('label');
+        label.className = 'option-file-row';
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.checked = selectedByIndex.get(file.index) !== false;
+        input.dataset.index = String(file.index);
+        const name = document.createElement('span');
+        name.className = 'option-file-name';
+        name.textContent = file.path || file.name || `File ${file.index + 1}`;
+        const size = document.createElement('span');
+        size.className = 'option-file-size';
+        size.textContent = formatBytesForOptions(file.length);
+        label.append(input, name, size);
+        fileList.appendChild(label);
+      });
+    }
+  }
+  openOverlay('options-overlay');
+}
+
+function hideOptionsModal() {
+  closeOverlay('options-overlay');
+  optionsTargetId = null;
+  optionsTorrentFiles = [];
+}
+
+async function applyOptionsModal() {
+  const id = optionsTargetId;
+  const dl = downloads.find((d) => d.id === id);
+  if (!dl) { hideOptionsModal(); return; }
+  const priority = (document.querySelector('input[name="option-priority"]:checked') || {}).value || 'normal';
+  const speedKbps = Math.max(0, Math.floor(Number(document.getElementById('option-speed-limit').value) || 0));
+  const speedLimit = speedKbps * 1024;
+  const seedPolicy = document.getElementById('option-seed-policy').value;
+  const selection = [...document.querySelectorAll('#option-files-list input[type="checkbox"]')]
+    .map((input) => input.checked);
+
+  try {
+    if (priority !== (dl.priority || 'normal')) {
+      if (await window.aidm.setDownloadPriority(id, priority)) dl.priority = priority;
+    }
+    if (dl.provider !== 'youtube' && !dl.isHls && !dl.isDash && speedLimit !== (dl.speedLimit || 0)) {
+      const applied = await window.aidm.setDownloadSpeedLimit(id, speedLimit);
+      if (applied) dl.speedLimit = speedLimit;
+    }
+    if (dl.isTorrent) {
+      if (selection.length > 1 && await window.aidm.setTorrentSelection(id, selection)) {
+        dl.fileSelection = selection;
+        optionsTorrentFiles.forEach((file, index) => { file.selected = selection[index] !== false; });
+      }
+      if (seedPolicy !== dl.seedPolicy && await window.aidm.setTorrentSeedPolicy(id, seedPolicy)) {
+        dl.seedPolicy = seedPolicy;
+      }
+    }
+    renderDownloads();
+    showNotification('Download options updated', 'success');
+  } catch (err) {
+    showNotification(`Could not update download options: ${err.message || err}`, 'error');
+  }
+  hideOptionsModal();
+}
+
 /** True when any modal overlay is visible (so Delete key doesn't fight with inputs). */
 function isAnyModalOpen() {
-  return ['modal-overlay', 'quality-overlay', 'settings-overlay', 'scheduler-overlay', 'ai-overlay', 'delete-overlay', 'grab-overlay']
+  return ['modal-overlay', 'quality-overlay', 'settings-overlay', 'scheduler-overlay', 'ai-overlay', 'delete-overlay', 'options-overlay', 'grab-overlay']
     .some(id => {
       const el = document.getElementById(id);
       return el && el.style.display !== 'none' && el.style.display !== '';
@@ -918,7 +1201,7 @@ function isAnyModalOpen() {
 
 // ── Shared overlay plumbing (backdrop close, focus trap, focus restore) ──────
 
-const OVERLAY_IDS = ['modal-overlay', 'quality-overlay', 'settings-overlay', 'scheduler-overlay', 'ai-overlay', 'delete-overlay', 'grab-overlay'];
+const OVERLAY_IDS = ['modal-overlay', 'quality-overlay', 'settings-overlay', 'scheduler-overlay', 'ai-overlay', 'delete-overlay', 'options-overlay', 'grab-overlay'];
 const OVERLAY_HIDE = {
   'modal-overlay': hideAddModal,
   'quality-overlay': hideQualityPicker,
@@ -926,6 +1209,7 @@ const OVERLAY_HIDE = {
   'scheduler-overlay': hideSchedulerModal,
   'ai-overlay': hideAiModal,
   'delete-overlay': hideDeleteModal,
+  'options-overlay': hideOptionsModal,
   'grab-overlay': hideGrabModal,
 };
 const overlayReturnFocus = new Map();
@@ -937,6 +1221,24 @@ function openOverlay(id) {
     try { overlayReturnFocus.set(id, document.activeElement); } catch (e) {}
   }
   el.style.display = 'flex';
+  // Move initial focus into the dialog (APP-006): a keyboard user lands in
+  // the form, not on the page behind the overlay. The dialog box itself takes
+  // focus when it has no focusable child.
+  try {
+    // Preferred targets first: the chosen quality, the URL field, the active
+    // settings pane — then any field, then any button (never the close X
+    // before a real control exists).
+    const target = el.querySelector('.quality-option[aria-checked="true"]') ||
+      el.querySelector('#input-url, .settings-pane.active input, .settings-pane.active select') ||
+      el.querySelector('input:not([type="hidden"]):not([disabled]), select:not([disabled]), textarea:not([disabled])') ||
+      el.querySelector('button:not([disabled])');
+    if (target && typeof target.focus === 'function') {
+      target.focus();
+    } else {
+      const dialog = el.querySelector('[role="dialog"]');
+      if (dialog) { dialog.setAttribute('tabindex', '-1'); dialog.focus(); }
+    }
+  } catch (e) { /* focus is best-effort; the overlay is already usable */ }
 }
 
 function closeOverlay(id) {
@@ -1012,12 +1314,16 @@ function showContextMenu(x, y, dl) {
   const menu = document.getElementById('context-menu');
   menu.style.display = 'block';
   menu.style.left = `${Math.min(x, window.innerWidth - 200)}px`;
-  menu.style.top = `${Math.min(y, window.innerHeight - 280)}px`;
+  menu.style.top = `${Math.min(y, window.innerHeight - 380)}px`;
   menu.querySelectorAll('.ctx-item').forEach(item => {
     const a = item.dataset.action;
     item.style.display = '';
     if (a === 'pause' && dl.status !== 'downloading') item.style.display = 'none';
     if (a === 'resume' && dl.status !== 'paused' && dl.status !== 'error') item.style.display = 'none';
+    if (['priority-high', 'priority-normal', 'priority-low', 'options'].includes(a) && dl.status === 'completed') item.style.display = 'none';
+    if (a === 'priority-high' && dl.priority === 'high') item.style.display = 'none';
+    if (a === 'priority-normal' && (!dl.priority || dl.priority === 'normal')) item.style.display = 'none';
+    if (a === 'priority-low' && dl.priority === 'low') item.style.display = 'none';
     if (a === 'open-file' && dl.status !== 'completed') item.style.display = 'none';
     if (a === 'open-folder' && dl.status !== 'completed') item.style.display = 'none';
     if (a === 'copy-hash' && !dl.sha256) item.style.display = 'none';
@@ -1153,6 +1459,26 @@ function setupColResize() {
       th.style.width = '';
       saveColWidths();
     });
+    // Keyboard equivalent (AUD-015): the handle is a real button, so column
+    // sizing is not pointer-only. Home restores the default width.
+    handle.addEventListener('keydown', (e) => {
+      const minW = COL_MIN_WIDTH[th.dataset.col] || 60;
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        e.preventDefault();
+        e.stopPropagation();
+        const step = (e.shiftKey ? 48 : 16) * (e.key === 'ArrowLeft' ? -1 : 1);
+        const current = th.getBoundingClientRect().width;
+        th.style.width = Math.max(minW, Math.round(current + step)) + 'px';
+        saveColWidths();
+        return;
+      }
+      if (e.key === 'Home') {
+        e.preventDefault();
+        e.stopPropagation();
+        th.style.width = '';
+        saveColWidths();
+      }
+    });
   });
 }
 
@@ -1267,6 +1593,16 @@ function setupIPCListeners() {
     updateStats();
   });
 
+  // Persistence health (APP-009): a persistent status-bar warning instead of
+  // a toast — a disk that cannot be written is a standing condition, not an
+  // event the user should miss after 4 seconds.
+  if (window.aidm.onPersistError) {
+    window.aidm.onPersistError((data) => setPersistStatus(data && data.message, true));
+  }
+  if (window.aidm.onPersistRecovered) {
+    window.aidm.onPersistRecovered(() => setPersistStatus(null, false));
+  }
+
   // File name/path refined (e.g. learned from the server before download):
   // refresh the matching row so the title and any pending badge stay right.
   window.aidm.onDownloadUpdated((data) => {
@@ -1287,6 +1623,13 @@ function setupIPCListeners() {
       if (data.media !== undefined) dl.media = data.media;
       if (typeof data.audioMissing === 'boolean') dl.audioMissing = data.audioMissing;
       if (data.quality && typeof data.quality === 'object') dl.quality = { ...(dl.quality || {}), ...data.quality };
+      if (typeof data.priority === 'string') dl.priority = data.priority;
+      if (typeof data.speedLimit === 'number') dl.speedLimit = data.speedLimit;
+      if (Array.isArray(data.torrentFiles)) dl.torrentFiles = data.torrentFiles;
+      if (Array.isArray(data.fileSelection)) dl.fileSelection = data.fileSelection;
+      if (typeof data.seedPolicy === 'string') dl.seedPolicy = data.seedPolicy;
+      if (typeof data.uploaded === 'number') dl.uploaded = data.uploaded;
+      if (typeof data.ratio === 'number') dl.ratio = data.ratio;
     }
     renderDownloads();
     updateStats();
@@ -1351,6 +1694,8 @@ function setupEventListeners() {
   document.getElementById('btn-close').addEventListener('click', () => window.aidm.close());
   const themeBtn = document.getElementById('btn-theme');
   if (themeBtn) themeBtn.addEventListener('click', toggleTheme);
+  const bootRetry = document.getElementById('btn-boot-retry');
+  if (bootRetry) bootRetry.addEventListener('click', () => bootstrapLibrary());
 
   // Toolbar
   document.getElementById('btn-add-url').addEventListener('click', showAddModal);
@@ -1403,15 +1748,12 @@ function setupEventListeners() {
     renderDownloads();
   });
 
-  // Sidebar
+  // Sidebar — real buttons: click, Enter and Space all arrive as 'click'.
   document.querySelectorAll('.sidebar-item').forEach(item => {
-    item.addEventListener('click', () => {
-      document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
-      item.classList.add('active');
-      activeCategory = item.dataset.category;
-      renderDownloads();
-    });
+    item.addEventListener('click', () => activateCategory(item.dataset.category));
   });
+  const emptyClear = document.getElementById('btn-empty-clear');
+  if (emptyClear) emptyClear.addEventListener('click', clearFilters);
 
   const searchClear = document.getElementById('search-clear');
   const syncSearchClear = () => { if (searchClear) searchClear.style.display = searchInput.value ? 'flex' : 'none'; };
@@ -1429,10 +1771,16 @@ function setupEventListeners() {
     renderDownloads();
   });
 
-  // Sortable column headers (skip resize handles)
+  // Sortable column headers (skip resize handles) — pointer AND keyboard:
+  // the th is focusable (tabindex in markup) and Enter/Space sort it.
   document.querySelectorAll('#download-table th[data-sortable="1"]').forEach(th => {
     th.addEventListener('click', (e) => {
       if (e.target.closest('.col-resizer')) return;
+      toggleSort(th.dataset.col);
+    });
+    th.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+      e.preventDefault();
       toggleSort(th.dataset.col);
     });
   });
@@ -1460,6 +1808,18 @@ function setupEventListeners() {
   document.getElementById('modal-close').addEventListener('click', hideAddModal);
   document.getElementById('btn-cancel-add').addEventListener('click', hideAddModal);
   document.getElementById('btn-start-download').addEventListener('click', startNewDownload);
+  const urlInput = document.getElementById('input-url');
+  if (urlInput) {
+    // Typing dismisses the inline error immediately — an error that outlives
+    // the mistake reads as a second failure.
+    urlInput.addEventListener('input', () => setUrlError(null));
+    urlInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        startNewDownload();
+      }
+    });
+  }
   document.getElementById('btn-ai-filename').addEventListener('click', suggestAiFilename);
   document.getElementById('btn-browse').addEventListener('click', async () => {
     const f = await window.aidm.selectFolder();
@@ -1490,11 +1850,15 @@ function setupEventListeners() {
     if (f) document.getElementById('setting-savepath').value = f;
   });
 
-  // Settings left-nav tabs
+  // Settings left-nav tabs (role=tab in markup; aria-selected kept in sync)
   document.querySelectorAll('[data-settings-tab]').forEach(btn => {
     btn.addEventListener('click', () => {
       const id = btn.dataset.settingsTab;
-      document.querySelectorAll('[data-settings-tab]').forEach(b => b.classList.toggle('active', b === btn));
+      document.querySelectorAll('[data-settings-tab]').forEach(b => {
+        const on = b === btn;
+        b.classList.toggle('active', on);
+        b.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
       document.querySelectorAll('[data-settings-pane]').forEach(p => {
         p.classList.toggle('active', p.dataset.settingsPane === id);
       });
@@ -1551,12 +1915,17 @@ function setupEventListeners() {
   document.getElementById('btn-cancel-delete').addEventListener('click', hideDeleteModal);
   document.getElementById('btn-confirm-delete').addEventListener('click', confirmDeleteModal);
 
+  // Per-download priority/rate/torrent options (cycle 5).
+  document.getElementById('options-close').addEventListener('click', hideOptionsModal);
+  document.getElementById('btn-cancel-options').addEventListener('click', hideOptionsModal);
+  document.getElementById('btn-apply-options').addEventListener('click', applyOptionsModal);
+
   // Keyboard shortcuts
   document.addEventListener('keydown', (e) => {
     if (e.ctrlKey && e.key === 'n') { e.preventDefault(); showAddModal(); }
     if (e.ctrlKey && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); searchInput.focus(); }
     if (e.key === 'F5') { e.preventDefault(); refreshList(); }
-    if (e.key === 'Escape') { hideAddModal(); hideSettingsModal(); hideQualityPicker(); hideContextMenu(); hideAiModal(); hideDeleteModal(); hideSchedulerModal(); hideGrabModal(); }
+    if (e.key === 'Escape') { hideAddModal(); hideSettingsModal(); hideQualityPicker(); hideContextMenu(); hideAiModal(); hideDeleteModal(); hideOptionsModal(); hideSchedulerModal(); hideGrabModal(); }
     const typing = !!(e.target.matches && e.target.matches('input, textarea, select'));
     if (!typing && !isAnyModalOpen()) {
       // Delete key opens the delete dialog (with disk checkbox) for the selection
@@ -1620,14 +1989,53 @@ function hideAddModal() {
   document.getElementById('input-filename').value = '';
   document.getElementById('input-savepath').value = '';
   document.getElementById('input-category').value = 'auto';
+  setUrlError(null);
+}
+
+/**
+ * Field-level validation for the URL input (APP-012 / AUD-014). The old
+ * submit returned silently on an empty field and passed arbitrary text to the
+ * manager otherwise; the error is now visible, announced, and cleared on edit.
+ */
+function setUrlError(message) {
+  const group = document.getElementById('group-url');
+  const input = document.getElementById('input-url');
+  const err = document.getElementById('input-url-error');
+  if (!group || !input || !err) return;
+  if (message) {
+    group.classList.add('has-error', 'field-reject');
+    input.setAttribute('aria-invalid', 'true');
+    err.textContent = message;
+    err.classList.add('visible');
+    try { input.focus(); } catch (e) {}
+  } else {
+    group.classList.remove('has-error', 'field-reject');
+    input.removeAttribute('aria-invalid');
+    err.textContent = '';
+    err.classList.remove('visible');
+  }
 }
 
 async function startNewDownload() {
   const raw = document.getElementById('input-url').value.trim();
-  if (!raw) return;
+  if (!raw) {
+    setUrlError('Enter a download URL first.');
+    return;
+  }
+  const lines = raw.split(/[\r\n]+/).map((s) => s.trim()).filter(Boolean);
+  const badLine = lines.find((s) => !/^(https?:\/\/|magnet:\?)/i.test(s));
+  if (badLine) {
+    const shown = badLine.length > 64 ? badLine.slice(0, 61) + '…' : badLine;
+    setUrlError(lines.length > 1
+      ? `Line “${shown}” is not a link. Use http(s):// or magnet:? addresses, one per line.`
+      : 'That doesn’t look like a link. Use an http(s):// or magnet:? address.');
+    return;
+  }
+  setUrlError(null);
 
-  // Multi-URL paste (one per line / whitespace): batch-add them all.
-  const urls = raw.split(/[\r\n]+/).map((s) => s.trim()).filter((s) => /^https?:\/\//i.test(s));
+  // Multi-URL paste (one per line): batch-add them all. A magnet among many
+  // lines still goes through the single path only when it is the sole entry.
+  const urls = lines.filter((s) => /^https?:\/\//i.test(s));
   if (urls.length > 1) {
     try {
       const res = await window.aidm.batchUrls(urls);
@@ -1650,7 +2058,13 @@ async function startNewDownload() {
   const opts = { url, filename, savePath, segments };
   if (category && category !== 'auto') opts.category = category;
 
-  const result = await window.aidm.addDownload(opts);
+  let result;
+  try {
+    result = await window.aidm.addDownload(opts);
+  } catch (error) {
+    showNotification(`Download failed: ${error.message || error}`, 'error');
+    return;
+  }
   // A page URL whose resolver failed (embed changed, page unreachable…)
   // reports back instead of saving the page HTML as a file: keep the dialog
   // open and show the reason so the user can retry or pick another quality.
@@ -1726,7 +2140,13 @@ function showQualityPicker(data) {
   const overlayVisible = document.getElementById('quality-overlay').style.display === 'flex';
   if (overlayVisible && qualityContext && qualityContext.pageUrl === incomingPageUrl) return;
   qualityShownForPageUrl = incomingPageUrl;
-  qualityVideos = data.videos || [];
+  qualityVideos = (Array.isArray(data.videos) ? data.videos : [])
+    .filter(video => video && typeof video === 'object')
+    .map(video => ({
+      ...video,
+      quality: video.quality == null ? null : String(video.quality),
+      format: video.format == null ? null : String(video.format),
+    }));
   qualitySelectedIdx = -1;
   qualityContext = {
     pageUrl: incomingPageUrl,
@@ -1760,6 +2180,22 @@ function showQualityPicker(data) {
 
   const list = document.getElementById('quality-list');
   list.innerHTML = '';
+  // Keyboard-operable radio group (APP-006): options are reachable by Tab,
+  // selected with Enter/Space, and moved with the arrow keys.
+  list.setAttribute('role', 'radiogroup');
+  list.setAttribute('aria-label', 'Available qualities');
+  const selectOption = (target) => {
+    list.querySelectorAll('.quality-option').forEach(o => {
+      o.classList.remove('selected');
+      o.setAttribute('aria-checked', 'false');
+      o.tabIndex = -1;
+    });
+    target.classList.add('selected');
+    target.setAttribute('aria-checked', 'true');
+    target.tabIndex = 0;
+    qualitySelectedIdx = Number(target.dataset.idx);
+    document.getElementById('btn-download-quality').disabled = false;
+  };
 
   // Sort by REAL height when the resolver measured the variant, otherwise by
   // quality tier (highest first). A lying "2160p" label can no longer outrank
@@ -1878,9 +2314,12 @@ function showQualityPicker(data) {
     const opt = document.createElement('div');
     opt.className = 'quality-option';
     opt.dataset.idx = i;
+    opt.setAttribute('role', 'radio');
+    opt.setAttribute('aria-checked', 'false');
+    opt.tabIndex = -1;
 
     const sizeText = video.size ? formatBytes(video.size) : '';
-    const formatText = video.format ? video.format.toUpperCase() : '';
+    const formatText = video.format ? escapeHtml(String(video.format).toUpperCase()) : '';
     // Proven geometry (width/height) reads solid; anything the site merely
     // claims is dimmed and tagged, and a label-only variant shows just "720p"
     // instead of a fabricated "1280x720".
@@ -1928,7 +2367,7 @@ function showQualityPicker(data) {
       (() => {
         try {
           const base = decodeURIComponent(new URL(video.url).pathname.split('/').filter(Boolean).pop() || '');
-          if (base && /\.[A-Za-z0-9]{2,4}$/.test(base) && !_isGeneric(base, video.url)) return base;
+          if (base && /\.[A-Za-z0-9]*[A-Za-z][A-Za-z0-9]{0,7}$/i.test(base) && !_isGeneric(base, video.url)) return base;
         } catch (e) {}
         return null;
       })() ||
@@ -1939,7 +2378,7 @@ function showQualityPicker(data) {
     opt.innerHTML = `
       <div class="quality-icon">#${rank}</div>
       <div class="quality-info">
-        <div class="quality-label">${video.quality?.toUpperCase() || 'Unknown'}</div>
+        <div class="quality-label">${escapeHtml(String(video.quality || 'Unknown').toUpperCase())}</div>
         <div class="quality-filename" title="${escapeAttr(video.url)}">${escapeHtml(fileName)}</div>
         <div class="quality-resolution ${resInfo.proven ? 'proven' : 'guessed'}" title="${escapeAttr(resInfo.proven ? 'Measured from the file' : 'Claimed by the site — not measured')}">${escapeHtml(resInfo.text)}${resInfo.proven ? ' · proven' : ' <span class="quality-res-flag">unverified · site-claimed</span>'}</div>
         <div class="quality-meta">
@@ -1950,11 +2389,20 @@ function showQualityPicker(data) {
       <div class="quality-radio"></div>
     `;
 
-    opt.addEventListener('click', () => {
-      list.querySelectorAll('.quality-option').forEach(o => o.classList.remove('selected'));
-      opt.classList.add('selected');
-      qualitySelectedIdx = i;
-      document.getElementById('btn-download-quality').disabled = false;
+    opt.addEventListener('click', () => selectOption(opt));
+    opt.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+        e.preventDefault();
+        selectOption(opt);
+        return;
+      }
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        const opts = [...list.querySelectorAll('.quality-option')];
+        const pos = opts.indexOf(opt);
+        const next = opts[pos + (e.key === 'ArrowDown' ? 1 : -1)];
+        if (next) { selectOption(next); next.focus(); }
+      }
     });
 
     list.appendChild(opt);
@@ -2064,11 +2512,64 @@ function showApprovalModal(dl) {
 
 // ── Settings Modal ────────────────────────────────────────────────────────────
 
+/**
+ * Trusted extensions (AUD-012): the exact origins the user allowed to drive
+ * the local API. Rendering is textContent-only — an origin is data, never
+ * markup — and removal applies immediately (a cancelled settings dialog must
+ * not leave a revoked extension still trusted).
+ */
+function renderTrustedExtensions() {
+  const host = document.getElementById('trusted-extensions');
+  if (!host) return;
+  host.textContent = '';
+  const list = Array.isArray(settings.trustedExtensionOrigins) ? settings.trustedExtensionOrigins : [];
+  if (!list.length) {
+    const empty = document.createElement('div');
+    empty.className = 'trusted-extension-empty';
+    empty.textContent = 'No extensions are trusted yet. The AiDM extension asks the first time it connects.';
+    host.appendChild(empty);
+    return;
+  }
+  list.forEach((origin) => {
+    const row = document.createElement('div');
+    row.className = 'trusted-extension-row';
+    row.setAttribute('role', 'listitem');
+    const label = document.createElement('span');
+    label.className = 'trusted-extension-origin';
+    label.textContent = origin;
+    label.title = origin;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'tool-btn small danger-ghost';
+    btn.textContent = 'Remove';
+    btn.setAttribute('aria-label', 'Remove trust for ' + origin);
+    btn.addEventListener('click', async () => {
+      const next = list.filter((entry) => entry !== origin);
+      try {
+        const saved = await window.aidm.saveSettings({ trustedExtensionOrigins: next });
+        if (saved && typeof saved === 'object') settings = saved;
+        else settings.trustedExtensionOrigins = next;
+        renderTrustedExtensions();
+        showNotification('Extension access revoked', 'success');
+      } catch (e) {
+        showNotification(`Could not update trusted extensions: ${(e && e.message) || e}`, 'error');
+      }
+    });
+    row.appendChild(label);
+    row.appendChild(btn);
+    host.appendChild(row);
+  });
+}
+
 async function showSettingsModal() {
   settings = await window.aidm.getSettings();
+  renderTrustedExtensions();
   document.getElementById('setting-concurrent').value = settings.maxConcurrentDownloads;
   document.getElementById('setting-segments').value = settings.defaultSegments;
   document.getElementById('setting-proxy-url').value = settings.proxyUrl || '';
+  document.getElementById('setting-proxy-hint').textContent = settings.hasProxyCredentials
+    ? 'Saved credentials are hidden. Leave the address unchanged to keep them; clear it to use a direct connection.'
+    : 'Empty uses a direct connection. Enter a new URL to replace the saved proxy.';
   document.getElementById('setting-engine-max-connections').value = settings.engineMaxConnections || 8;
   document.getElementById('setting-engine-min-split-kb').value = settings.engineMinSplitKB || 1024;
   document.getElementById('setting-preallocation').value = settings.preallocation === 'full' ? 'full' : 'sparse';
@@ -2107,7 +2608,7 @@ async function showSettingsModal() {
   document.getElementById('setting-ai-enabled').checked = settings.aiEnabled !== false;
   document.getElementById('setting-ai-baseurl').value = settings.aiBaseURL || 'https://tokenharbor.ai/v1';
   document.getElementById('setting-ai-key').value = '';
-  document.getElementById('setting-ai-key').placeholder = settings.aiApiKey ? '•••••• (saved — leave empty to keep)' : 'thk_live_… or set TOKENHARBOR_API_KEY env var';
+  document.getElementById('setting-ai-key').placeholder = settings.hasAiApiKey ? '•••••• (saved — leave empty to keep)' : 'thk_live_… or set TOKENHARBOR_API_KEY env var';
   document.getElementById('setting-ai-primary').value = settings.aiPrimaryModel || 'mimo-v2.5:free';
   document.getElementById('setting-ai-fallback').value = settings.aiFallbackModel || 'deepseek-v4-flash:free';
   document.getElementById('ai-status-hint').textContent = 'Key is stored locally only. Env var takes precedence when set.';
@@ -2116,10 +2617,10 @@ async function showSettingsModal() {
   const rg = settings.fileHosts?.rapidgator || {};
   document.getElementById('setting-rg-user').value = rg.user || '';
   document.getElementById('setting-rg-pass').value = '';
-  document.getElementById('setting-rg-pass').placeholder = rg.password ? '•••••• (saved — leave empty to keep)' : 'stored only in the local settings file';
+  document.getElementById('setting-rg-pass').placeholder = rg.hasPassword ? '•••••• (saved — leave empty to keep)' : 'stored only in the local settings file';
   document.getElementById('setting-rg-cookie').value = '';
-  document.getElementById('setting-rg-cookie').placeholder = rg.cookie ? '•••••• (saved — leave empty to keep)' : 'PHPSESSID=… ; user__=…';
-  document.getElementById('rg-status-hint').textContent = (rg.user || rg.cookie)
+  document.getElementById('setting-rg-cookie').placeholder = rg.hasCookie ? '•••••• (saved — leave empty to keep)' : 'PHPSESSID=… ; user__=…';
+  document.getElementById('rg-status-hint').textContent = (rg.user || rg.hasCookie)
     ? 'Saved — Rapidgator links will use this account.'
     : 'Leave both empty to use the free flow (wait required).';
 
@@ -2144,7 +2645,12 @@ async function showSettingsModal() {
   openOverlay('settings-overlay');
 }
 
-function hideSettingsModal() { closeOverlay('settings-overlay'); }
+function hideSettingsModal() {
+  closeOverlay('settings-overlay');
+  for (const id of ['setting-ai-key', 'setting-rg-pass', 'setting-rg-cookie', 'setting-proxy-url']) {
+    document.getElementById(id).value = '';
+  }
+}
 
 /**
  * Show the yt-dlp build AiDM detected (Settings › YouTube › yt-dlp engine).
@@ -2268,10 +2774,11 @@ async function saveSettings() {
   const splitList = (id) => document.getElementById(id).value.split(/[,;\s]+/)
     .map(t => t.trim().toLowerCase().replace(/^\.+/, ''))
     .filter(t => t.length > 0);
-  settings = {
+  const proxyUrl = document.getElementById('setting-proxy-url').value.trim();
+  const nextSettings = {
     maxConcurrentDownloads: parseInt(document.getElementById('setting-concurrent').value) || 3,
     defaultSegments: parseInt(document.getElementById('setting-segments').value) || 8,
-    proxyUrl: document.getElementById('setting-proxy-url').value.trim(),
+    ...(proxyUrl !== (settings.proxyUrl || '') ? { proxyUrl } : {}),
     engineMaxConnections: intField('setting-engine-max-connections', 1, 32, 8),
     engineMinSplitKB: intField('setting-engine-min-split-kb', 1, 1024 * 1024 * 1024, 1024),
     preallocation: document.getElementById('setting-preallocation').value === 'full' ? 'full' : 'sparse',
@@ -2321,7 +2828,12 @@ async function saveSettings() {
     // Only overwrite stored key when user typed a new one
     ...(aiKeyInput ? { aiApiKey: aiKeyInput } : {}),
   };
-  await window.aidm.saveSettings(settings);
+  try {
+    settings = await window.aidm.saveSettings(nextSettings);
+  } catch (error) {
+    showNotification(`Settings not saved: ${error.message || error}`, 'error');
+    return;
+  }
   const clipDot = document.getElementById('clipboard-dot');
   if (clipDot) clipDot.classList.toggle('active', !!settings.clipboardMonitor);
   hideSettingsModal();
@@ -2783,11 +3295,13 @@ async function refreshList() {
     // Drop selections that no longer exist
     const alive = new Set(downloads.map(d => d.id));
     [...selectedIds].forEach(id => { if (!alive.has(id)) selectedIds.delete(id); });
+    // A manual refresh is also a retry path for a failed boot.
+    if (bootState !== 'ready') setBootState('ready');
     renderDownloads();
     updateStats();
     showNotification('List refreshed');
   } catch (err) {
-    showNotification(`Refresh failed: ${err.message || err}`);
+    showNotification(`Refresh failed: ${err.message || err}`, 'error');
   }
 }
 
@@ -2936,6 +3450,33 @@ if (typeof window !== 'undefined') {
 }
 
 /**
+ * Persistent persistence-health indicator in the status bar (APP-009).
+ * Shows while the main process cannot save the download list; cleared by the
+ * first successful write. The toast is only the first-time notice.
+ */
+let persistWarningShown = false;
+function setPersistStatus(message, failing) {
+  const el = document.getElementById('persist-status');
+  if (el) {
+    if (failing) {
+      el.textContent = 'State not saved';
+      el.title = message || 'Download state could not be saved to disk';
+      el.style.display = '';
+    } else {
+      el.textContent = '';
+      el.title = '';
+      el.style.display = 'none';
+    }
+  }
+  if (failing && !persistWarningShown) {
+    persistWarningShown = true;
+    showNotification(message || 'Download state could not be saved to disk', 'warn');
+  } else if (!failing) {
+    persistWarningShown = false;
+  }
+}
+
+/**
  * In-app toast stack (top-right). These are UI feedback and are intentionally
  * NOT gated on the "Desktop Notifications" setting — that toggle only controls
  * OS Notification objects created by the main process.
@@ -2948,9 +3489,13 @@ function showNotification(text, type) {
     stack.className = 'toast-stack';
     document.body.appendChild(stack);
   }
+  stack.setAttribute('aria-live', 'polite');
+  stack.setAttribute('aria-relevant', 'additions');
   const kind = type === 'error' ? 'error' : type === 'warn' ? 'warn' : type === 'info' ? 'info' : 'success';
   const t = document.createElement('div');
   t.className = 'toast toast-' + kind;
+  // Failures are announced assertively; routine confirmations politely.
+  t.setAttribute('role', kind === 'error' ? 'alert' : 'status');
   const title = kind === 'error' ? 'Error' : kind === 'warn' ? 'Notice' : kind === 'info' ? 'Info' : 'Done';
   t.innerHTML = `<div class="toast-title">${title}</div><div class="toast-body"></div>`;
   const body = t.querySelector('.toast-body');

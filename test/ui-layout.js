@@ -94,7 +94,16 @@ check('settings loads the Jev assist toggle (default on)',
 check('settings saves the Jev assist toggle',
   /jevAssist: document\.getElementById\('setting-jev-assist'\)\.checked/.test(app));
 
-// ── 7. Quality picker must not reset the selection on a duplicate video-detected
+// ── 7. Quality picker treats site-supplied metadata as text, never markup.
+console.log('\nQuality picker: metadata escaping');
+check('quality label escapes site metadata',
+  /<div class="quality-label">\$\{escapeHtml\(String\(video\.quality \|\| 'Unknown'\)\.toUpperCase\(\)\)\}<\/div>/.test(app));
+check('format label escapes site metadata',
+  /const formatText = video\.format \? escapeHtml\(String\(video\.format\)\.toUpperCase\(\)\) : '';/.test(app));
+check('raw optional-chain quality interpolation is absent',
+  !/\$\{video\.quality\?\.toUpperCase\(\)/.test(app));
+
+// ── 8. Quality picker must not reset the selection on a duplicate video-detected
 //      (auto-resolve + the googlevideo guard reroute both fire for one click)
 //      — otherwise the user's mid-pick selection snaps back to "highest quality".
 //      And AFTER the user already picked, a delayed emit must not flip the

@@ -101,7 +101,9 @@ check('BlockGrid cells styled', /\.block-grid\s*\{/.test(css) && /\.block-fill\s
 check('block cells are static (the main-bar wave is the one motion)',
   !/\.block\.active \.block-fill::after/.test(css));
 check('done block is success-coloured', /\.block\.done \.block-fill\s*\{[^}]*var\(--success\)/.test(css));
-check('net chip styled distinctly from the conn chip', /\.net-chip\s*\{/.test(css) && /A78BFA/.test(css));
+check('net chip styled distinctly from the conn chip',
+  /\.net-chip\s*\{[^}]*var\(--state-fresh\)/.test(css) &&
+  /\.conn-chip\s*\{[^}]*var\(--state-info\)/.test(css));
 check('byte map covers the paused/stalled states', /\.block\.paused \.block-fill/.test(css) && /\.block\.stalled \.block-fill/.test(css));
 check('flow band slides; reduced motion degrades to a static wash',
   /\.flow-fill\s*\{/.test(css) && /flow-fill\.still/.test(css) && /@keyframes flow-slide/.test(css));

@@ -542,26 +542,49 @@ async function resolveYouTubeVideos(url, opts = {}) {
   const canonical = normalizeYouTubeUrl(url);
   const id = canonical.split('v=')[1];
 
+  const probeOpts = (withSession) => ({
+    timeoutMs: opts.timeoutMs || 60000,
+    cookies: withSession ? (opts.cookies || null) : null,
+    referer: opts.referer || null,
+    cookiesFromBrowser: withSession ? (opts.cookiesFromBrowser || null) : null,
+    cookieFile: withSession ? (opts.cookieFile || null) : null,
+    // YouTube's JS challenge / PO-token step needs an external runtime, and
+    // the extractor's own knobs (visitor data, player client) have to be
+    // reachable — otherwise the probe returns SABR-only, URL-less formats.
+    jsRuntimePath: opts.jsRuntimePath || null,
+    extractorArgsRaw: opts.extractorArgsRaw || null,
+  });
+  const hasSession = !!(opts.cookies || opts.cookiesFromBrowser || opts.cookieFile);
+
   let info;
+  // Set when the captured session itself was rejected and the payload comes
+  // from a session-less retry: the picker is then listing a video the session
+  // claimed was inaccessible, so the row must not inherit that session.
+  let sessionRejected = false;
   try {
     // A private / members-only / age-confirmed video cannot even be LISTED
     // without the session, so the probe carries the same cookies the download
     // will use — otherwise the picker comes back empty for a logged-in user.
-    info = await ytdlp.probe(canonical, {
-      timeoutMs: opts.timeoutMs || 60000,
-      cookies: opts.cookies || null,
-      referer: opts.referer || null,
-      cookiesFromBrowser: opts.cookiesFromBrowser || null,
-      cookieFile: opts.cookieFile || null,
-      // YouTube's JS challenge / PO-token step needs an external runtime, and
-      // the extractor's own knobs (visitor data, player client) have to be
-      // reachable — otherwise the probe returns SABR-only, URL-less formats.
-      jsRuntimePath: opts.jsRuntimePath || null,
-      extractorArgsRaw: opts.extractorArgsRaw || null,
-    });
+    info = await ytdlp.probe(canonical, probeOpts(true));
   } catch (e) {
-    if (RETRYABLE_PROBE_CODES.has(e && e.code)) return fallbackPayload(canonical, id, e && e.message);
-    throw e;
+    // A STALE captured session produces exactly the errors above for PUBLIC
+    // videos (verified live), and they classify as non-retryable — the picker
+    // used to die here on videos anyone can watch. When the failure is one a
+    // bad session can cause, retry ONCE without it: a genuinely private /
+    // age-restricted / members-only video fails the retry with the same code,
+    // so the retry only ever costs one extra extraction.
+    if (hasSession && ytdlp.SESSION_SUSPECT_CODES.has(e && e.code)) {
+      try {
+        info = await ytdlp.probe(canonical, probeOpts(false));
+        sessionRejected = true;
+      } catch (e2) {
+        if (RETRYABLE_PROBE_CODES.has(e2 && e2.code)) return fallbackPayload(canonical, id, e2 && e2.message);
+        throw e2;
+      }
+    } else {
+      if (RETRYABLE_PROBE_CODES.has(e && e.code)) return fallbackPayload(canonical, id, e && e.message);
+      throw e;
+    }
   }
 
   if (info && (info.is_live || info.was_live || info.live_status === 'is_live')) {
@@ -629,6 +652,9 @@ async function resolveYouTubeVideos(url, opts = {}) {
     uploader: (info && (info.uploader || info.channel)) || undefined,
     media,
     pickerVideos: toPickerVideos(info, { canonicalUrl: canonical, id, title }),
+    // True when the captured session was rejected and the listing came from a
+    // session-less retry — consumers must not attach that session to the row.
+    sessionRejected,
   };
 }
 

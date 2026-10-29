@@ -49,13 +49,71 @@ function magnetDisplayName(url) {
   }
 }
 
+function cleanStringList(value, max = 100) {
+  return Array.isArray(value)
+    ? value.map((item) => String(item || '').trim()).filter(Boolean).slice(0, max)
+    : [];
+}
+
+function normalizeFileSelection(selection, count) {
+  const out = new Array(Math.max(0, count)).fill(true);
+  if (!Array.isArray(selection) || selection.length === 0) return out;
+  if (selection.every((item) => Number.isInteger(item))) {
+    out.fill(false);
+    for (const index of selection) {
+      if (index >= 0 && index < out.length) out[index] = true;
+    }
+    return out;
+  }
+  for (let i = 0; i < out.length; i++) out[i] = selection[i] !== false;
+  return out;
+}
+
+function torrentFileSnapshot(torrent, selection) {
+  return (torrent.files || []).map((file, index) => ({
+    index,
+    name: file.name,
+    path: file.path || file.name,
+    length: file.length,
+    selected: selection[index] !== false,
+    done: !!file.done,
+    progress: file.progress || 0,
+  }));
+}
+
+function selectedBytes(torrent, selection) {
+  const files = torrent.files || [];
+  if (!files.some((file) => Number.isFinite(file.downloaded))) return torrent.downloaded || 0;
+  return files.reduce((sum, file, index) => (
+    selection[index] === false ? sum : sum + (file.downloaded || 0)
+  ), 0);
+}
+
+function selectedSize(torrent, selection) {
+  return (torrent.files || []).reduce((sum, file, index) => (
+    selection[index] === false ? sum : sum + file.length
+  ), 0);
+}
+
 class TorrentEngine extends EventEmitter {
-  constructor() {
+  constructor(options = {}) {
     super();
+    this.options = {
+      maxConns: Math.max(1, Math.floor(Number(options.maxConns) || 55)),
+      dht: options.dht !== false,
+      lsd: options.lsd !== false,
+      utPex: options.utPex !== false,
+      secure: Number.isFinite(options.secure) ? options.secure : 1,
+      createClient: typeof options.createClient === 'function' ? options.createClient : null,
+    };
+    this.limits = {
+      download: Math.max(0, Number(options.downloadLimit) || 0),
+      upload: Math.max(0, Number(options.uploadLimit) || 0),
+    };
     /** @type {import('webtorrent') | null} */
     this.client = null;
     this._clientPromise = null;
-    /** @type {Map<string, { torrent: any, download: any, startedAt: number, done: boolean }>} */
+    /** @type {Map<string, { torrent: any, download: any, startedAt: number, done: boolean, selection: boolean[], files: any[] }>} */
     this.jobs = new Map();
     this._ticker = null;
   }
@@ -67,11 +125,25 @@ class TorrentEngine extends EventEmitter {
   _ensureClient() {
     if (this.client) return Promise.resolve(this.client);
     if (!this._clientPromise) {
-      this._clientPromise = import('webtorrent')
-        .then((mod) => {
+      const clientOptions = {
+        maxConns: this.options.maxConns,
+        dht: this.options.dht,
+        lsd: this.options.lsd,
+        utPex: this.options.utPex,
+        secure: this.options.secure,
+      };
+      this._clientPromise = Promise.resolve()
+        .then(async () => {
+          if (this.options.createClient) return this.options.createClient(clientOptions);
+          const mod = await import('webtorrent');
           const WebTorrent = mod.default;
-          this.client = new WebTorrent();
-          return this.client;
+          return new WebTorrent(clientOptions);
+        })
+        .then((client) => {
+          this.client = client;
+          if (this.limits.upload > 0) client.throttleUpload(this.limits.upload);
+          if (this.limits.download > 0) client.throttleDownload(this.limits.download);
+          return client;
         })
         .catch((err) => {
           this._clientPromise = null;
@@ -97,15 +169,35 @@ class TorrentEngine extends EventEmitter {
       return;
     }
 
+    const rawSelection = Array.isArray(download.fileSelection) ? download.fileSelection : [];
+    const explicitSelection = rawSelection.length > 0;
+    const explicitPartial = explicitSelection && (
+      rawSelection.every((item) => Number.isInteger(item)) ||
+      rawSelection.some((item) => item === false)
+    );
     let torrent;
     try {
-      torrent = client.add(download.url, { path: download.savePath });
+      torrent = client.add(download.url, {
+        path: download.savePath,
+        announce: cleanStringList(download.trackerUrls),
+        urlList: cleanStringList(download.webSeedUrls),
+        maxWebConns: Math.max(0, Math.floor(Number(download.maxWebConns) || 4)),
+        strategy: download.pieceStrategy === 'rarest' ? 'rarest' : 'sequential',
+        deselect: explicitPartial,
+      });
     } catch (err) {
       this.emit('download-error', { id: download.id, error: (err && err.message) || String(err) });
       return;
     }
 
-    const job = { torrent, download, startedAt: Date.now(), done: false };
+    const job = {
+      torrent,
+      download,
+      startedAt: Date.now(),
+      done: false,
+      selection: Array.isArray(download.fileSelection) && download.fileSelection.length ? download.fileSelection : null,
+      files: [],
+    };
     this.jobs.set(download.id, job);
     this._wire(job);
     this._ensureTicker();
@@ -135,25 +227,59 @@ class TorrentEngine extends EventEmitter {
     const single = t.files && t.files.length === 1;
     const name = single ? t.files[0].name : t.name;
     job.name = name;
+    const selection = normalizeFileSelection(job.selection, (t.files || []).length);
+    job.selection = selection;
+    this._applySelection(job);
+    job.files = torrentFileSnapshot(t, selection);
+    const size = selectedSize(t, selection);
     this.emit('download-metadata', {
       id: job.download.id,
       name,
-      totalSize: t.length,
+      totalSize: size || t.length,
       infoHash: t.infoHash,
       multiFile: !single,
+      files: job.files,
+      fileSelection: selection.map((selected, index) => ({ index, selected })),
     });
     this._emitProgress(job);
   }
 
+  _applySelection(job) {
+    const files = job.torrent?.files || [];
+    files.forEach((file, index) => {
+      if (job.selection[index] === false) {
+        if (typeof file.deselect === 'function') file.deselect();
+      } else if (!file.done && typeof file.select === 'function') {
+        file.select();
+      }
+    });
+  }
+
+  _selectedFiles(job) {
+    return (job.torrent?.files || []).filter((_, index) => job.selection[index] !== false);
+  }
+
   _onDone(job) {
     if (job.done) return;
+    const selected = this._selectedFiles(job);
+    const canTrack = selected.some((file) => typeof file.done === 'boolean' || Number.isFinite(file.downloaded));
+    if (canTrack && selected.length && !selected.every((file) => file.done)) return;
     job.done = true;
     const t = job.torrent;
+    const total = Math.max(0, selectedSize(t, job.selection || []));
     this.emit('download-complete', {
       id: job.download.id,
-      totalSize: t.length,
+      totalSize: total,
       duration: (Date.now() - job.startedAt) / 1000,
+      uploaded: t.uploaded || 0,
+      ratio: typeof t.ratio === 'number' && Number.isFinite(t.ratio) ? t.ratio : 0,
     });
+    const policy = job.download && job.download.seedPolicy;
+    if (policy && policy !== 'unlimited' && this.client) {
+      try {
+        this.client.remove(t, { destroyStore: false }, () => {});
+      } catch { /* already gone */ }
+    }
   }
 
   _onError(job, err) {
@@ -177,15 +303,22 @@ class TorrentEngine extends EventEmitter {
     const t = job.torrent;
     if (!t || t.destroyed) return;
     const remainingMs = t.timeRemaining; // Infinity until speed > 0
+    const selection = job.selection || normalizeFileSelection([], (t.files || []).length);
+    const selectedDownloaded = t.files && t.files.length ? selectedBytes(t, selection) : t.downloaded;
+    const selectedTotal = t.files && t.files.length ? selectedSize(t, selection) : t.length;
+    const speed = t.downloadSpeed || 0;
+    const remaining = Math.max(0, selectedTotal - selectedDownloaded);
     this.emit('download-progress', {
       id: job.download.id,
-      downloaded: t.downloaded,
-      totalSize: t.length,
-      speed: t.downloadSpeed,
-      percent: Math.round(t.progress * 10000) / 100,
-      eta: Number.isFinite(remainingMs) && remainingMs > 0 ? Math.ceil(remainingMs / 1000) : null,
+      downloaded: selectedDownloaded,
+      totalSize: selectedTotal,
+      speed,
+      percent: selectedTotal ? Math.min(100, Math.round((selectedDownloaded / selectedTotal) * 10000) / 100) : Math.round((t.progress || 0) * 10000) / 100,
+      eta: Number.isFinite(remainingMs) && remainingMs > 0 ? Math.ceil(remainingMs / 1000) : (speed > 0 && remaining > 0 ? Math.ceil(remaining / speed) : null),
       peers: t.numPeers,
       uploadSpeed: t.uploadSpeed,
+      uploaded: t.uploaded || 0,
+      ratio: typeof t.ratio === 'number' && Number.isFinite(t.ratio) ? t.ratio : 0,
     });
   }
 
@@ -193,6 +326,52 @@ class TorrentEngine extends EventEmitter {
   has(id) {
     const job = this.jobs.get(id);
     return !!(job && job.torrent && !job.torrent.destroyed);
+  }
+
+  getInfo(id) {
+    const job = this.jobs.get(id);
+    if (!job || !job.torrent || job.torrent.destroyed) return null;
+    const t = job.torrent;
+    return {
+      id,
+      infoHash: t.infoHash || null,
+      name: t.name || job.name || null,
+      files: torrentFileSnapshot(t, job.selection || []),
+      selection: job.selection || [],
+      peers: t.numPeers || 0,
+      downloaded: selectedBytes(t, job.selection || []),
+      totalSize: selectedSize(t, job.selection || []),
+      uploaded: t.uploaded || 0,
+      downloadSpeed: t.downloadSpeed || 0,
+      uploadSpeed: t.uploadSpeed || 0,
+      ratio: typeof t.ratio === 'number' && Number.isFinite(t.ratio) ? t.ratio : 0,
+      done: !!job.done,
+    };
+  }
+
+  /**
+   * @param {string} id
+   * @param {Array<boolean|number>} selection
+   */
+  selectFiles(id, selection) {
+    const job = this.jobs.get(id);
+    if (!job || !job.torrent || job.torrent.destroyed) return false;
+    job.selection = normalizeFileSelection(selection, (job.torrent.files || []).length);
+    job.download.fileSelection = job.selection;
+    this._applySelection(job);
+    job.done = false;
+    job.files = torrentFileSnapshot(job.torrent, job.selection);
+    this.emit('download-metadata', {
+      id,
+      name: job.name,
+      totalSize: selectedSize(job.torrent, job.selection),
+      infoHash: job.torrent.infoHash,
+      multiFile: !!(job.torrent.files && job.torrent.files.length !== 1),
+      files: job.files,
+      fileSelection: job.selection.map((selected, index) => ({ index, selected })),
+    });
+    this._emitProgress(job);
+    return true;
   }
 
   /** @param {string} id */
@@ -234,9 +413,31 @@ class TorrentEngine extends EventEmitter {
 
   /** Global throttle in bytes/sec; 0/-1 disables. */
   setSpeedLimit(bytesPerSec) {
+    const rate = Math.max(0, Number(bytesPerSec) || 0);
+    this.limits.download = rate;
     if (this.client) {
-      try { this.client.throttleDownload(bytesPerSec > 0 ? bytesPerSec : -1); } catch { /* noop */ }
+      try { this.client.throttleDownload(rate > 0 ? rate : -1); } catch { /* noop */ }
     }
+  }
+
+  /** Global upload cap (seed bandwidth). 0 disables throttling. */
+  setUploadLimit(bytesPerSec) {
+    const rate = Math.max(0, Number(bytesPerSec) || 0);
+    this.limits.upload = rate;
+    if (this.client) {
+      try { this.client.throttleUpload(rate > 0 ? rate : -1); } catch { /* noop */ }
+    }
+  }
+
+  /** Apply a set of live/global caps in one call. */
+  applyLimits(limits = {}) {
+    if (limits.download !== undefined) this.setSpeedLimit(limits.download);
+    if (limits.upload !== undefined) this.setUploadLimit(limits.upload);
+    if (limits.maxConns !== undefined) this.options.maxConns = Math.max(1, Math.floor(Number(limits.maxConns) || 55));
+    if (limits.dht !== undefined) this.options.dht = limits.dht !== false;
+    if (limits.lsd !== undefined) this.options.lsd = limits.lsd !== false;
+    if (limits.utPex !== undefined) this.options.utPex = limits.utPex !== false;
+    return { ...this.options, ...this.limits };
   }
 
   async destroy() {
@@ -255,4 +456,8 @@ module.exports = {
   TorrentEngine,
   isTorrentUrl,
   magnetDisplayName,
+  normalizeFileSelection,
+  selectedBytes,
+  selectedSize,
+  torrentFileSnapshot,
 };

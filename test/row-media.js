@@ -486,7 +486,13 @@ async function main() {
     check('persisted row keeps media/quality fields', !!rows.length && 'quality' in rows[0]);
   }
 
-  fs.rmSync(TMP, { recursive: true, force: true });
+  // Windows can hold a handle on the temp dir for a moment (indexer / AV).
+  // Retry, and never fail the suite over leftover scratch.
+  try {
+    fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  } catch (e) {
+    console.warn('row-media: temp cleanup skipped:', e.code || e.message);
+  }
   console.log(`\nrow-media: ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 }

@@ -11,6 +11,7 @@ const fileWriter = require('./file-writer');
 const mirrors = require('./mirrors');
 const probe = require('./probe');
 const segments = require('./segments');
+const serverProfiles = require('./server-profiles');
 const worker = require('./worker');
 const task = require('./task');
 const engine = require('./engine');
@@ -28,6 +29,7 @@ module.exports = {
   ...mirrors,
   ...probe,
   ...segments,
+  ...serverProfiles,
   ...worker,
   ...task,
   ...engine,

@@ -7,6 +7,11 @@ contextBridge.exposeInMainWorld('aidm', {
   resumeDownload: (id) => ipcRenderer.invoke('resume-download', { id }),
   cancelDownload: (id) => ipcRenderer.invoke('cancel-download', { id }),
   removeDownload: (id) => ipcRenderer.invoke('remove-download', { id }),
+  setDownloadPriority: (id, priority) => ipcRenderer.invoke('set-download-priority', { id, priority }),
+  setDownloadSpeedLimit: (id, bytesPerSecond) => ipcRenderer.invoke('set-download-speed-limit', { id, bytesPerSecond }),
+  getTorrentInfo: (id) => ipcRenderer.invoke('get-torrent-info', { id }),
+  setTorrentSelection: (id, selection) => ipcRenderer.invoke('set-torrent-selection', { id, selection }),
+  setTorrentSeedPolicy: (id, policy) => ipcRenderer.invoke('set-torrent-seed-policy', { id, policy }),
   approveDownload: (id, savePath, filename) => ipcRenderer.invoke('approve-download', { id, savePath, filename }),
   rejectDownload: (id) => ipcRenderer.invoke('reject-download', { id }),
   getDownloads: () => ipcRenderer.invoke('get-downloads'),
@@ -91,4 +96,9 @@ contextBridge.exposeInMainWorld('aidm', {
   onSchedulerEvent: (cb) => ipcRenderer.on('scheduler-event', (_, data) => cb(data)),
   /** Live progress of the in-app yt-dlp update (Settings › YouTube). */
   onYtDlpUpdateStatus: (cb) => ipcRenderer.on('yt-dlp-update-status', (_, data) => cb(data)),
+  /** Disk state could not be saved (shown in the status bar until recovery). */
+  onPersistError: (cb) => ipcRenderer.on('persist-error', (_, data) => cb(data)),
+  onPersistRecovered: (cb) => ipcRenderer.on('persist-recovered', (_, data) => cb(data)),
+  /** Local-API health for the status bar (main-process request, no Origin). */
+  getApiStatus: () => ipcRenderer.invoke('api-status'),
 });

@@ -4,8 +4,12 @@ const zlib = require('zlib');
 const ae = require('../src/archive-extract');
 
 /**
+ * `declaredSize` writes a LIE into both headers (the data actually inflates to
+ * the real length) — the fixture for a bounded-streaming zip bomb.
+ *
  * @param {{ name: string, data?: Buffer|string, method?: 0|8, mode?: number,
- *           crcOverride?: number, dataOverride?: Buffer }[]} entries
+ *           crcOverride?: number, dataOverride?: Buffer,
+ *           declaredSize?: number }[]} entries
  * @returns {Buffer}
  */
 function makeZip(entries) {
@@ -20,6 +24,7 @@ function makeZip(entries) {
     const payload = method === 8 ? zlib.deflateRawSync(data) : data;
     const crc = e.crcOverride !== undefined ? e.crcOverride : ae.crc32(data);
     const stored = e.dataOverride || payload;
+    const declaredSize = e.declaredSize !== undefined ? e.declaredSize : data.length;
     const mode = e.mode === undefined ? 0o100644 : e.mode; // regular file, 0644
 
     const local = Buffer.alloc(30);
@@ -31,7 +36,7 @@ function makeZip(entries) {
     local.writeUInt16LE(0, 12);
     local.writeUInt32LE(crc, 14);
     local.writeUInt32LE(stored.length, 18);
-    local.writeUInt32LE(data.length, 22);
+    local.writeUInt32LE(declaredSize, 22);
     local.writeUInt16LE(name.length, 26);
     local.writeUInt16LE(0, 28);
 
@@ -45,7 +50,7 @@ function makeZip(entries) {
     central.writeUInt16LE(0, 14);
     central.writeUInt32LE(crc, 16);
     central.writeUInt32LE(stored.length, 20);
-    central.writeUInt32LE(data.length, 24);
+    central.writeUInt32LE(declaredSize, 24);
     central.writeUInt16LE(name.length, 28);
     central.writeUInt16LE(0, 30);
     central.writeUInt16LE(0, 32);

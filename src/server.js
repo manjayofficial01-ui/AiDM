@@ -2,6 +2,8 @@ const http = require('http');
 const path = require('path');
 const facebookResolver = require('./facebook-resolver.js');
 const resolvers = require('./resolvers.js');
+const { sanitizeDownloadPayload: sanitizeApiPayload } = require('./download-privacy');
+const { isExtensionOrigin, isPairedExtension, normalizeExtensionOrigin } = require('./extension-pairing');
 
 // Headers the extension is allowed to attach to a download so the desktop
 // engine can replay anti-hotlink checks (Referer/Origin/UA). Everything
@@ -56,41 +58,24 @@ function sanitizeHeaders(input) {
   return out;
 }
 
-/** Copy API data while stripping live credentials from download records. */
-function sanitizeApiPayload(value) {
-  if (Array.isArray(value)) return value.map(sanitizeApiPayload);
-  if (!value || typeof value !== 'object') return value;
-  const out = Object.create(null);
-  for (const [key, item] of Object.entries(value)) {
-    if (/^cookies?$/i.test(key)) continue;
-    if (key.toLowerCase() === 'headers' && item && typeof item === 'object') {
-      const headers = Object.create(null);
-      for (const [name, headerValue] of Object.entries(item)) {
-        if (String(name).toLowerCase() !== 'cookie') headers[name] = sanitizeApiPayload(headerValue);
-      }
-      out[key] = headers;
-    } else {
-      out[key] = sanitizeApiPayload(item);
-    }
-  }
-  return out;
-}
-
 /**
  * Origin gate. The 127.0.0.1 bind alone is NOT a security boundary: any web
  * page the user visits can fetch() the local port, and reflected CORS made
  * every response (settings incl. credentials, download history) readable
  * cross-origin. Trusted callers are:
  *   - no Origin header at all (curl, Node harnesses, native code)
- *   - browser extensions (chrome-extension:// / moz-extension://)
  *   - localhost pages (the AiDM UI itself, dev tools)
- * Untrusted origins are refused BEFORE routing (a CORS header alone would
- * still let fire-and-forget form POSTs execute side effects), and only
- * trusted origins get an Access-Control-Allow-Origin reflection.
+ *   - browser extensions the user explicitly PAIRED (AUD-012)
+ * Another installed extension can reach 127.0.0.1 with its own
+ * chrome-extension:// origin, so an extension prefix is not proof of
+ * identity — only an exact, user-approved origin passes. Untrusted origins
+ * are refused BEFORE routing (a CORS header alone would still let
+ * fire-and-forget form POSTs execute side effects), and only trusted origins
+ * get an Access-Control-Allow-Origin reflection.
  */
-function isTrustedOrigin(origin) {
+function isTrustedOrigin(origin, pairedExtensions = []) {
   if (!origin) return true;
-  if (/^(chrome|moz)-extension:\/\//i.test(origin)) return true;
+  if (isExtensionOrigin(origin)) return isPairedExtension(pairedExtensions, origin);
   try {
     const u = new URL(origin);
     if ((u.protocol === 'http:' || u.protocol === 'https:') &&
@@ -181,10 +166,68 @@ function youtubePageUrlFor(body, headers) {
  * Supports video detection with quality/resolution/size metadata
  */
 class IPCServer {
-  constructor(downloadManager) {
+  /**
+   * @param {object} downloadManager
+   * @param {{ pairedOrigins?: () => string[],
+   *           onUnpairedExtension?: (origin: string) => boolean|Promise<boolean> }} [options]
+   *   `pairedOrigins` reads the persisted allowlist (settings) at call time;
+   *   `onUnpairedExtension` asks the user (native prompt) and persists an
+   *   approval. Missing handlers mean "deny" — never an implicit allow.
+   */
+  constructor(downloadManager, options = {}) {
     this.dm = downloadManager;
     this.server = null;
     this.port = 18765;
+    this.onUnpairedExtension = typeof options.onUnpairedExtension === 'function'
+      ? options.onUnpairedExtension
+      : null;
+    this._pairedOrigins = typeof options.pairedOrigins === 'function'
+      ? options.pairedOrigins
+      : () => {
+        try { return (this.dm && this.dm.getSettings && this.dm.getSettings().trustedExtensionOrigins) || []; }
+        catch (e) { return []; }
+      };
+    // One in-flight decision per origin; denied origins are blocked for this
+    // session so a retry loop cannot re-prompt on every request.
+    this._pairingPrompts = new Map();
+    this._blockedOrigins = new Set();
+  }
+
+  /**
+   * Resolve an extension origin: paired → true; otherwise ask once (concurrent
+   * requests share the same decision promise) and remember a denial.
+   */
+  async _approveExtension(origin) {
+    // A malformed extension id can never be paired — do not prompt for it.
+    const canon = normalizeExtensionOrigin(origin);
+    if (!canon) return false;
+    if (isPairedExtension(this._pairedOrigins(), canon)) return true;
+    if (this._blockedOrigins.has(canon)) return false;
+    if (!this.onUnpairedExtension) return false;
+    if (!this._pairingPrompts.has(canon)) {
+      let decision;
+      try { decision = Promise.resolve(this.onUnpairedExtension(canon)); }
+      catch (e) { decision = Promise.resolve(false); }
+      decision = decision.catch(() => false);
+      this._pairingPrompts.set(canon, decision);
+      decision.then((allowed) => {
+        this._pairingPrompts.delete(canon);
+        if (!allowed) this._blockedOrigins.add(canon);
+      });
+    }
+    // A held request must not hang forever if the prompt is never answered
+    // (user away, dialog behind other windows). A timeout is NOT a denial:
+    // the origin is not blocked, so the next request asks again.
+    const timedOut = new Promise((resolve) => {
+      const t = setTimeout(() => resolve('timeout'), 60000);
+      if (t.unref) t.unref();
+    });
+    const allowed = await Promise.race([this._pairingPrompts.get(canon), timedOut]);
+    if (allowed === 'timeout') return false;
+    if (!allowed) return false;
+    // Trust the PERSISTED allowlist, not the handler's boolean: an approval
+    // that failed to save a valid origin must not open the gate.
+    return isPairedExtension(this._pairedOrigins(), canon);
   }
 
   /**
@@ -273,23 +316,10 @@ class IPCServer {
 
   start() {
     this._statusCache = { at: 0, body: null };
-    this.server = http.createServer((req, res) => {
-      // Host gate (DNS rebinding) - runs before routing; see isLocalHost().
-      if (!isLocalHost(req.headers.host)) {
-        res.writeHead(403, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Host not allowed' }));
-        return;
-      }
-      // Origin gate — see isTrustedOrigin(). Web pages get neither readable
-      // responses (no CORS reflection) nor executed side effects (403 before
-      // routing). Extensions and localhost are reflected; non-browser callers
-      // (no Origin) pass through.
-      const origin = req.headers.origin;
-      if (!isTrustedOrigin(origin)) {
-        res.writeHead(403, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Origin not allowed' }));
-        return;
-      }
+
+    // Trusted routing. Extracted from the server callback so the extension
+    // pairing gate can await a user decision before ANY side effect runs.
+    const serve = (req, res, origin) => {
       if (origin) {
         res.setHeader('Access-Control-Allow-Origin', origin);
         res.setHeader('Vary', 'Origin');
@@ -432,7 +462,7 @@ class IPCServer {
             // yt-dlp additionally gets the session the caller captured plus the
             // opt-in browser cookie store, so a signed-in user's own video can
             // be listed at all (see src/yt-dlp.js cookie block).
-            const resolved = await resolvers.resolveMedia(url, {
+            const resolved = await this._resolveMedia(url, {
               credentials: credentials || ((this.dm.getSettings().fileHosts || {}).rapidgator || {}),
               cookies: cookies || null,
               referer: referer || null,
@@ -474,7 +504,7 @@ class IPCServer {
             // "any 15-25 digit run" fallback, so a media CDN URL containing a
             // 19-digit id could be mistaken for a tweet id. The registry's
             // twitter adapter only accepts real status permalinks.
-            const r = await resolvers.resolveMedia(url);
+            const r = await this._resolveMedia(url);
             const payload = {
               url,
               pageUrl: r.canonicalUrl || url,
@@ -565,7 +595,7 @@ class IPCServer {
               ? cookies : null;
             // Without a session, a private / members-only video may be reported
             // as unavailable to a signed-in browser user (see bot-check errors).
-            const r = await resolvers.resolveMedia(url, {
+            const r = await this._resolveMedia(url, {
               cookies: sessionCookies,
               referer: referer || null,
               cookiesFromBrowser: this._youtubeCookiesFromBrowser(),
@@ -744,6 +774,60 @@ class IPCServer {
 
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Not found' }));
+    };
+
+    this.server = http.createServer((req, res) => {
+      // Host gate (DNS rebinding) - runs before routing; see isLocalHost().
+      if (!isLocalHost(req.headers.host)) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Host not allowed' }));
+        return;
+      }
+      const origin = req.headers.origin;
+      if (isExtensionOrigin(origin)) {
+        // A CORS preflight carries no action; answering it lets the real
+        // request (which IS gated) reach the pairing decision.
+        if (req.method === 'OPTIONS') {
+          res.setHeader('Access-Control-Allow-Origin', origin);
+          res.setHeader('Vary', 'Origin');
+          res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+          res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+          res.writeHead(200);
+          res.end();
+          return;
+        }
+        // Extension trust is per exact origin and requires an explicit,
+        // user-approved pairing (AUD-012). A pending decision holds the
+        // request briefly so "Allow" makes the action succeed in one try.
+        const paired = isPairedExtension(this._pairedOrigins(), origin);
+        if (!paired) {
+          this._approveExtension(origin).then((allowed) => {
+            if (!allowed) {
+              // No CORS reflection: an unpaired caller gets neither data nor
+              // a readable error.
+              res.writeHead(403, { 'Content-Type': 'application/json', 'Vary': 'Origin' });
+              res.end(JSON.stringify({ error: 'extension-not-paired', origin }));
+              return;
+            }
+            serve(req, res, origin);
+          }).catch(() => {
+            res.writeHead(500, { 'Content-Type': 'application/json', 'Vary': 'Origin' });
+            res.end(JSON.stringify({ error: 'pairing-failed' }));
+          });
+          return;
+        }
+        serve(req, res, origin);
+        return;
+      }
+      // Non-extension origins: no Origin (native), localhost pages. Anything
+      // else — including web pages on localhost-resolving domains — is
+      // refused before routing.
+      if (!isTrustedOrigin(origin, this._pairedOrigins())) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Origin not allowed' }));
+        return;
+      }
+      serve(req, res, origin);
     });
 
     this.server.listen(this.port, '127.0.0.1', () => {
@@ -806,6 +890,22 @@ class IPCServer {
    * Errors thrown by the underlying machinery (resolver, addDownload)
    * bubble; the caller decides how to render them.
    */
+  /**
+   * resolveMedia with a diagnostic trail. A failed resolve used to leave
+   * NOTHING on disk — only the download stage logged — so "Failed" or an
+   * empty picker was undebuggable afterwards. Every failure now lands in the
+   * redacted log folder next to the download logs; the error still bubbles
+   * to the caller unchanged.
+   */
+  async _resolveMedia(url, opts) {
+    try {
+      return await resolvers.resolveMedia(url, opts);
+    } catch (e) {
+      try { require('./yt-dlp').logResolveFailure(e, url); } catch (e2) { /* never mask the original */ }
+      throw e;
+    }
+  }
+
   async _routeDownload(data) {
     if (!data || !data.url || typeof data.url !== 'string') {
       return { statusCode: 400, body: { error: 'Missing url' } };
@@ -825,7 +925,7 @@ class IPCServer {
       if (!RESOLVE_LIMITERS['/api/resolve-youtube']?.allow()) {
         return { statusCode: 429, body: { success: false, youtubeCdn: true, error: 'Too many resolve requests — try again in a minute' } };
       }
-      const r = await resolvers.resolveMedia(pageUrl, {
+      const r = await this._resolveMedia(pageUrl, {
         cookies: typeof data.cookies === 'string' ? data.cookies : null,
         referer: pageUrl,
         cookiesFromBrowser: this._youtubeCookiesFromBrowser(),
@@ -858,7 +958,7 @@ class IPCServer {
           return { statusCode: 429, body: { success: false, resolveFailed: true, error: 'Too many resolve requests — try again in a minute' } };
         }
         try {
-          const resolved = await resolvers.resolveMedia(data.url, {
+          const resolved = await this._resolveMedia(data.url, {
             cookies: typeof data.cookies === 'string' ? data.cookies : null,
             referer: (data.meta && data.meta.pageUrl) || data.url,
             cookiesFromBrowser: this._youtubeCookiesFromBrowser(),
@@ -899,13 +999,15 @@ class IPCServer {
     const savePath = data.savePath != null && this._isAllowedSavePath(data.savePath)
       ? data.savePath : undefined;
 
+    const requestMeta = Object.assign({}, data.meta || {},
+      typeof data.mime === 'string' && data.mime ? { contentType: data.mime } : {});
     const download = this.dm.addDownload({
       url: data.url,
       filename: data.filename,
       savePath,
       segments: data.segments,
       quality: data.quality,
-      meta: data.meta,
+      meta: requestMeta,
       headers,
       // A Google account jar is easily >32 KB. The old 32 KB cap silently
       // dropped it, turning an authenticated Gmail/Drive download into an

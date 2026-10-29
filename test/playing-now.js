@@ -173,9 +173,9 @@ check('auto-resume skips rows that needed session cookies',
   /settings\.autoResume !== false[\s\S]{0,300}?!d\.needsSession/.test(managerSrc));
 check('downloads state writes atomically (tmp + rename)',
   /_persistDownloads\(force = false\)[\s\S]{0,2600}?\.tmp['"][\s\S]{0,600}?renameSync/.test(managerSrc));
-check('downloads state keeps a .bak fallback and _loadDownloads uses it',
-  /copyFileSync\(dataPath, dataPath \+ '\.bak'\)/.test(managerSrc) &&
-  /readFileSync\(dataPath \+ '\.bak'/.test(managerSrc));
+check('downloads state keeps a .bak fallback and scrubbed writes atomically',
+  /sanitizeDownloadPayload\(JSON\.parse\(fs\.readFileSync\(dataPath, 'utf8'\)\)\)[\s\S]{0,600}?\.bak\.tmp[\s\S]{0,600}?renameSync/.test(managerSrc) &&
+  /dataPath \+ '\.bak'/.test(managerSrc));
 check('restart preserves failed (error) rows',
   /d\.status !== 'error'[\s\S]{0,120}?d\.status = 'paused'/.test(managerSrc.replace(/\r?\n\s*/g, ' ')) ||
   /d\.status !== 'completed'[\s\S]{0,400}?'error'[\s\S]{0,200}?\{[\s\S]{0,200}?d\.status = 'paused'/.test(managerSrc));
@@ -184,7 +184,7 @@ check('HLS failure emits download-error exactly once (status guard)',
 check('HLS generation guard protects flush and close paths',
   /_hlsGen/.test(engineSrc) && /genDead\(\)\) return/.test(engineSrc.replace(/\s+/g, ' ')));
 check('resolve-twitter routes through the strict registry',
-  /req\.url === '\/api\/resolve-twitter'[\s\S]{0,1400}?resolvers\.resolveMedia\(url\)/.test(serverSrc));
+  /req\.url === '\/api\/resolve-twitter'[\s\S]{0,1400}?this\._resolveMedia\(url\)/.test(serverSrc));
 check('resolve endpoints use per-endpoint limiters',
   (serverSrc.match(/RESOLVE_LIMITERS\[req\.url\]\?\.allow\(\)/g) || []).length === 4);
 check('completed UI rows zero speed and snap to total',

@@ -44,3 +44,19 @@ dependency added for anything the standard library can do.
 `src/download-manager.js` is touched by P1-1 only. `main.js` is touched by P1-2 and P1-3 —
 sequenced, never concurrently. `ui/index.html` + `ui/app.js` are touched by P1-1 (settings) and
 P1-5 (overlay) — sequenced.
+
+## Cycle 5 — engine modernization (executed 2026-10-29)
+
+| ID | Task | Files | Status |
+|---|---|---|---|
+| ENG-001 | Reproducible telemetry and loopback benchmark | `tools/engine-benchmark.js`, `src/engine/task.js`, `src/engine/file-writer.js` | Complete: 12 contract checks |
+| ENG-002 | TLS fail-closed transport | `src/download-engine.js`, `src/engine/proxy.js` | Complete: self-signed rejection tests |
+| ENG-003 | Weighted priority scheduler | `src/engine/bandwidth-scheduler.js`, `src/download-manager.js` | Complete: priority, aging, fair redistribution |
+| ENG-004 | Persistent server-performance profiles | `src/engine/server-profiles.js`, mirrors, engine | Complete: origin-only, decay, quarantine, flush |
+| ENG-005 | Bounded disk-write coalescing | benchmark evidence | Not shipped: no measured win; risks crash visibility |
+| ENG-006 | Metalink and piece repair | `src/metalink.js`, engine, manager, checksum | Complete: v3/v4, mirrors, checksums, targeted repair |
+| ENG-007 | BitTorrent control plane | `src/torrent-engine.js`, manager, IPC, `ui/` | Complete: selective files, tracker/web-seed settings, upload and seed policy, UI controls |
+| ENG-008 | Generic signed-URL re-resolution and conditional GET | — | Planned follow-up; not started |
+
+Full suite: **99/99 suites**. No dependency, version, commit, push, packaging,
+or installer replacement occurred in this cycle.

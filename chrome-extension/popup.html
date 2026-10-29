@@ -10,6 +10,17 @@
       font-family: 'Segoe UI', -apple-system, sans-serif;
       background: #f2f6fc;
       color: #1a2b4a;
+      /* Semantic state contract (APP-012 / AUD-017) — same token NAMES as the
+         desktop renderer so a state change is a one-line edit everywhere.
+         Values stay surface-appropriate (the popup is light-only). */
+      --state-success: #15803d;
+      --state-success-bg: #dcfce7;
+      --state-warning: #b45309;
+      --state-warning-bg: #fef3c7;
+      --state-danger: #b91c1c;
+      --state-danger-bg: #fee2e2;
+      --state-info: #0f4da8;
+      --state-info-bg: #dbeafe;
     }
 
     .header {
@@ -24,8 +35,8 @@
     .logo { font-size: 20px; }
     .title { font-size: 14px; font-weight: 700; color: #ffffff; }
     .subtitle { font-size: 10px; color: #cfe2f8; }
-    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #f87171; }
-    .status-dot.connected { background: #4ade80; box-shadow: 0 0 6px #4ade80; }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--state-danger); }
+    .status-dot.connected { background: var(--state-success); box-shadow: 0 0 6px var(--state-success); }
 
     .body { padding: 12px 16px; }
 
@@ -141,21 +152,21 @@
       font-size: 10px;
     }
     .media-meta .quality-badge {
-      background: #dbeafe;
-      color: #0f4da8;
+      background: var(--state-info-bg);
+      color: var(--state-info);
       padding: 0 4px;
       border-radius: 3px;
       font-weight: 600;
     }
     .media-meta .quality-badge.playing-badge {
-      background: #dcfce7;
-      color: #15803d;
+      background: var(--state-success-bg);
+      color: var(--state-success);
     }
     .media-meta .size-badge {
-      color: #15803d;
+      color: var(--state-success);
     }
     .media-meta .format-badge {
-      color: #b45309;
+      color: var(--state-warning);
     }
 
     .media-btn {
@@ -257,7 +268,7 @@
   </div>
 
   <div class="footer">
-        AiDM v5.0.0 • Multi-segment • Video Detection • Quality Selection
+        AiDM v<span id="footer-version"></span> • Multi-segment • Video Detection • Quality Selection
   </div>
 
   <script src="popup.js"></script>

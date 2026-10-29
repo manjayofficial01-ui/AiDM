@@ -3,12 +3,12 @@ const { randomUUID } = require('crypto');
 const { EventEmitter } = require('events');
 const { mkdir, rm, rename, utimes } = require('fs/promises');
 const { join, resolve } = require('path');
-const { verifyChecksum } = require('./checksum');
+const { normalizePieceManifest, verifyChecksum, verifyPieceRanges } = require('./checksum');
 const { controlFilePath, loadControlFile, removeControlFile, saveControlFile } = require('./control-file');
 const { DownloadError, toDownloadError } = require('./errors');
 const { SegmentFileWriter } = require('./file-writer');
 const { MirrorPool } = require('./mirrors');
-const { basicAuthHeader, filenameFromUrl, probeRemote, sanitizeFilename, splitCredentials } = require('./probe');
+const { basicAuthHeader, ensureExtension, filenameFromUrl, probeRemote, sanitizeFilename, splitCredentials } = require('./probe');
 const { TokenBucket } = require('./rate-limiter');
 const { DEFAULT_RETRY_POLICY, backoffDelay } = require('./retry');
 const { SegmentManager } = require('./segments');
@@ -25,6 +25,7 @@ const ADAPT_INTERVAL_MS = 2000;
 const ADAPT_COOLDOWN_MS = 10000;
 const SERVER_LIMIT_COOLDOWN_MS = 30000;
 const MAX_RESTARTS = 2;
+const MAX_PIECE_REPAIRS = 2;
 const DEFAULT_USER_AGENT = 'Mozilla/5.0 (compatible; DownloadEngine/1.0)';
 
 /**
@@ -59,6 +60,8 @@ function resolveConfig(options, defaults = {}) {
     readTimeoutMs: Math.max(1000, merged.readTimeoutMs ?? 30000),
     retry: { ...DEFAULT_RETRY_POLICY, ...(merged.retry ?? {}) },
     checksum: merged.checksum,
+    pieces: normalizePieceManifest(merged.pieces),
+    pieceRepair: merged.pieceRepair !== false,
     resumeOffsets: merged.resumeOffsets || null,
     // Real { start, end, downloaded } segment map persisted by the manager —
     // preferred over resumeOffsets, whose equal-size assumption does not match
@@ -108,7 +111,7 @@ function resolveConfig(options, defaults = {}) {
 class DownloadTask extends EventEmitter {
   /**
    * @param {any} options
-   * @param {{ globalLimiter?: TokenBucket, hostGate?: import('./host-gate').HostGate }} [deps]
+   * @param {{ globalLimiter?: TokenBucket, hostGate?: import('./host-gate').HostGate, domainConnCaps?: object, serverProfiles?: object }} [deps]
    * @param {any} [defaults]
    */
   constructor(options, deps = {}, defaults = {}) {
@@ -117,7 +120,9 @@ class DownloadTask extends EventEmitter {
     this.id = this.config.id;
     const { fetch: _fetch, ...serializable } = options;
     this.originalOptions = { ...serializable, id: this.id };
-    this.mirrors = new MirrorPool(this.config.mirrors, this.config.maxConnectionsPerServer);
+    this.mirrors = new MirrorPool(this.config.mirrors, this.config.maxConnectionsPerServer, 3, {
+      serverProfiles: deps.serverProfiles || null,
+    });
     this.taskLimiter = new TokenBucket(this.config.speedLimit);
     this.limiters = deps.globalLimiter ? [deps.globalLimiter, this.taskLimiter] : [this.taskLimiter];
     /** Shared cross-download per-host connection gate (null = ungated). */
@@ -138,6 +143,25 @@ class DownloadTask extends EventEmitter {
     this.segments = null;
     /** @type {SegmentFileWriter | null} */
     this.writer = null;
+    this._writerStats = null;
+    this.metrics = {
+      connectionLaunches: 0,
+      peakConnections: 0,
+      retries: 0,
+      slowDrops: 0,
+      backoffs: 0,
+      pieceRepairs: 0,
+      badPieceCount: 0,
+      rampExpands: 0,
+      rampCollapses: 0,
+      rampShrinks: 0,
+      restarts: 0,
+      firstByteAt: null,
+      tail5At: null,
+      tail1At: null,
+      completedAt: null,
+      failedAt: null,
+    };
 
     /** @type {string | null} */
     this.filename = null;
@@ -210,6 +234,15 @@ class DownloadTask extends EventEmitter {
     return this.errorValue;
   }
 
+  // setMaxConnections() was removed 2026-10-01: no caller, and it altered the
+  // hot fill path without exercising the ramp controller. Re-add with a caller.
+  setSpeedLimit(bytesPerSecond) {
+    const rate = Math.max(0, Math.floor(Number(bytesPerSecond) || 0));
+    this.config.speedLimit = rate;
+    this.taskLimiter.setRate(rate);
+    return rate;
+  }
+
   get remote() {
     return this.info;
   }
@@ -236,6 +269,11 @@ class DownloadTask extends EventEmitter {
     this.sessionStartedAt = Date.now();
     this.sessionBytes = 0;
     this.meter.reset();
+    this.metrics.firstByteAt = null;
+    this.metrics.tail5At = null;
+    this.metrics.tail1At = null;
+    this.metrics.completedAt = null;
+    this.metrics.failedAt = null;
 
     try {
       for (;;) {
@@ -254,8 +292,16 @@ class DownloadTask extends EventEmitter {
           this.emitProgress();
           await this.downloadLoop();
           if (this.stopping) break;
-          await this.finalize();
+          let outcome = await this.finalize();
+          while (outcome === 'repaired') {
+            this.setState('downloading');
+            await this.downloadLoop();
+            if (this.stopping) break;
+            outcome = await this.finalize();
+          }
+          if (outcome !== 'finalized') break;
           this.setState('completed');
+          this.metrics.completedAt = Date.now();
           this.emit('completed', {
             id: this.id,
             path: this.finalPath ?? '',
@@ -273,6 +319,7 @@ class DownloadTask extends EventEmitter {
     } catch (err) {
       const de = toDownloadError(err);
       this.errorValue = de;
+      this.metrics.failedAt = Date.now();
       this.log('error', de.message);
       this.setState('failed');
       this.emit('failed', de);
@@ -381,6 +428,41 @@ class DownloadTask extends EventEmitter {
       networkCount: this._ifacePool.length > 1 ? this._ifacePool.length : 0,
       elapsedMs: elapsed,
       error: this.errorValue?.toJSON() ?? null,
+    };
+  }
+
+  getTelemetry() {
+    const m = this.metrics;
+    const finishedAt = m.completedAt || m.failedAt || null;
+    return {
+      state: this.stateValue,
+      bytes: this.segments?.downloadedBytes ?? this.sessionBytes,
+      totalBytes: this.segments?.totalSize ?? this.info?.size ?? null,
+      elapsedMs: this.elapsedMs(),
+      timeToFirstByteMs: m.firstByteAt === null ? null : Math.max(0, m.firstByteAt - this.sessionStartedAt),
+      tail5Ms: m.tail5At !== null && finishedAt !== null ? Math.max(0, finishedAt - m.tail5At) : null,
+      tail1Ms: m.tail1At !== null && finishedAt !== null ? Math.max(0, finishedAt - m.tail1At) : null,
+      connectionLaunches: m.connectionLaunches,
+      peakConnections: m.peakConnections,
+      targetConnections: this.targetConnections,
+      retries: m.retries,
+      slowDrops: m.slowDrops,
+      backoffs: m.backoffs,
+      rampExpands: m.rampExpands,
+      rampCollapses: m.rampCollapses,
+      rampShrinks: m.rampShrinks,
+      restarts: m.restarts,
+      pieceRepairs: m.pieceRepairs,
+      badPieceCount: m.badPieceCount,
+      mirrors: this.mirrors.snapshot().map((mirror) => ({
+        host: mirror.host,
+        active: mirror.active,
+        failures: mirror.failures,
+        banned: mirror.banned,
+        tested: mirror.tested,
+        speed: mirror.speed,
+      })),
+      writer: this.writer ? this.writer.getStats() : (this._writerStats ? { ...this._writerStats } : null),
     };
   }
 
@@ -556,6 +638,7 @@ class DownloadTask extends EventEmitter {
       preallocation: this.config.preallocation,
       fresh: !restored,
     });
+    this._writerStats = this.writer.stats;
 
     const splitAllowed = info.acceptRanges && info.size !== null && !this.forceSingleConnection;
     this.targetConnections = !splitAllowed
@@ -634,7 +717,6 @@ class DownloadTask extends EventEmitter {
   async finalize() {
     const writer = this.writer;
     const partPath = this.partPath;
-    let finalPath = this.finalPath;
     if (writer) {
       await writer.sync().catch(() => {});
       await writer.close();
@@ -660,12 +742,29 @@ class DownloadTask extends EventEmitter {
       }
     }
 
+    if (this.config.pieces && expected > 0) {
+      this.setState('verifying');
+      const verification = await verifyPieceRanges(partPath, this.config.pieces, expected, this.runAbort?.signal);
+      this.metrics.badPieceCount = verification.badPieces.length;
+      if (!verification.ok) {
+        if (this.config.pieceRepair && this.metrics.pieceRepairs < MAX_PIECE_REPAIRS) {
+          const repaired = await this._beginPieceRepair(verification.badPieces, expected);
+          if (repaired) return 'repaired';
+        }
+        throw new DownloadError(
+          'CHECKSUM_MISMATCH',
+          `${verification.badPieces.length} ${this.config.pieces.algorithm} piece(s) failed verification`,
+        );
+      }
+    }
+
     if (this.config.checksum) {
       this.setState('verifying');
       this.log('info', `Verifying ${this.config.checksum.algorithm} checksum`);
       await verifyChecksum(partPath, this.config.checksum, this.runAbort?.signal);
     }
 
+    let finalPath = this.finalPath;
     // Apply the server-supplied name (Content-Disposition of the single plain
     // GET — skipProbe flows never had a probe to learn it from). The .part
     // file keeps its provisional name until this final rename, so swapping the
@@ -677,7 +776,7 @@ class DownloadTask extends EventEmitter {
     // while the row kept the user's choice (user report: "i can't rename the
     // downloading file at downloading dialogue window").
     if (this._responseName && !this.config.nameLocked) {
-      const better = sanitizeFilename(this._responseName);
+      const better = sanitizeFilename(ensureExtension(this._responseName, this.info && this.info.contentType));
       if (better && better !== this.filename) {
         this.log('info', `Response names the file ${better} (was ${this.filename})`);
         this.filename = better;
@@ -708,6 +807,41 @@ class DownloadTask extends EventEmitter {
       if (!Number.isNaN(mtime.getTime())) await utimes(finalPath, new Date(), mtime).catch(() => {});
     }
     this.log('info', `Saved to ${finalPath}`);
+    return 'finalized';
+  }
+
+  async _beginPieceRepair(badPieces, totalSize) {
+    if (!this.partPath || !this.info || !this.config.pieces) return false;
+    const pieces = this.config.pieces;
+    const bad = new Set(badPieces.map((piece) => piece.index));
+    const snapshots = [];
+    for (let index = 0; index < pieces.hashes.length; index++) {
+      const start = index * pieces.pieceLengthBytes;
+      const end = Math.min(totalSize - 1, start + pieces.pieceLengthBytes - 1);
+      const length = end - start + 1;
+      if (length <= 0) continue;
+      snapshots.push({
+        id: index + 1,
+        start,
+        end,
+        downloaded: bad.has(index) ? 0 : length,
+      });
+    }
+    this.segments = SegmentManager.restore(
+      snapshots,
+      totalSize,
+      this.segmentOptions(this.info),
+      totalSize,
+    );
+    this.writer = await SegmentFileWriter.open(this.partPath, {
+      size: totalSize,
+      preallocation: 'sparse',
+      fresh: false,
+    });
+    this._writerStats = this.writer.stats;
+    this.metrics.pieceRepairs++;
+    this.log('warn', `Re-downloading ${bad.size} failed byte-range(s) from the declared piece hashes`);
+    return true;
   }
 
   /**
@@ -719,6 +853,7 @@ class DownloadTask extends EventEmitter {
       err.code === 'RANGE_UNSUPPORTED';
     if (!restartable || this.restarts >= MAX_RESTARTS) return false;
     this.restarts++;
+    this.metrics.restarts++;
     if (err.code === 'RANGE_UNSUPPORTED') this.forceSingleConnection = true;
     this.rangeUnsupported = false;
     this.finalPathWritten = false;
@@ -818,6 +953,14 @@ class DownloadTask extends EventEmitter {
       onBytes: (n) => {
         this.meter.add(n);
         this.sessionBytes += n;
+        const now = Date.now();
+        if (this.metrics.firstByteAt === null) this.metrics.firstByteAt = now;
+        const total = this.segments?.totalSize;
+        const downloaded = this.segments?.downloadedBytes;
+        if (total > 0 && Number.isFinite(downloaded)) {
+          if (this.metrics.tail5At === null && downloaded >= total * 0.95) this.metrics.tail5At = now;
+          if (this.metrics.tail1At === null && downloaded >= total * 0.99) this.metrics.tail1At = now;
+        }
       },
     })
       .then(
@@ -829,7 +972,7 @@ class DownloadTask extends EventEmitter {
           // single-GET flows). Sanitize + dedupe here; the manager decides
           // what the row shows.
           if (result.suggestedName && !this._responseName) {
-            const clean = sanitizeFilename(result.suggestedName);
+            const clean = sanitizeFilename(ensureExtension(result.suggestedName, this.info && this.info.contentType));
             if (clean) {
               this._responseName = clean;
               this.emit('name', { filename: clean });
@@ -861,6 +1004,8 @@ class DownloadTask extends EventEmitter {
       .catch((err) => this.log('warn', `Segment #${segment.id} worker crashed: ${String(err)}`));
 
     this.active.set(segment.id, run);
+    this.metrics.connectionLaunches++;
+    this.metrics.peakConnections = Math.max(this.metrics.peakConnections, this.active.size);
   }
 
   /**
@@ -923,6 +1068,7 @@ class DownloadTask extends EventEmitter {
     }
 
     if (err.code === 'SLOW_CONNECTION') {
+      this.metrics.slowDrops++;
       this.log('debug', err.message);
       segment.retryAt = Date.now();
       this.mirrors.reportFailure(mirror, err);
@@ -932,6 +1078,7 @@ class DownloadTask extends EventEmitter {
     this.mirrors.reportFailure(mirror, err);
 
     if (err.status === 429 || err.status === 503 || (err.code === 'NETWORK' && this.active.size > 1)) {
+      this.metrics.backoffs++;
       this.backOffConnections(err);
     }
 
@@ -941,6 +1088,7 @@ class DownloadTask extends EventEmitter {
     }
 
     segment.attempts++;
+    this.metrics.retries++;
     if (segment.attempts >= this.config.retry.maxTries) {
       this.fail(new DownloadError('MAX_TRIES', `Gave up after ${segment.attempts} attempts: ${err.message}`, { cause: err }));
       return;
@@ -1003,6 +1151,7 @@ class DownloadTask extends EventEmitter {
     });
 
     if (r.action === 'collapse' && r.collapsedTo != null) {
+      this.metrics.rampCollapses++;
       const host = this.hostFromUrl();
       if (this.domainConnCaps) this.domainConnCaps.recordCollapse(host, r.collapsedTo);
       this.cooldownUntil = now + SERVER_LIMIT_COOLDOWN_MS;
@@ -1022,7 +1171,12 @@ class DownloadTask extends EventEmitter {
     this.dynamicMinSplit = dynamicMinSplitBytes(speed);
     if (this.segments) this.segments.opts.dynamicMinSplit = this.dynamicMinSplit;
 
-    if (r.action === 'expand') this.fill();
+    if (r.action === 'expand') {
+      this.metrics.rampExpands++;
+      this.fill();
+    } else if (r.action === 'shrink') {
+      this.metrics.rampShrinks++;
+    }
     this.lastAdaptSpeed = speed;
     this.lastAdaptAction = r.action === 'collapse' ? 'down' : r.action === 'expand' ? 'up' : 'none';
   }
