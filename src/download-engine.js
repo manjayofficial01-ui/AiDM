@@ -110,12 +110,20 @@ function createDohFallbackLookup(nativeLookup = dns.lookup, resolveDoh = resolve
       done = options;
       opts = {};
     }
+    // Happy Eyeballs (`autoSelectFamily`, on by default) calls the lookup with
+    // `{ all: true }` and reads `.address` off every entry, so the fallback answer
+    // must be records — a bare string becomes "Invalid IP address: undefined".
+    const wantAll = !!(opts && opts.all);
     nativeLookup(hostname, opts || {}, async (err, address, family) => {
       if (!err) return done(null, address, family);
       if (!isDnsLookupError(err) || net.isIP(String(hostname || ''))) return done(err);
       try {
         const fallback = await resolveDoh(hostname);
-        if (fallback) return done(null, fallback, 4);
+        const fallbackFamily = net.isIP(String(fallback || ''));
+        if (fallbackFamily) {
+          const record = { address: fallback, family: fallbackFamily === 6 ? 6 : 4 };
+          return done(null, wantAll ? [record] : record.address, record.family);
+        }
       } catch (e) { /* report the original OS-DNS error below */ }
       return done(err);
     });

@@ -61,6 +61,7 @@
     "test:response-integrity": "node test/response-integrity.js",
     "test:torrent": "node test/torrent.js",
     "test:http2-transport": "node test/http2-transport.js",
+    "test:doh-lookup": "node test/doh-happy-eyeballs.js",
     "test:auth-wall": "node test/auth-wall.js",
     "test:auth-wall-manager": "node test/auth-wall-manager.js",
     "test:single-use-token": "node test/single-use-token.js",
