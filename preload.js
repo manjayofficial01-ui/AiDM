@@ -42,6 +42,9 @@ contextBridge.exposeInMainWorld('aidm', {
   // yt-dlp engine (Settings › YouTube): detected version + one-click update
   getYtDlpStatus: () => ipcRenderer.invoke('yt-dlp-status'),
   updateYtDlp: () => ipcRenderer.invoke('update-yt-dlp'),
+  // gallery-dl engine (Settings › gallery-dl): image-gallery sites (v5.9.0)
+  getGalleryDlStatus: () => ipcRenderer.invoke('gallery-dl-status'),
+  updateGalleryDl: () => ipcRenderer.invoke('update-gallery-dl'),
 
   // AI (TokenHarbor: mimo-v2.5:free + deepseek-v4-flash:free)
   aiStatus: () => ipcRenderer.invoke('ai-status'),
@@ -96,6 +99,8 @@ contextBridge.exposeInMainWorld('aidm', {
   onSchedulerEvent: (cb) => ipcRenderer.on('scheduler-event', (_, data) => cb(data)),
   /** Live progress of the in-app yt-dlp update (Settings › YouTube). */
   onYtDlpUpdateStatus: (cb) => ipcRenderer.on('yt-dlp-update-status', (_, data) => cb(data)),
+  /** Live progress of the in-app gallery-dl install (v5.9.0). */
+  onGalleryDlUpdateStatus: (cb) => ipcRenderer.on('gallery-dl-update-status', (_, data) => cb(data)),
   /** Disk state could not be saved (shown in the status bar until recovery). */
   onPersistError: (cb) => ipcRenderer.on('persist-error', (_, data) => cb(data)),
   onPersistRecovered: (cb) => ipcRenderer.on('persist-recovered', (_, data) => cb(data)),

@@ -9,6 +9,7 @@ const { URL } = require('url');
 const { EventEmitter } = require('events');
 const { agentFor, destroyAgents, setProxyUrl } = require('./engine/agents');
 const { HostGate } = require('./engine/host-gate');
+const { GlobalConnectionBudget } = require('./engine/global-budget');
 const { DomainConnCaps } = require('./engine/ramp-controller');
 const { ServerProfileStore } = require('./engine/server-profiles');
 const { WebhookManager } = require('./webhooks');
@@ -500,6 +501,14 @@ class DownloadEngine extends EventEmitter {
     // 16 lets two 8-segment downloads share a host but stops a third from
     // bursting 24 simultaneous connections at one CDN.
     this.hostGate = new HostGate(16);
+    // Global connection budget (v5.9.0): the total connection pool is ONE
+    // resource even when several downloads run at once — 8 downloads × 8
+    // segments each measurably regresses throughput versus ~24 connections
+    // shared fairly. 0 disables (pre-5.9.0 behavior); the manager applies the
+    // user setting at startup.
+    this.globalBudget = new GlobalConnectionBudget(0);
+    /** taskId → the task's OWN ceiling, so budget relaxation restores it. */
+    this._taskOwnMaxConn = new Map();
     // Shared, persisted per-domain connection-cap learning (FluxDown port):
     // a host that sustained N connections without a collapse starts future
     // tasks there; a host that punished extra connections is rolled back.
@@ -658,6 +667,37 @@ class DownloadEngine extends EventEmitter {
     if (opts.perHostConnections != null) {
       this.hostGate.setLimit(Math.max(0, parseInt(opts.perHostConnections, 10) || 0));
     }
+    if (opts.globalConnectionBudget != null) {
+      this.setGlobalConnectionBudget(parseInt(opts.globalConnectionBudget, 10) || 0);
+    }
+  }
+
+  /**
+   * Set the global connection budget (0 = off). Recomputes every active
+   * task's ceiling so the change lands immediately.
+   * @param {number} n max simultaneous engine connections across all downloads
+   */
+  setGlobalConnectionBudget(n) {
+    this.globalBudget.setBudget(Math.max(0, Math.min(64, parseInt(n, 10) || 0)));
+    this._recomputeBudgetCeilings();
+  }
+
+  /** Push the current fair-share ceiling to every registered active task. */
+  _recomputeBudgetCeilings() {
+    for (const [taskId, effective] of this.globalBudget.effectiveEntries()) {
+      const task = this.activeTasks.get(taskId);
+      if (task && typeof task.setMaxConnections === 'function') task.setMaxConnections(effective);
+    }
+  }
+
+  /** Budget bookkeeping when a task leaves the active set (done/failed/cancelled). */
+  _onTaskRemoved(id) {
+    const hadOwn = this._taskOwnMaxConn.delete(id);
+    const hadReg = this.globalBudget.unregister(id); // idempotent
+    if ((hadOwn || hadReg) && this.globalBudget.budget > 0 && this.globalBudget.activeCount > 0) {
+      // A slot of budget freed up: the remaining downloads may grow again.
+      this._recomputeBudgetCeilings();
+    }
   }
 
   /** Set a global download speed limit (bytes/sec). 0 disables the limit. */
@@ -749,6 +789,11 @@ class DownloadEngine extends EventEmitter {
     const reqHeaders = buildRequestHeaders(url, headers);
     const wantsSingle = singleConnection === true || !!(preProbed && preProbed.singleConnection);
     const maxConn = wantsSingle ? 1 : Math.max(1, Math.min(totalSegments || 8, this.engineMaxConnections, 32));
+    // Global budget (v5.9.0): the task starts at min(own ceiling, fair share)
+    // when several downloads are already running. Its own ceiling is kept so
+    // a later finish raises it back through the ramp's normal probing.
+    this._taskOwnMaxConn.set(id, maxConn);
+    const effMaxConn = this.globalBudget.register(id, maxConn);
 
     const taskOptions = {
       id,
@@ -757,8 +802,8 @@ class DownloadEngine extends EventEmitter {
       filename,
       mirrors: Array.isArray(mirrors) ? mirrors : [],
       headers: reqHeaders,
-      maxConnections: maxConn,
-      initialConnections: Math.min(maxConn, 4),
+      maxConnections: effMaxConn,
+      initialConnections: Math.min(effMaxConn, 4),
       minSplitSize: this.engineMinSplitSize,
       adaptiveConnections: !wantsSingle,
       pieceSelection: 'largest',
@@ -786,6 +831,7 @@ class DownloadEngine extends EventEmitter {
     const task = new DownloadTask(taskOptions, {
       globalLimiter: this.globalLimiter,
       hostGate: this.hostGate,
+      globalBudget: this.globalBudget.budget > 0 ? this.globalBudget : null,
       domainConnCaps: this.domainConnCaps,
       serverProfiles: this.serverProfiles,
     });
@@ -899,6 +945,7 @@ class DownloadEngine extends EventEmitter {
     task.on('completed', (info) => {
       this.activeTasks.delete(id);
       this.activeSegments.delete(id);
+      this._onTaskRemoved(id);
       const outPath = info.path || filepath;
       // Never lie about completion: when the real size is known the bytes on
       // disk must match it, otherwise the UI would show a "finished" file that
@@ -937,6 +984,7 @@ class DownloadEngine extends EventEmitter {
     task.on('failed', (err) => {
       this.activeTasks.delete(id);
       this.activeSegments.delete(id);
+      this._onTaskRemoved(id);
       this.emit('download-error', {
         id,
         error: err.message || 'Download failed',
@@ -948,6 +996,7 @@ class DownloadEngine extends EventEmitter {
     task.start().catch((err) => {
       this.activeTasks.delete(id);
       this.activeSegments.delete(id);
+      this._onTaskRemoved(id);
       this.emit('download-error', { id, error: err.message });
       this._webhook('download_error', { id, url, error: err.message });
     });
@@ -1011,6 +1060,7 @@ class DownloadEngine extends EventEmitter {
       const isCompleted = task.state === 'completed';
       task.cancel({ deleteFiles: !isCompleted }).catch(() => {});
       this.activeTasks.delete(id);
+      this._onTaskRemoved(id);
     }
 
     const dl = this.activeSegments.get(id);

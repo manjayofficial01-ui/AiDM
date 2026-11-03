@@ -129,8 +129,8 @@ check('settings save writes youtubeCookiesFile',
   /youtubeCookiesFile: \(document\.getElementById\('setting-yt-cookies-file'\)\?\.value/.test(app));
 check('refreshYtDlpStatus asks the main process for the engine status',
   /window\.aidm\.getYtDlpStatus\(\)/.test(app) && /function refreshYtDlpStatus/.test(app));
-check('the YouTube settings tab refreshes the version live',
-  /if \(id === 'youtube'\) refreshYtDlpStatus\(\)/.test(app));
+check('the YouTube settings tab refreshes the version live (yt-dlp + gallery-dl since v5.9.0)',
+  /if \(id === 'youtube'\) \{ refreshYtDlpStatus\(\); refreshGalleryDlStatus\(\); \}/.test(app));
 check('updateYtDlp invokes the main-process installer',
   /window\.aidm\.updateYtDlp\(\)/.test(app) && /function updateYtDlp/.test(app));
 check('the update-result note survives the status refresh',
@@ -156,6 +156,31 @@ check('server forwards the cookie file on every resolve site',
   (server.match(/cookieFile: this\._youtubeCookieFile\(\)/g) || []).length === 4);
 check('server cookie-file getter verifies existence', /_youtubeCookieFile\(\)/.test(server) && /existsSync/.test(server));
 check('manager carries the cookies.txt default', manager.includes('youtubeCookiesFile:'));
+
+// ── v5.9.0: gallery-dl engine + global connection budget + course rows ──────
+check('settings save persists the global connection budget',
+  /globalConnectionBudget: intField\('setting-global-connection-budget'/.test(app));
+check('settings save persists the gallery cookies-from-browser choice',
+  /galleryCookiesFromBrowser: \(document\.getElementById\('setting-gallery-cookies-browser'\)/.test(app));
+check('the gallery-dl status refresh reads the engine bridge',
+  /function refreshGalleryDlStatus/.test(app) && /window\.aidm\.getGalleryDlStatus\(\)/.test(app));
+check('the gallery-dl installer is one click away',
+  /function updateGalleryDl/.test(app) && /window\.aidm\.updateGalleryDl\(\)/.test(app));
+check('preload exposes the gallery-dl engine bridges',
+  /getGalleryDlStatus: \(\) => ipcRenderer\.invoke\('gallery-dl-status'\)/.test(preload) &&
+  /updateGalleryDl: \(\) => ipcRenderer\.invoke\('update-gallery-dl'\)/.test(preload));
+check('main handles gallery-dl-status via detectRunner(true)',
+  /gallery-dl-status/.test(main) && /gallerydl\.detectRunner\(true\)/.test(main));
+check('main handles update-gallery-dl via the shared installer',
+  /update-gallery-dl/.test(main) && /installGalleryDl/.test(main));
+check('gallery rows route before the generic probe',
+  manager.includes('if (download.isGallery)') && manager.includes('_startGalleryDownload'));
+check('course rows route through the yt-dlp engine',
+  manager.includes('if (download.isCourse)') && manager.includes('_startCourseDownload'));
+check('gallery rows never take scheduler bandwidth shares (subprocess engines)',
+  /dl\.isTorrent \|\| dl\.provider === 'youtube' \|\| dl\.isHls \|\| dl\.isDash \|\| dl\.isGallery \|\| dl\.isCourse/.test(manager));
+check('the engine applies the budget from settings',
+  manager.includes('globalConnectionBudget:') && /opts\.globalConnectionBudget/.test(require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'download-engine.js'), 'utf8')));
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);

@@ -1864,7 +1864,7 @@ function setupEventListeners() {
       });
       // The YouTube pane shows the LIVE yt-dlp version — refresh it every
       // time the tab opens (the user may have updated it elsewhere).
-      if (id === 'youtube') refreshYtDlpStatus();
+      if (id === 'youtube') { refreshYtDlpStatus(); refreshGalleryDlStatus(); }
     });
   });
 
@@ -1898,6 +1898,16 @@ function setupEventListeners() {
     window.aidm.onYtDlpUpdateStatus(({ stage, message }) => {
       if (!ytdlpUpdateInFlight) return;
       const hint = document.getElementById('ytdlp-update-hint');
+      if (hint && message) hint.textContent = message;
+    });
+  }
+  // gallery-dl engine (v5.9.0): version display + one-click install/update.
+  const btnGalleryDlUpdate = document.getElementById('btn-gallerydl-update');
+  if (btnGalleryDlUpdate) btnGalleryDlUpdate.addEventListener('click', updateGalleryDl);
+  if (window.aidm.onGalleryDlUpdateStatus) {
+    window.aidm.onGalleryDlUpdateStatus(({ message }) => {
+      if (!galleryDlUpdateInFlight) return;
+      const hint = document.getElementById('gallerydl-update-hint');
       if (hint && message) hint.textContent = message;
     });
   }
@@ -2575,6 +2585,8 @@ async function showSettingsModal() {
   document.getElementById('setting-preallocation').value = settings.preallocation === 'full' ? 'full' : 'sparse';
   document.getElementById('setting-per-host-connections').value =
     Number.isFinite(settings.perHostMaxConnections) ? settings.perHostMaxConnections : 16;
+  document.getElementById('setting-global-connection-budget').value =
+    Number.isFinite(settings.globalConnectionBudget) ? settings.globalConnectionBudget : 24;
   // "Combine networks" (Plexo multi-NIC): opt-in; the hint shows whether this
   // machine actually has two or more eligible networks right now.
   document.getElementById('setting-combine-networks').checked = settings.combineNetworks === true;
@@ -2634,6 +2646,10 @@ async function showSettingsModal() {
   const ytExtractorArgs = document.getElementById('setting-yt-extractor-args');
   if (ytExtractorArgs) ytExtractorArgs.value = String(settings.youtubeExtractorArgs || '');
   refreshYtDlpStatus();
+  // gallery-dl engine (v5.9.0) — version + opt-in browser cookies.
+  const galleryBrowserSelect = document.getElementById('setting-gallery-cookies-browser');
+  if (galleryBrowserSelect) galleryBrowserSelect.value = String(settings.galleryCookiesFromBrowser || '');
+  refreshGalleryDlStatus();
 
   // Category paths
   const cats = ['video', 'audio', 'document', 'pdf', 'archive', 'software', 'image'];
@@ -2740,6 +2756,69 @@ async function updateYtDlp() {
 }
 
 /**
+ * gallery-dl engine status (Settings › YouTube › gallery-dl engine, v5.9.0).
+ * Mirror of refreshYtDlpStatus: the version sits next to its one-click
+ * installer, so a missing engine is visible with the fix one click away.
+ */
+let galleryDlUpdateInFlight = false;
+let galleryDlUpdateNote = '';
+async function refreshGalleryDlStatus() {
+  const input = document.getElementById('gallerydl-version');
+  const hint = document.getElementById('gallerydl-update-hint');
+  if (!input || !window.aidm || !window.aidm.getGalleryDlStatus) return;
+  input.value = 'Checking…';
+  try {
+    const st = await window.aidm.getGalleryDlStatus();
+    if (st && st.found) {
+      input.value = `${st.version}  (${st.source})`;
+      if (hint && galleryDlUpdateNote) hint.textContent = galleryDlUpdateNote;
+      const btn = document.getElementById('btn-gallerydl-update');
+      if (btn) btn.textContent = 'Update gallery-dl';
+    } else {
+      input.value = 'not installed';
+      if (hint && !galleryDlUpdateNote) {
+        hint.textContent = 'gallery-dl is not installed yet — gallery links download without it only by accident (they are pages, not files). Click “Install gallery-dl” to install the official build into this user\'s folder (no admin rights needed).';
+      }
+    }
+  } catch (e) {
+    input.value = 'unknown';
+  }
+}
+
+/** One-click gallery-dl install/update (stable channel via Codeberg). */
+async function updateGalleryDl() {
+  const btn = document.getElementById('btn-gallerydl-update');
+  const hint = document.getElementById('gallerydl-update-hint');
+  if (!btn || !window.aidm || !window.aidm.updateGalleryDl) return;
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Installing…';
+  galleryDlUpdateInFlight = true;
+  galleryDlUpdateNote = '';
+  if (hint) hint.textContent = 'Downloading the latest gallery-dl release…';
+  try {
+    const res = await window.aidm.updateGalleryDl();
+    galleryDlUpdateInFlight = false;
+    if (res && res.ok) {
+      galleryDlUpdateNote = `Installed gallery-dl ${res.version} — new gallery downloads use it immediately.`;
+      if (hint) hint.textContent = galleryDlUpdateNote;
+      showNotification('gallery-dl ' + res.version + ' installed');
+    } else {
+      galleryDlUpdateNote = 'Install failed: ' + ((res && res.error) || 'unknown error') + ' — you can retry.';
+      if (hint) hint.textContent = galleryDlUpdateNote;
+    }
+  } catch (e) {
+    galleryDlUpdateInFlight = false;
+    galleryDlUpdateNote = 'Install failed: ' + (e && e.message || e);
+    if (hint) hint.textContent = galleryDlUpdateNote;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Update gallery-dl';
+    refreshGalleryDlStatus();
+  }
+}
+
+/**
  * Tell the user whether this machine can actually combine networks: two or
  * more eligible NICs are required, otherwise the toggle stays inert.
  */
@@ -2815,6 +2894,8 @@ async function saveSettings() {
     youtubeCookiesFromBrowser: (document.getElementById('setting-yt-cookies-browser')?.value || '').trim(),
     youtubeCookiesFile: (document.getElementById('setting-yt-cookies-file')?.value || '').trim(),
     youtubeExtractorArgs: (document.getElementById('setting-yt-extractor-args')?.value || '').trim(),
+    globalConnectionBudget: intField('setting-global-connection-budget', 0, 64, 24),
+    galleryCookiesFromBrowser: (document.getElementById('setting-gallery-cookies-browser')?.value || '').trim(),
     postDownloadCmd: document.getElementById('setting-post-download-cmd').value.trim(),
     autoExtract: document.getElementById('setting-auto-extract').checked,
     // Deleting the archive only makes sense if extraction is on; persisting a

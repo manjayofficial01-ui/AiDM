@@ -959,6 +959,42 @@ ipcMain.handle('update-yt-dlp', async () => {
   }
 });
 
+// ── gallery-dl engine management (Settings › gallery-dl, v5.9.0) ────────────
+// Same shape as the yt-dlp handlers above: never bundled, installed per-user
+// (no elevation) from the official release channel, reported + updatable here.
+
+ipcMain.handle('gallery-dl-status', async () => {
+  try {
+    const gallerydl = require('./src/gallery-dl.js');
+    const runner = await gallerydl.detectRunner(true);
+    if (!runner) return { found: false, version: null, source: null, path: null, installDir: gallerydl.installTarget() };
+    return { found: true, version: runner.version, source: runner.source, path: runner.argv[0], installDir: gallerydl.installTarget() };
+  } catch (e) {
+    return { found: false, version: null, source: null, path: null, error: String(e && e.message || e) };
+  }
+});
+
+ipcMain.handle('update-gallery-dl', async () => {
+  const send = (stage, message) => {
+    try {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('gallery-dl-update-status', { stage, message });
+      }
+    } catch (e) { /* window gone mid-install */ }
+  };
+  try {
+    const { installGalleryDl } = require('./src/gallery-dl.js');
+    send('start', 'Checking the gallery-dl release channel…');
+    const res = await installGalleryDl({ channel: 'stable', log: (m) => send('progress', m) });
+    send('done', 'Installed gallery-dl ' + res.version);
+    return { ok: true, version: res.version, tag: res.tag, channel: res.channel };
+  } catch (e) {
+    const message = String(e && e.message || e);
+    send('error', message);
+    return { ok: false, error: message };
+  }
+});
+
 ipcMain.handle('window-minimize', () => mainWindow.minimize());
 ipcMain.handle('window-maximize', () => {
   mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize();

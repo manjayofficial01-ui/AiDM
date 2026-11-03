@@ -340,6 +340,10 @@ function classifyError(raw) {
   if (has(/google\.com\/sorry|unusual traffic|HTTP Error 429|Too Many Requests/i)) return { code: 'rate-limited', message: 'YouTube is rate-limiting this network right now (it answered with a CAPTCHA redirect / HTTP 429). This is temporary and affects every video, not just this one. Wait a few minutes and retry; adding a signed-in session in Settings › YouTube, or a proxy under Settings › Network, also avoids it.' };
   if (has(/Sign in to confirm you.?re not a bot|not a bot/i)) return { code: 'bot-check', message: 'YouTube demanded a sign-in check for this video. A signed-in session normally clears it: open the video with the AiDM browser extension active (it forwards that browser\'s YouTube session), or point Settings › YouTube at an exported cookies.txt. Updating yt-dlp there also helps.' };
   if (has(/age-restricted|age restricted|confirm your age/i)) return { code: 'age', message: 'This video is age-restricted. AiDM does not bypass age verification.' };
+  // Course platforms (v5.9.0): Udemy marks DRM'd assets `course_is_drmed` and
+  // yt-dlp refuses them with "This video is DRM protected". Never work around
+  // — tell the user plainly, the same stance as age/paid walls above.
+  if (has(/DRM protected|this video is drm|widevine/i)) return { code: 'drm', message: 'This lecture is DRM-protected. AiDM does not bypass DRM — if the course offers non-DRM lectures they will download normally.' };
   if (has(/members-only|Join this channel|member-only/i)) return { code: 'members', message: 'This video is members-only. AiDM does not bypass paid access.' };
   // ── Added after real failures: these four used to fall through to the
   //    generic "Extraction failed" line, which tells the user nothing and is
@@ -946,6 +950,10 @@ function downloadWithRunner(o, runner, resolve, reject) {
       referer = null,
       cookiesFromBrowser = null,
       proxy = null,
+      // Course/playlist rows (v5.9.0): Udemy course URLs must download the
+      // WHOLE curriculum, so --no-playlist is dropped and --yes-playlist is
+      // pinned. Everything else keeps the single-video default.
+      allowPlaylist = false,
     } = o;
 
     if (!url || !formatSpec || !outputTemplate) {
@@ -971,7 +979,9 @@ function downloadWithRunner(o, runner, resolve, reject) {
 
     const args = [
       '--ignore-config',
-      '--no-playlist',
+      // A course row downloads the full curriculum; every other row stays on
+      // the single-video default (a watch page must never pull the channel).
+      ...(allowPlaylist ? ['--yes-playlist'] : ['--no-playlist']),
       '--no-warnings',
       '--no-call-home',
       '--no-cache-dir',
@@ -1252,6 +1262,8 @@ module.exports = {
   resolveUserCookieFile,
   buildSubtitleArgs,
   cookieDomainFor,
+  writeCookieFile,
+  deleteCookieFile,
   parseCookiePairs,
   netscapeCookieFile,
   writeCookieFile,

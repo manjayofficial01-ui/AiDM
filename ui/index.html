@@ -462,6 +462,11 @@
               <input type="number" id="setting-per-host-connections" min="0" max="64" value="16" />
               <div class="settings-hint">Total simultaneous connections to one host across all downloads (0 = unlimited).</div>
             </div>
+            <div class="form-group">
+              <label for="setting-global-connection-budget">Global connection budget</label>
+              <input type="number" id="setting-global-connection-budget" min="0" max="64" value="24" />
+              <div class="settings-hint">Total connections shared across ALL running downloads. Running many downloads at max connections each makes every one of them slower — the budget shares one pool fairly (24 keeps the classic 3 downloads × 8 connections untouched; only 4+ downloads start sharing). Each download grows back when another finishes. 0 = off.</div>
+            </div>
             <div class="form-group toggle">
               <label for="setting-combine-networks">Combine networks (multi-NIC)</label>
               <input type="checkbox" id="setting-combine-networks" />
@@ -577,6 +582,28 @@
               <label for="setting-yt-extractor-args">Advanced extractor args (optional)</label>
               <input type="text" id="setting-yt-extractor-args" placeholder="e.g. player_client=web_safari" />
               <div class="settings-hint">Passed to yt-dlp as <code>--extractor-args "youtube:…"</code>. Leave empty unless you are working around a specific YouTube change (a different <code>player_client</code>, or a <code>visitor_data</code> value). Anything that is not a plain <code>key=value&amp;key=value</code> pair is ignored entirely, so this can never inject a command-line flag.</div>
+            </div>
+            <h4>gallery-dl engine (image galleries)</h4>
+            <div class="form-group">
+              <label for="gallerydl-version">Installed version</label>
+              <div class="path-input">
+                <input type="text" id="gallerydl-version" readonly placeholder="Checking…" />
+                <button type="button" class="tool-btn small" id="btn-gallerydl-update" title="Download and install the latest gallery-dl release">Install gallery-dl</button>
+              </div>
+              <div class="settings-hint" id="gallerydl-update-hint">Adds ~250 image/gallery sites (pixiv, danbooru &amp; friends, deviantart, tumblr, kemono, patreon, mangadex…). Gallery pages pasted into AiDM are detected automatically once this is installed. Installs per-user into this user's folder; no admin rights needed. Course pages (Udemy) work through yt-dlp above — signed-in browser cookies required, DRM'd lectures are refused.</div>
+            </div>
+            <div class="form-group">
+              <label for="setting-gallery-cookies-browser">Read cookies from browser (galleries)</label>
+              <select id="setting-gallery-cookies-browser">
+                <option value="">Off (don't use browser cookies)</option>
+                <option value="chrome">Chrome</option>
+                <option value="edge">Edge</option>
+                <option value="firefox">Firefox</option>
+                <option value="brave">Brave</option>
+                <option value="opera">Opera</option>
+                <option value="vivaldi">Vivaldi</option>
+              </select>
+              <div class="settings-hint">Many galleries hide their content behind a login (pixiv requires one). Cookies the browser extension captures are always forwarded; this lets gallery-dl read the browser's own cookie store as a fallback.</div>
             </div>
           </section>
 

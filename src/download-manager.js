@@ -9,7 +9,8 @@ const { DEFAULT_INTERCEPT_TYPES } = require('./scheduler');
 const { muxAudioVideo, isAvailable: ffmpegAvailable, facebookMediaHeaders } = require('./media-mux');
 const ytdlp = require('./yt-dlp');
 const youtubeResolver = require('./youtube-resolver');
-const { sanitizeEntryUrl, entryUrlWasRepaired, isSingleUseTokenUrl, isGmailAttachmentEntryUrl, isGmailAttachmentCdnUrl } = require('./url-hygiene');
+const { sanitizeEntryUrl, entryUrlWasRepaired, isSingleUseTokenUrl, isGmailAttachmentEntryUrl, isGmailAttachmentCdnUrl, isCourseUrl } = require('./url-hygiene');
+const gallerydl = require('./gallery-dl');
 const { filenameFromContentDisposition, extFromMime, ensureExtension, hasFilenameExtension } = require('./engine/probe');
 const { looksLikeAuthWall, looksLikeHtmlHead, sessionExpiredMessage, extensionOfFilename, BINARY_EXTENSIONS } = require('./auth-wall');
 const googleDrive = require('./google-drive-resolver');
@@ -671,6 +672,16 @@ const DEFAULT_SETTINGS = {
   engineMinSplitKB: 1024,    // segments smaller than this are never split
   preallocation: 'sparse',   // 'full' zero-fills the .part up front (aria2-style)
   perHostMaxConnections: 16, // cross-download cap per host (0 = unlimited)
+  // Global connection budget (v5.9.0): N downloads × M segments each is not a
+  // throughput strategy — one CDN/uplink has one congestion window. 24 keeps
+  // the classic 3×8 behavior exactly and only starts sharing when MORE than
+  // three downloads run; every download grows back through its own ramp when
+  // another finishes. 0 = off (pre-5.9.0 behavior).
+  globalConnectionBudget: 24,
+  // gallery-dl engine (v5.9.0): image galleries (pixiv, danbooru-family,
+  // deviantart, tumblr, kemono, …) run as an external gallery-dl subprocess.
+  galleryCookiesFromBrowser: '', // opt-in --cookies-from-browser for gallery rows
+  galleryMaxConcurrent: 2,       // simultaneous gallery-dl processes
   // HTTP/2 transport for HTTPS downloads (node:http2, no extra deps). Off by
   // default — HTTP/1.1 multi-connection is still the right choice for most
   // hosts; h2 helps with h2-only/ALPN-picky fronts and per-connection caps.
@@ -1048,6 +1059,14 @@ class DownloadManager extends EventEmitter {
     // Torrent / magnet: flows through the same row, but start/pause/resume go
     // to the WebTorrent engine instead of the HTTP one.
     const torrent = isTorrentUrl(url);
+    // Gallery pages (v5.9.0): pixiv/danbooru/kemono-class pages are API-driven
+    // collections no generic engine can guess — gallery-dl owns them. Direct
+    // file URLs never route here (isGalleryUrl refuses extension-bearing
+    // paths), so ordinary image downloads are untouched.
+    const gallery = !torrent && gallerydl.isGalleryUrl(url);
+    // Course pages (v5.9.0): a Udemy course URL is a curriculum, not a file —
+    // yt-dlp's extractor with playlists allowed handles it.
+    const course = !torrent && !gallery && isCourseUrl(url);
 
     const dup = this.findDuplicate(url, youtubeFields(meta).ytFormat);
     if (dup) {
@@ -1136,6 +1155,8 @@ class DownloadManager extends EventEmitter {
       headers: replay.headers,       // allowlisted replay headers (Referer/Origin/UA)
       cookies: replay.cookies,       // session cookies for authenticated downloads (KVS etc.)
       isTorrent: torrent,            // magnet/.torrent → WebTorrent engine (src/torrent-engine.js)
+      isGallery: gallery,            // gallery page → gallery-dl engine (src/gallery-dl.js)
+      isCourse: course,              // course page → yt-dlp engine, playlists allowed
       protocol: torrent ? 'torrent' : undefined,
       peers: 0,                      // connected swarm peers (torrent rows)
       uploadSpeed: 0,
@@ -2001,8 +2022,148 @@ class DownloadManager extends EventEmitter {
    * @returns {Promise<boolean>} true when this method has taken over the row
    *          (the caller must return); false to continue with the normal engine.
    */
-  async _startYoutubeDownload(download, { force = false, dashOnly = false } = {}) {
-    if (dashOnly) force = true;
+  /**
+   * Gallery rows (v5.9.0) run entirely in the gallery-dl engine — an external
+   * subprocess (GPL-2.0, unmodified; the same legal pattern as yt-dlp) with
+   * site-specific extractors for ~250 image/gallery sites. Progress is
+   * file-count based (a gallery is N unknown files), pause = tree-kill, and
+   * resume = re-run with the same --download-archive so only the missing
+   * files are fetched.
+   */
+  async _startGalleryDownload(download) {
+    const fail = (message, code) => {
+      download.status = 'error';
+      download.error = message;
+      download.errorCode = code || 'gallery';
+      this._persistDownloads(true);
+      this._processQueue();
+      this.emit('download-error', { id: download.id, error: message });
+    };
+
+    const runner = await gallerydl.detectRunner();
+    if (!runner) {
+      fail(gallerydl.galleryDlMissingMessage(), 'missing');
+      return;
+    }
+
+    // Bound how many gallery-dl processes run at once (same shape as the
+    // yt-dlp cap): each is a full extraction session against one site.
+    const cap = Math.max(1, Number(this.settings.galleryMaxConcurrent) || 2);
+    if ((this._galleryActive || 0) >= cap) {
+      if (!this.queue.includes(download.id)) this.queue.push(download.id);
+      download.status = 'queued';
+      this.emit('download-updated', { ...download });
+      return; // the queue restarts this row when a slot frees
+    }
+
+    const dir = download.savePath || (this.settings && this.settings.defaultSavePath) || process.cwd();
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+    } catch (e) { /* the run below fails with the real error */ }
+
+    // One archive per gallery URL: gallery-dl's resume/dedupe record. The
+    // SAME file on every run is what makes pause→resume only fetch files
+    // that are not already on disk.
+    let archive = null;
+    try {
+      const hash = require('crypto').createHash('sha1').update(String(download.url)).digest('hex').slice(0, 16);
+      archive = path.join(dir, '.aidm-gallery-' + hash + '.archive.txt');
+    } catch (e) { /* dedupe is best-effort */ }
+
+    // Row cookies (extension capture) ride along as a Netscape file — gallery
+    // sites are exactly the ones behind logins. Deleted after the run.
+    const cookieFiles = [];
+    let tempCookie = null;
+    if (download.cookies) {
+      tempCookie = ytdlp.writeCookieFile(download.url, download.cookies);
+      if (tempCookie) cookieFiles.push(tempCookie);
+    }
+
+    download.status = 'downloading';
+    download.error = null;
+    download.multiFile = true;   // a gallery is a folder of files, never media-probed
+    download.protocol = 'gallery';
+    this._galleryActive = (this._galleryActive || 0) + 1;
+    this.emit('download-updated', { ...download });
+
+    try {
+      const res = await gallerydl.runGalleryDl({
+        runner,
+        url: download.url,
+        destDir: dir,
+        archivePath: archive,
+        cookieFiles,
+        cookiesFromBrowser: String(this.settings.galleryCookiesFromBrowser || '').trim() || null,
+        proxy: (this.settings.proxyUrl || '').trim() || null,
+        timeoutMs: 4 * 60 * 60 * 1000,
+        shouldAbort: () => !this.downloads.has(download.id) ||
+          download._cancelRequested ||
+          download.status === 'paused',
+        onProgress: (p) => {
+          download.downloaded = p.filesDone;
+          download.totalSize = 0;      // N unknown files: indeterminate by design
+          download.percent = null;
+          download.speed = 0;
+          download.eta = null;
+          download.lastGalleryFile = p.lastFile || null;
+          // Persist on the same 5s cadence as yt-dlp rows so a crash leaves
+          // an honest count instead of a misleading 0.
+          const now = Date.now();
+          if (now - (this._lastGalleryProgressPersist || 0) > 5000) {
+            this._lastGalleryProgressPersist = now;
+            this._persistDownloads(true);
+          }
+          this.emit('download-progress', {
+            id: download.id, downloaded: p.filesDone, totalSize: 0, speed: 0, percent: null, eta: null,
+          });
+        },
+      });
+
+      download.status = 'completed';
+      download.completedAt = Date.now();
+      download.duration = null;
+      download.downloaded = res.filesDone;
+      download.totalFiles = res.filesDone;
+      download.totalSize = 0;
+      download.percent = 100;
+      download.speed = 0;
+      download.eta = null;
+      if (res.lastFile) {
+        download.filepath = res.lastFile;
+        download.filename = path.basename(res.lastFile);
+      }
+      if (res.warning) download.warning = res.warning; // partial: some files failed
+      this._persistDownloads(true);
+      this._processQueue();
+      this.emit('download-complete', { id: download.id, totalSize: 0, duration: null, gallery: true, files: res.filesDone });
+      try { this._finishRow(download); } catch (e) { /* never fail the row */ }
+      try { this._purgeFinished(); } catch (e) { /* hygiene must never throw */ }
+    } catch (e) {
+      if ((e && e.code) === 'aborted') {
+        // Stopped on purpose (pause/cancel/remove). The row already belongs
+        // to that handler; keep the honest file count for the resume view.
+        if (this.downloads.has(download.id) && !download._cancelRequested && download.status !== 'paused') {
+          download.status = 'paused';
+          this._persistDownloads(true);
+          this.emit('download-paused', { id: download.id });
+        }
+        return;
+      }
+      fail((e && e.message) || 'The gallery download failed.', (e && e.code) || 'gallery');
+    } finally {
+      if (tempCookie) ytdlp.deleteCookieFile(tempCookie);
+      this._galleryActive = Math.max(0, (this._galleryActive || 0) - 1);
+      this._processQueue();
+    }
+  }
+
+  /** Course rows (v5.9.0, Udemy): yt-dlp's extractor with playlists allowed. */
+  async _startCourseDownload(download) {
+    await this._startYoutubeDownload(download, { force: true, course: true });
+  }
+
+  async _startYoutubeDownload(download, { force = false, dashOnly = false, course = false } = {}) {
+    if (dashOnly || course) force = true;
     const choice = download.ytFormat || null;
     if (!force && youtubeResolver.isChoiceFresh(choice)) return false;
 
@@ -2022,7 +2183,11 @@ class DownloadManager extends EventEmitter {
     const stem = path.basename(download.filepath, path.extname(download.filepath));
     // yt-dlp owns the container extension until the merge is done, so let it
     // write "<stem>.yt%(ext)s" and rename to the real filename afterwards.
-    const template = path.join(dir, stem + '.yt%(ext)s');
+    // A COURSE row is multi-lecture: one folder per course, zero-padded index
+    // so lecture files sort in curriculum order.
+    const template = course
+      ? path.join(dir, '%(playlist_title|Course)s', '%(playlist_index|0)03d - %(title)s.%(ext)s')
+      : path.join(dir, stem + '.yt%(ext)s');
 
     const fail = (message, code, logFile) => {
       download.status = 'error';
@@ -2073,12 +2238,23 @@ class DownloadManager extends EventEmitter {
 
     const runYt = (withSession) => ytdlp.download({
       url: pageUrl,
-      formatSpec: dashOnly ? 'best' : youtubeResolver.buildFormatSpec(choice),
+      formatSpec: (dashOnly || course) ? 'best' : youtubeResolver.buildFormatSpec(choice),
       outputTemplate: template,
+      // Course rows download whole curricula: --no-playlist is replaced by
+      // --yes-playlist inside yt-dlp.download when this is set.
+      allowPlaylist: course,
       // Flags the CHOICE itself needs (an MP3 pick re-encodes) plus the
       // user's subtitle preference. Subtitles are opt-in, so this is
       // normally an empty list and changes nothing about the normal path.
-      extraArgs: dashOnly ? [] : [
+      // A course has no quality choice — the user's subtitle preference
+      // still applies to lectures.
+      extraArgs: course ? [
+        ...ytdlp.buildSubtitleArgs({
+          langs: String(this.settings.youtubeSubtitleLangs || '').trim(),
+          auto: this.settings.youtubeSubtitleAuto !== false,
+          embed: this.settings.youtubeSubtitleEmbed === true,
+        }),
+      ] : dashOnly ? [] : [
         ...youtubeResolver.buildExtraArgs(choice),
         ...ytdlp.buildSubtitleArgs({
           langs: String(this.settings.youtubeSubtitleLangs || '').trim(),
@@ -2108,8 +2284,9 @@ class DownloadManager extends EventEmitter {
       jsRuntimePath: String(this.settings.youtubeJsRuntime || '').trim() || null,
       extractorArgs: String(this.settings.youtubeExtractorArgs || '').trim() || null,
       // With video+audio the per-track total is only half the job; the
-      // resolver's combined size makes the percentage honest.
-      expectedBytes: (choice && choice.size) || download.totalSize || 0,
+      // resolver's combined size makes the percentage honest. A course has
+      // no honest total until yt-dlp lists the curriculum — stay indeterminate.
+      expectedBytes: course ? 0 : ((choice && choice.size) || download.totalSize || 0),
       timeoutMs: Math.max(5, Number(this.settings.youtubeTimeoutMinutes) || 30) * 60 * 1000,
       shouldAbort: () => !this.downloads.has(download.id) ||
         download._cancelRequested ||
@@ -2154,6 +2331,29 @@ class DownloadManager extends EventEmitter {
         const firstCode = (firstError && firstError.code) || 'extract';
         if (!hadSession || !ytdlp.SESSION_SUSPECT_CODES.has(firstCode)) throw firstError;
         await runYt(false);
+      }
+
+      // A course completes as its course FOLDER (one subfolder per course,
+      // one file per lecture) — there is no single produced file to find,
+      // rename or media-probe. multiFile keeps _finishRow honest.
+      if (course) {
+        download.multiFile = true;
+        download.filepath = dir;
+        download.filename = path.basename(download.filepath);
+        download.downloaded = 0;   // unknown aggregate bytes; folder is the deliverable
+        download.totalSize = 0;
+        download.percent = 100;
+        download.speed = 0;
+        download.eta = null;
+        download.sizeEstimated = false;
+        download.status = 'completed';
+        download.completedAt = Date.now();
+        this._persistDownloads(true);
+        this._processQueue();
+        this.emit('download-complete', { id: download.id, totalSize: 0, duration: null });
+        try { this._finishRow(download); } catch (e) { /* never fail the row */ }
+        try { this._purgeFinished(); } catch (e) { /* hygiene must never throw */ }
+        return true;
       }
 
       const produced = findProducedFile(dir, stem);
@@ -2268,6 +2468,20 @@ class DownloadManager extends EventEmitter {
       if (download.provider === 'youtube') {
         const handled = await this._startYoutubeDownload(download);
         if (handled) return;
+      }
+
+      // Gallery rows (v5.9.0) are PAGES, not files: a probe would just save
+      // the site's HTML viewer. The gallery-dl engine owns them end to end.
+      if (download.isGallery) {
+        await this._startGalleryDownload(download);
+        return;
+      }
+
+      // Course rows (v5.9.0) are curricula, not files: yt-dlp's extractor
+      // walks every lecture with the user's own session.
+      if (download.isCourse) {
+        await this._startCourseDownload(download);
+        return;
       }
 
       // Merge session cookies into request headers BEFORE the probe.
@@ -2681,6 +2895,7 @@ class DownloadManager extends EventEmitter {
       preallocation: s.preallocation,
       perHostConnections: s.perHostMaxConnections != null ? s.perHostMaxConnections : 16,
       http2: s.engineHttp2,
+      globalConnectionBudget: s.globalConnectionBudget != null ? s.globalConnectionBudget : 24,
     });
   }
 
@@ -2716,7 +2931,7 @@ class DownloadManager extends EventEmitter {
     for (const dl of active) {
       // Only a live HTTP engine task has a bucket to update. Torrent and
       // yt-dlp paths keep their own engine-wide throttle for now.
-      if (dl.isTorrent || dl.provider === 'youtube' || dl.isHls || dl.isDash) continue;
+      if (dl.isTorrent || dl.provider === 'youtube' || dl.isHls || dl.isDash || dl.isGallery || dl.isCourse) continue;
       this.engine.setTaskSpeedLimit(dl.id, shares[dl.id] || 0);
     }
     return shares;
@@ -3576,6 +3791,10 @@ class DownloadManager extends EventEmitter {
         if (Array.isArray(data)) data.forEach(d => {
           if (!d._normUrl) d._normUrl = normalizeMediaUrl(d.url); // migrate old saves
           if (typeof d.isHls !== 'boolean') d.isHls = isHlsUrl(d.url);
+          // Rows saved before v5.9.0 predate the gallery/course engines:
+          // re-classify so a restored pixiv link still lands on gallery-dl.
+          if (typeof d.isGallery !== 'boolean') d.isGallery = !d.isTorrent && gallerydl.isGalleryUrl(d.url);
+          if (typeof d.isCourse !== 'boolean') d.isCourse = !d.isTorrent && !d.isGallery && isCourseUrl(d.url);
           // Restore session cookies from the encrypted vault (fail-open).
           if (this.sessionVault) {
             try {

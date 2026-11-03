@@ -222,6 +222,28 @@ function isSameRegistrableDomain(hostA, hostB) {
   return false;
 }
 
+/**
+ * Course-platform course URLs (v5.9.0): a Udemy course page is NOT a file and
+ * not a single video — yt-dlp's extractor lists the whole curriculum and
+ * downloads every lecture when allowed past `--no-playlist`. Auth rides on
+ * the user's browser cookies (`access_token` cookie → Bearer header, the
+ * extractor's documented path); DRM'd lectures are refused by yt-dlp itself
+ * and surfaced by AiDM's classifier as a hard `drm` error. Enrolled-session
+ * downloads only — AiDM never touches Widevine or paywalls.
+ */
+const COURSE_HOST_RE = /(^|\.)udemy\.com$/i;
+
+function isCourseUrl(raw) {
+  if (typeof raw !== 'string' || !/^https?:\/\//i.test(raw)) return false;
+  try {
+    const u = new URL(raw);
+    if (!COURSE_HOST_RE.test(u.hostname)) return false;
+    // The landing page, /learn/ player and /course/... all hit the same
+    // extractor; /draft/ + /instructor/ are authoring tools, not content.
+    return /^\/(?:course|draft|learn)\//.test(u.pathname);
+  } catch (e) { return false; }
+}
+
 module.exports = {
   sanitizeEntryUrl,
   decodeAmpEntities,
@@ -231,4 +253,5 @@ module.exports = {
   isGmailAttachmentCdnUrl,
   hasSingleUseTokenParam,
   isSameRegistrableDomain,
+  isCourseUrl,
 };

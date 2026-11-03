@@ -111,7 +111,7 @@ function resolveConfig(options, defaults = {}) {
 class DownloadTask extends EventEmitter {
   /**
    * @param {any} options
-   * @param {{ globalLimiter?: TokenBucket, hostGate?: import('./host-gate').HostGate, domainConnCaps?: object, serverProfiles?: object }} [deps]
+   * @param {{ globalLimiter?: TokenBucket, hostGate?: import('./host-gate').HostGate, globalBudget?: import('./global-budget').GlobalConnectionBudget, domainConnCaps?: object, serverProfiles?: object }} [deps]
    * @param {any} [defaults]
    */
   constructor(options, deps = {}, defaults = {}) {
@@ -127,6 +127,8 @@ class DownloadTask extends EventEmitter {
     this.limiters = deps.globalLimiter ? [deps.globalLimiter, this.taskLimiter] : [this.taskLimiter];
     /** Shared cross-download per-host connection gate (null = ungated). */
     this.hostGate = deps.hostGate || null;
+    /** Shared global connection budget (fair-share ceilings + hard gate; null = ungated). */
+    this.globalBudget = deps.globalBudget || null;
     /** Shared, persisted per-domain connection-cap store (null = ungated). */
     this.domainConnCaps = deps.domainConnCaps || null;
     /** Adaptive ramp controller (FluxDown port); null when not adaptive. */
@@ -234,8 +236,23 @@ class DownloadTask extends EventEmitter {
     return this.errorValue;
   }
 
-  // setMaxConnections() was removed 2026-10-01: no caller, and it altered the
-  // hot fill path without exercising the ramp controller. Re-add with a caller.
+  // setMaxConnections() was removed 2026-10-01 (no caller, altered the hot
+  // fill path without exercising the ramp controller). Re-added 2026-11-04
+  // WITH its caller: the engine's global connection budget lowers/raises the
+  // ceiling as downloads start and finish. The ramp keeps ownership of actual
+  // growth — a raised ceiling grows again through its own 1.05× probing, it
+  // never jumps; a lowered one stops growth immediately and clamps `allowed`
+  // so fill() stops launching past the share.
+  setMaxConnections(n) {
+    const v = Math.max(1, Math.min(64, Math.floor(Number(n) || 1)));
+    this.config.maxConnections = v;
+    if (this.ramp) {
+      this.ramp.maxCap = Math.max(1, Math.min(64, v));
+      if (this.ramp.allowed > v) this.ramp.allowed = v;
+    }
+    return v;
+  }
+
   setSpeedLimit(bytesPerSecond) {
     const rate = Math.max(0, Math.floor(Number(bytesPerSecond) || 0));
     this.config.speedLimit = rate;
@@ -893,6 +910,16 @@ class DownloadTask extends EventEmitter {
         this.hostGate.waitForSlot(mirror.host, this.id, () => this.fill());
         break;
       }
+      if (this.globalBudget && !this.globalBudget.hasCapacity()) {
+        // The GLOBAL connection budget is spent (all of it is busy on the
+        // other active downloads): wait the same waiter-free way. This is the
+        // hard half of the budget — the fair-share ceiling set at task level
+        // is the polite half — so N concurrent downloads can never burst
+        // budget+overshoot connections at one CDN.
+        segments.release(segment);
+        this.globalBudget.waitForSlot(this.id, () => this.fill());
+        break;
+      }
       this.launch(segment, mirror);
     }
 
@@ -918,6 +945,9 @@ class DownloadTask extends EventEmitter {
     const segments = this.segments;
     this.mirrors.acquire(mirror);
     const gated = !!this.hostGate && this.hostGate.acquire(mirror.host);
+    // Budget accounting (best-effort like the host gate above: a race loss
+    // runs the connection ungated rather than corrupting the count).
+    const budgeted = !!this.globalBudget && this.globalBudget.acquire();
     this.log('debug', `Connection #${segment.id} -> ${mirror.host} [${segment.position}-${segment.end < 0 ? '' : segment.end}]`);
 
     // "Combine networks": pin this connection to the next physical interface's
@@ -987,6 +1017,7 @@ class DownloadTask extends EventEmitter {
       )
       .finally(() => {
         if (gated) this.hostGate.release(mirror.host);
+        if (budgeted) this.globalBudget.release();
         this.mirrors.release(mirror);
         this.active.delete(segment.id);
         if (this.stopping) {
