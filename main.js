@@ -315,7 +315,7 @@ function createWindow() {
   events.forEach(event => {
     downloadManager.on(event, (data) => {
       if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send(event, data);
+        mainWindow.webContents.send(event, ipcRow(data));
       }
       // Every lifecycle event is a chance for the active set to have changed.
       refreshKeepAwake();
@@ -626,6 +626,22 @@ function assertAllowedSettingsPaths(settings, event) {
   }
 }
 
+// Row-shaped IPC payloads must cross the boundary sanitized: a probed row
+// carries `_probePromise` (a real Promise — structured clone always fails on
+// it, taking the whole send/handler return down with "An object could not be
+// cloned"), speed samples, probe scratch and session cookies. Everything
+// else (progress deltas, video-detected payloads, plain ids) passes through
+// untouched. See download-manager.rowForIpc().
+function ipcRow(data) {
+  try {
+    return (data && typeof data === 'object' && typeof data.id === 'string' && typeof data.url === 'string')
+      ? downloadManager.rowForIpc(data)
+      : data;
+  } catch (e) {
+    return data;
+  }
+}
+
 ipcMain.handle('add-download', async (event, opts) => {
   if (opts && opts.savePath != null) assertAllowedSavePath(opts.savePath, event);
   // A page URL (e.g. a tweet) is not a file — adding it directly would
@@ -736,31 +752,31 @@ ipcMain.handle('add-download', async (event, opts) => {
     const message = (e && e.message) || 'Could not resolve this page URL';
     return { resolveFailed: true, error: message };
   }
-  return downloadManager.addDownload(opts);
+  return ipcRow(downloadManager.addDownload(opts));
 });
 
 ipcMain.handle('pause-download', async (event, { id }) => {
-  return downloadManager.pauseDownload(id);
+  return ipcRow(downloadManager.pauseDownload(id));
 });
 
 ipcMain.handle('resume-download', async (event, { id }) => {
-  return downloadManager.resumeDownload(id);
+  return ipcRow(downloadManager.resumeDownload(id));
 });
 
 ipcMain.handle('cancel-download', async (event, { id }) => {
-  return downloadManager.cancelDownload(id);
+  return ipcRow(downloadManager.cancelDownload(id));
 });
 
 ipcMain.handle('remove-download', async (event, { id }) => {
-  return downloadManager.removeDownload(id);
+  return ipcRow(downloadManager.removeDownload(id));
 });
 
 ipcMain.handle('set-download-priority', async (event, { id, priority }) => {
-  return downloadManager.setDownloadPriority(id, priority);
+  return ipcRow(downloadManager.setDownloadPriority(id, priority));
 });
 
 ipcMain.handle('set-download-speed-limit', async (event, { id, bytesPerSecond }) => {
-  return downloadManager.setDownloadSpeedLimit(id, bytesPerSecond);
+  return ipcRow(downloadManager.setDownloadSpeedLimit(id, bytesPerSecond));
 });
 
 ipcMain.handle('get-torrent-info', async (event, { id }) => downloadManager.getTorrentInfo(id));
@@ -769,15 +785,15 @@ ipcMain.handle('set-torrent-seed-policy', async (event, { id, policy }) => downl
 
 ipcMain.handle('approve-download', async (event, { id, savePath, filename }) => {
   assertAllowedSavePath(savePath, event);
-  return downloadManager.approveDownload(id, savePath, filename);
+  return ipcRow(downloadManager.approveDownload(id, savePath, filename));
 });
 
 ipcMain.handle('reject-download', async (event, { id }) => {
-  return downloadManager.rejectDownload(id);
+  return ipcRow(downloadManager.rejectDownload(id));
 });
 
 ipcMain.handle('get-downloads', async () => {
-  return downloadManager.getAllDownloads();
+  return downloadManager.getAllDownloads().map(ipcRow);
 });
 
 /**

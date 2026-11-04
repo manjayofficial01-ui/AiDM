@@ -2831,6 +2831,25 @@ class DownloadManager extends EventEmitter {
     return Array.from(this.downloads.values());
   }
 
+  /**
+   * IPC-safe view of a row. Rows carry live scratch fields — `_probePromise`
+   * is a real Promise, which structured clone can never serialize, so any
+   * IPC payload touching a probed row failed with "An object could not be
+   * cloned" (intermittent "Download failed" toasts on add; a permanently
+   * broken list refresh after F5/window reload mid-session). Session
+   * cookies are scrubbed exactly like the persisted state; the live row
+   * itself is never modified.
+   */
+  rowForIpc(d) {
+    if (!d || typeof d !== 'object') return d;
+    const { cookies, headers, meta, _probe, _normUrl, _nameResolved, _customPath, _speedSamples, _probePromise, ...rest } = d;
+    return sanitizeDownloadPayload({
+      ...rest,
+      headers: headers || null,
+      meta: meta || null,
+    });
+  }
+
   getSettings() {
     return { ...this.settings };
   }

@@ -142,7 +142,9 @@ console.log('\n── main.js wiring (source guard) ──');
   const mainSrc = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   check('main.js requires keep-awake', /require\('\.\/src\/keep-awake'\)/.test(mainSrc));
   check('uses Electron powerSaveBlocker', /powerSaveBlocker/.test(mainSrc));
-  check('refresh runs on download events', /downloadManager\.on\(event[\s\S]{0,220}refreshKeepAwake\(\)/.test(mainSrc));
+  // Window covers the forwarder body: the ipcRow() sanitize wrap (v5.9.1)
+  // added a few bytes between .on(event and the refreshKeepAwake() call.
+  check('refresh runs on download events', /downloadManager\.on\(event[\s\S]{0,256}refreshKeepAwake\(\)/.test(mainSrc));
   check('refresh runs when a schedule starts', /startQueue\(\)[\s\S]{0,120}refreshKeepAwake\(\)/.test(mainSrc));
   check('blocker is released on quit', /before-quit[\s\S]{0,200}keepAwake\.release\(\)/.test(mainSrc));
 }

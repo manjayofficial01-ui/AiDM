@@ -1,6 +1,52 @@
-# ⚡ AiDM - AI-Powered Download Manager v5.4.0
+# ⚡ AiDM — AI-Powered Download Manager v5.9.1
 
-> Classic IDM-style download manager with next-generation modular download engine, dynamic in-flight segment splitting, positional random-access disk I/O, multi-mirror failover, atomic `.part.meta` crash recovery, Chrome browser integration, video quality detection, smart per-category file organization, ETA, dual-layer speed limiting, streaming multi-algorithm checksum verification, and a yt-dlp + FFmpeg extraction engine for YouTube.
+> Classic IDM-style download manager with a next-generation modular download engine, dynamic in-flight segment splitting, positional random-access disk I/O, multi-mirror failover, atomic `.part.meta` crash recovery, Chrome browser integration, video quality detection, a yt-dlp + FFmpeg extraction engine for YouTube, a gallery-dl engine for 250+ gallery sites, Udemy course downloads, smart per-category file organization, ETA, dual-layer speed limiting, and streaming multi-algorithm checksum verification.
+
+<p align="center">
+  <img src="docs/screenshots/screenshot-main-dark.png" alt="AiDM main window (dark theme) — multi-segment downloads in flight with live speed and sparkline" width="920">
+</p>
+
+## 📸 Screenshots
+
+| | |
+|---|---|
+| <img src="docs/screenshots/screenshot-add-url.png" alt="Add New Download dialog" width="460"> | <img src="docs/screenshots/screenshot-settings-network.png" alt="Settings — Network" width="460"> |
+| *Add New Download — batch paste, segments, per-category save paths* | *Settings — connection caps, speed limits, proxy, global connection budget* |
+| <img src="docs/screenshots/screenshot-scheduler.png" alt="Download Scheduler" width="460"> | <img src="docs/screenshots/screenshot-main-light.png" alt="AiDM main window — light theme" width="460"> |
+| *Download Scheduler — one-time / daily / weekly queue runs* | *The same UI in the light theme (one click in the titlebar)* |
+
+---
+
+## What's New in v5.9.1
+
+**Fixed: "An object could not be cloned" breaking adds and list refresh.** Every
+download row carries live scratch fields — including `_probePromise`, a real
+Promise, which Electron's IPC serializer (structured clone) can never
+serialize. Any IPC payload touching a probed row failed wholesale:
+`add-download` intermittently returned "Download failed: An object could not
+be cloned." (the race depended on when the probe started), and `get-downloads`
+was permanently broken for the rest of the session once any row had probed —
+surfacing as "Could not load your downloads" after F5 or a window reload
+mid-session. The UI hid most of it because live progress flows through push
+events, but every refresh path hit the wall.
+
+- **One sanitizer at every row-shaped IPC boundary** — `downloadManager.rowForIpc()`
+  strips the live scratch fields and scrubs session cookies exactly like the
+  persisted state does, and is now applied to `get-downloads`, the
+  `add-download` / `pause` / `resume` / `cancel` / `approve` / `reject` /
+  priority / speed-limit handler returns, and the main-process event forwarder.
+  Non-row payloads (progress deltas, `video-detected`, plain ids) pass through
+  untouched, so the quality picker's cookie flow is unaffected.
+- **The live row is never modified** — authenticated replay (cookies, headers)
+  keeps working exactly as before.
+- Locked by new suite `test/ipc-row-sanitize.js` (17 checks, including a
+  `structuredClone` round-trip of the sanitized view and a list mapping).
+
+## What's New in v5.9.0
+
+- **gallery-dl engine (250+ gallery sites)** | Pixiv, danbooru-family, kemono, Patreon and more route through the official gallery-dl subprocess (the yt-dlp pattern: external GPL-2.0 tool, never bundled, SHA-verified installer offered in-app from Settings › gallery-dl). Direct file URLs are never stolen by the routing, and a per-URL `--download-archive` gives pause/resume/dedupe for free.
+- **Global connection budget** | A fair-share cap (default 24, 0 = off) on total connections across **all** running downloads — running many downloads at max connections each no longer slows every one of them; each download grows back as another finishes. Settings › Network.
+- **Udemy course downloads** | A course URL is a curriculum, not a file: yt-dlp extracts the whole playlist into a per-course folder. DRM-protected content is refused with a clear `drm` error, never half-downloaded.
 
 ---
 
@@ -602,36 +648,61 @@ aidm/
 ## 🚀 Installation & Running
 
 ### Prerequisites
-- Node.js 18+ and npm
-- Google Chrome (for extension)
+- **Node.js 18+** and npm (the Electron 45 runtime itself is installed by `npm install`)
+- Windows 10/11 for the packaged installer; running from source works anywhere Electron runs
+- Google Chrome (optional — for the browser-integration extension)
 
-### Desktop App
+### Run from source
+
 ```bash
-cd aidm
+git clone https://github.com/manjayofficial01-ui/AiDM.git
+cd AiDM
 npm install
 npm start
 ```
 
-Or double-click **`Run-AiDM.bat`** from the workspace root.
+- `npm run dev` — the same app with dev flags
+- `npm test` — the full regression suite (100+ suites)
 
-### Chrome Extension
-1. Open Chrome → `chrome://extensions/`
-2. Enable "Developer mode" (top right)
-3. Click "Load unpacked"
-4. Select the `chrome-extension/` folder
+### Optional: video & gallery engines
+AiDM **never bundles** yt-dlp or gallery-dl. YouTube / long-tail video extraction
+needs the official yt-dlp release — one command installs it into a per-user
+folder, SHA-256 verified against the published checksums:
+
+```bash
+node tools/fetch-yt-dlp.js
+```
+
+gallery-dl (250+ gallery sites) is offered from **Settings › gallery-dl** inside
+the app; FFmpeg ships pre-bundled via `ffmpeg-static`, nothing to install.
+
+### Install as a Windows desktop app
+
+Build the NSIS installer once, then run it like any Windows installer:
+
+```bash
+npm run dist:win        # → dist/AiDM-Setup-<version>.exe
+```
+
+`AiDM-Setup-<version>.exe` walks you through per-user or all-users (UAC)
+installation with a directory picker, creates desktop / Start-menu shortcuts,
+and can keep AiDM alive in the tray when the window is closed (Settings ›
+General). Re-running a newer Setup upgrades in place — settings and download
+history survive, since they live in `~/.aidm_downloads.json` and
+`~/.aidm_settings.json`, never inside the install folder.
+
+### Chrome extension (browser integration)
+1. **Start the AiDM desktop app first** — the extension talks to it on `127.0.0.1:18765`
+2. Open Chrome → `chrome://extensions/`
+3. Enable **Developer mode** (top right)
+4. Click **Load unpacked** and select the `chrome-extension/` folder
 5. The AiDM icon appears in your toolbar
 6. **After every AiDM update:** hit ⟳ Reload on the extension, then reload open video tabs
 
 ### Usage
-1. **Start AiDM** desktop app first
-2. **Install Chrome extension** (loads unpacked)
-3. **Download files:**
-   - Click "Add URL" in the app (or press `Ctrl+N`)
-   - Drop a URL onto the window
-   - Right-click any link → "Download with AiDM"
-   - Copy a URL — clipboard monitor detects it
-   - Use the extension popup to paste URLs
-   - Click "Scan Page" to find all media on a page
+1. **Add downloads:** the ＋ button (`Ctrl+N`), drag-and-drop a URL onto the window, paste a batch (one URL per line), or just copy a link — the clipboard monitor catches it
+2. **In the browser:** right-click any link → *Download with AiDM*, click the floating pill on a playing video, or use the popup's *Scan Page* / *Grab Site*
+3. **Automate:** ⏰ runs the queue on a one-time / daily / weekly timetable, and `AiDM.exe <url> [<url>…]` queues from the command line
 
 ---
 

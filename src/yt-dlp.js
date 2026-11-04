@@ -444,7 +444,12 @@ function logResolveFailure(err, url) {
     let id = '';
     try { id = String(new URL(String(url)).searchParams.get('v') || ''); } catch (e2) { /* not a watch url */ }
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const p = path.join(dir, 'resolve-' + (id ? id + '-' : '') + stamp + '.log');
+    // The stamp has millisecond resolution and several resolves can fail in
+    // the same tick — a name collision must never silently overwrite a
+    // diagnostic log, so suffix -1, -2, … until the name is free.
+    const base = 'resolve-' + (id ? id + '-' : '') + stamp;
+    let p = path.join(dir, base + '.log');
+    for (let n = 1; fs.existsSync(p); n++) p = path.join(dir, base + '-' + n + '.log');
     const written = writeDiagnosticLog(p, {
       code: e.code || 'extract',
       url,
