@@ -45,6 +45,13 @@ const RESOLVE_LIMITERS = {
   // When /api/download routes a page URL through the resolver, this caps how
   // often a runaway tab can force resolution.
   '/api/download': new RateLimiter(30, 60 * 1000),
+  // UI-churn endpoints a runaway (or hostile paired) caller could otherwise
+  // spam — video-detected pops the modal quality picker each time.
+  '/api/video-detected': new RateLimiter(30, 60 * 1000),
+  '/api/approve': new RateLimiter(60, 60 * 1000),
+  '/api/remove': new RateLimiter(60, 60 * 1000),
+  '/api/cancel': new RateLimiter(60, 60 * 1000),
+  '/api/reject': new RateLimiter(60, 60 * 1000),
 };
 
 function sanitizeHeaders(input) {
@@ -299,6 +306,18 @@ class IPCServer {
    * same guard delete-file-from-disk applies in main.js. Without it a page
    * talking to the local API could write an .exe into the Startup folder.
    */
+  /**
+   * 429 answer for the rate-limited endpoints (resolver + UI-churn guards).
+   * Scope-safe: usable from any handler's body callback.
+   */
+  _rejectLimited(res, message) {
+    try {
+      res.writeHead(429, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: message }));
+    } catch (e) { /* socket gone */ }
+    return;
+  }
+
   _isAllowedSavePath(p) {
     if (!p || typeof p !== 'string' || p.includes('\0')) return false;
     let abs;
@@ -400,6 +419,9 @@ class IPCServer {
       // POST /api/video-detected — video with quality variants detected
       // Body: { pageTitle, pageUrl, videos: [{ url, quality, resolution, size, format, codec }] }
       if (req.method === 'POST' && req.url === '/api/video-detected') {
+        if (!RESOLVE_LIMITERS['/api/video-detected']?.allow()) {
+          return this._rejectLimited(res, 'Too many video-detection requests — try again in a minute');
+        }
         // Variant lists are tiny JSON; a small cap keeps a runaway body from
         // becoming a memory-amplification vector (same reasoning as /api/batch).
         this._readBody(req, 2 * 1024 * 1024).then((body) => {
@@ -641,6 +663,9 @@ class IPCServer {
       // POST /api/approve — approve a pending download with chosen path
       // Body: { id, savePath }
       if (req.method === 'POST' && req.url === '/api/approve') {
+        if (!RESOLVE_LIMITERS['/api/approve']?.allow()) {
+          return this._rejectLimited(res, 'Too many requests — try again in a minute');
+        }
         this._readBody(req, 64 * 1024).then((body) => {
           try {
             const { id, savePath } = JSON.parse(body);
@@ -666,6 +691,9 @@ class IPCServer {
       // harness cannot clean up rows it created — leaving stale rows that
       // the user has no way to dismiss from outside the renderer.
       if (req.method === 'POST' && req.url === '/api/remove') {
+        if (!RESOLVE_LIMITERS['/api/remove']?.allow()) {
+          return this._rejectLimited(res, 'Too many requests — try again in a minute');
+        }
         this._readBody(req, 64 * 1024).then((body) => {
           try {
             const { id } = JSON.parse(body);
@@ -688,6 +716,9 @@ class IPCServer {
       // removes the row (partial file becomes .part), so `download` is the
       // removed row's last state, or true when it was already gone.
       if (req.method === 'POST' && req.url === '/api/cancel') {
+        if (!RESOLVE_LIMITERS['/api/cancel']?.allow()) {
+          return this._rejectLimited(res, 'Too many requests — try again in a minute');
+        }
         this._readBody(req, 64 * 1024).then((body) => {
           try {
             const { id } = JSON.parse(body);
@@ -709,6 +740,9 @@ class IPCServer {
       // POST /api/reject — reject a pending download (drops the row).
       // Symmetric with IPC reject-download.
       if (req.method === 'POST' && req.url === '/api/reject') {
+        if (!RESOLVE_LIMITERS['/api/reject']?.allow()) {
+          return this._rejectLimited(res, 'Too many requests — try again in a minute');
+        }
         this._readBody(req, 64 * 1024).then((body) => {
           try {
             const { id } = JSON.parse(body);

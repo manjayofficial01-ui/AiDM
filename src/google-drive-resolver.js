@@ -132,9 +132,18 @@ function decodeEntities(s) {
  * @returns {string}
  */
 function confirmFormUrl(form, fallbackId) {
-  const base = /^https?:/i.test(form.action || '')
-    ? form.action
-    : 'https://drive.usercontent.google.com/download';
+  // The form is parsed from Drive's HTML — untrusted input end-to-end. A
+  // poisoned `action` must not aim the authenticated follow-up (it carries
+  // the user's Drive cookies) anywhere but Google's own hosts.
+  let base = 'https://drive.usercontent.google.com/download';
+  if (/^https?:/i.test(form.action || '')) {
+    try {
+      const host = new URL(form.action).hostname;
+      if (/(^|\.)google\.com$/i.test(host) || /(^|\.)googleusercontent\.com$/i.test(host)) {
+        base = form.action;
+      }
+    } catch (e) { /* keep the default base */ }
+  }
   let u;
   try { u = new URL(base); } catch { return driveDirectUrl(fallbackId); }
   for (const [k, v] of Object.entries(form.fields || {})) u.searchParams.set(k, v);

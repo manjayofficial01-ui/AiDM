@@ -1332,6 +1332,11 @@ async function sendToAiDM(url, filename, opts = {}) {
   if (typeof url === 'string' && url.startsWith('blob:')) {
     return sendBlobToAiDM(url, filename, opts);
   }
+  // Only http(s) URLs ever ride the local API. file:/ftp:/data: and garbage
+  // must not be handed to the desktop engine, which fetches server-side.
+  if (typeof url !== 'string' || !/^https?:/i.test(url)) {
+    return { sent: false, success: false, error: 'Only http(s) URLs can be downloaded' };
+  }
   // Never dedup against half-loaded state after a worker restart.
   await initReady;
   // Facebook: never download a ?bytestart=N slice — it is a partial chunk of
@@ -1433,10 +1438,14 @@ async function sendToAiDM(url, filename, opts = {}) {
 
 async function sendBatchToAiDM(urls) {
   try {
+    // Scheme guard mirrors sendToAiDM — only http(s) reaches the desktop.
+    const clean = (Array.isArray(urls) ? urls : [])
+      .filter(u => typeof u === 'string' && /^https?:/i.test(u));
+    if (!clean.length) return false;
     const resp = await fetch(`${AIDM_API_BASE}/api/batch`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ urls }),
+      body: JSON.stringify({ urls: clean }),
       signal: AbortSignal.timeout(10000),
     });
     const data = await resp.json();
@@ -1888,6 +1897,7 @@ chrome.downloads.onCreated.addListener((downloadItem) => {
         url,
         filename: downloadItem.filename || extractFilename(url),
         referrer: downloadItem.referrer || null,
+        tabId: typeof downloadItem.tabId === 'number' ? downloadItem.tabId : undefined,
         saveAs: true,
       });
     })();
@@ -1963,7 +1973,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     const url = info.linkUrl || info.srcUrl;
     let tabUrl = null;
     try { tabUrl = tab && tab.url; } catch (e) {}
-    const r = await nativeDownloadToBrowser({ url, filename: extractFilename(url), referrer: tabUrl });
+    const r = await nativeDownloadToBrowser({ url, filename: extractFilename(url), referrer: tabUrl, tabId: tab && typeof tab.id === 'number' ? tab.id : undefined });
     if (!r.success) {
       try {
         chrome.notifications.create({
@@ -2008,6 +2018,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       url: msg.url,
       filename: msg.filename,
       referrer: msg.referrer || msg.pageUrl || (msg.opts && (msg.opts.pageUrl || msg.opts.referrer)) || null,
+      tabId: sender && sender.tab && typeof sender.tab.id === 'number' ? sender.tab.id : undefined,
     }).then(
       (r) => sendResponse(r),
       (err) => sendResponse({ success: false, error: String((err && err.message) || err) })
@@ -2039,7 +2050,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // Async: the persisted state must be rehydrated first, or a freshly
     // woken worker answers with empty streams/sent sets.
     initReady.then(() => {
-      const tabId = msg.tabId != null ? msg.tabId : (sender.tab && sender.tab.id);
+      // Content scripts may only read their OWN tab's stream history — a
+      // frame must not lift another tab's sniffed media URLs by naming its
+      // tabId. Only extension pages (popup, no sender.tab) may name one.
+      const tabId = (sender.tab && sender.tab.id != null)
+        ? sender.tab.id
+        : (msg.tabId != null ? msg.tabId : (sender.tab && sender.tab.id));
       // Page-load floor for stream freshness. Content scripts send their own
       // performance.timeOrigin; the popup has no page clock, so fall back to
       // the tab's last-navigation time recorded by this worker.
@@ -2501,8 +2517,16 @@ const AIDM_DNR_RULE_TTL_MS = 5 * 60 * 1000;
 // expire rules properly and always pick max(existing id) + 1.
 const aidmDnrExpiry = new Map();
 
-/** Session DNR rule setting the page Referer for one download host. */
-function buildAidmRefererRule(id, domain, referer) {
+/** Session DNR rule setting the page Referer for one download host.
+ * Confined to the requesting tab when one is known — without `tabIds` the
+ * rule is browser-global for its 5-minute TTL and would rewrite the Referer
+ * of that host in EVERY tab and frame. */
+function buildAidmRefererRule(id, domain, referer, tabId) {
+  const condition = {
+    urlFilter: '||' + domain + '/',
+    resourceTypes: ['main_frame', 'sub_frame', 'xmlhttprequest', 'media', 'other'],
+  };
+  if (typeof tabId === 'number') condition.tabIds = [tabId];
   return {
     id,
     priority: 1,
@@ -2510,15 +2534,12 @@ function buildAidmRefererRule(id, domain, referer) {
       type: 'modifyHeaders',
       requestHeaders: [{ header: 'Referer', operation: 'set', value: String(referer).slice(0, 512) }],
     },
-    condition: {
-      urlFilter: '||' + domain + '/',
-      resourceTypes: ['main_frame', 'sub_frame', 'xmlhttprequest', 'media', 'other'],
-    },
+    condition,
   };
 }
 
 /** Ensure a short-lived Referer rule for the download host. Never throws. */
-async function ensureAidmRefererRule(url, referer) {
+async function ensureAidmRefererRule(url, referer, tabId) {
   if (!chrome.declarativeNetRequest || !url || !referer) return false;
   let domain = '';
   try { domain = new URL(String(url)).hostname; } catch (e) { return false; }
@@ -2541,16 +2562,22 @@ async function ensureAidmRefererRule(url, referer) {
     if (expired.length) {
       try { await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: expired }); } catch (e) {}
     }
-    const covered = (rules || []).some(r => r && liveIds.has(r.id) && r.id >= AIDM_DNR_RULE_BASE &&
-      r.condition && r.condition.urlFilter === filter &&
-      ((r.action && r.action.requestHeaders) || []).some(h => String(h.header || '').toLowerCase() === 'referer'));
+    const sameShape = (r) => {
+      const cond = r && r.condition;
+      if (!cond || cond.urlFilter !== filter) return false;
+      if (!((r.action && r.action.requestHeaders) || []).some(h => String(h.header || '').toLowerCase() === 'referer')) return false;
+      const have = Array.isArray(cond.tabIds) ? cond.tabIds : null;
+      if (typeof tabId === 'number') return !!have && have.length === 1 && have[0] === tabId;
+      return !have; // no tab requested → only an unscoped rule covers it
+    };
+    const covered = (rules || []).some(r => r && liveIds.has(r.id) && r.id >= AIDM_DNR_RULE_BASE && sameShape(r));
     if (covered) return true;
     // Next id = max(existing session rule id) + 1 — never collides with a
     // rule that outlived the worker's in-memory counter.
     let ruleId = AIDM_DNR_RULE_BASE;
     for (const id of liveIds) if (id >= ruleId) ruleId = id + 1;
     await chrome.declarativeNetRequest.updateSessionRules({
-      addRules: [buildAidmRefererRule(ruleId, domain, referer)],
+      addRules: [buildAidmRefererRule(ruleId, domain, referer, tabId)],
     });
     aidmDnrExpiry.set(ruleId, now + AIDM_DNR_RULE_TTL_MS);
     schedulePersist();
@@ -2622,12 +2649,12 @@ try {
   });
 } catch (e) { /* downloads API unavailable */ }
 
-async function nativeDownloadToBrowser({ url, filename, referrer, saveAs }) {
+async function nativeDownloadToBrowser({ url, filename, referrer, saveAs, tabId }) {
   if (!url || !/^https?:/i.test(String(url))) {
     return { success: false, error: 'Missing url' };
   }
   try {
-    if (referrer) await ensureAidmRefererRule(url, referrer);
+    if (referrer) await ensureAidmRefererRule(url, referrer, tabId);
     const name = (filename && String(filename).trim()) || extractFilename(url);
     // Mark BEFORE download(): onDeterminingFilename can fire before the
     // promise below resolves with the download id.

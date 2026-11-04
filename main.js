@@ -216,7 +216,9 @@ async function requestExtensionPairing(origin) {
   const opts = {
     type: 'question',
     buttons: ['Allow', 'Block'],
-    defaultId: 0,
+    // Secure default: Enter / closing the dialog must BLOCK, never grant an
+    // extension the full API. Approving is a deliberate choice.
+    defaultId: 1,
     cancelId: 1,
     noLink: true,
     title: 'Allow browser extension?',

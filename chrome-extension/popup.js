@@ -747,7 +747,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       (qualityText ? `<span class="quality-badge">${escapeHtml(qualityText)}</span>` : '') +
       (item.resolution ? `<span class="size-badge">${escapeHtml(item.resolution)}</span>` : '') +
       (sizeText ? `<span class="size-badge">${sizeText}</span>` : '') +
-      (formatText ? `<span class="format-badge">${formatText}</span>` : '');
+      (formatText ? `<span class="format-badge">${escapeHtml(formatText)}</span>` : '');
   }
 
   function popupQualityForHeight(h) {
@@ -808,7 +808,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   function escapeHtml(str) {
     const div = document.createElement('div');
     div.textContent = str || '';
-    return div.innerHTML;
+    // Quotes MUST be escaped here: this helper also lands inside
+    // double-quoted attributes (title="…"), and innerHTML serialization
+    // leaves them raw — one " closes the attribute and injects markup.
+    // Escaping quotes in element content is harmless (entities render the
+    // same), so one safe helper covers both contexts.
+    return div.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
   // Token-insensitive URL compare so rotated signed URLs still match sent ones

@@ -568,6 +568,17 @@ function mediaTooltip(media) {
 function escapeAttr(str) { return escapeHtml(str).replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
 
 /**
+ * Class-list sanitizer for values that ride inside class="…". Statuses and
+ * segment states are engine words — anything outside that alphabet (imported
+ * JSON, a future engine string) collapses to a harmless token instead of
+ * breaking out of the attribute.
+ */
+function sanitizeStateClass(v) {
+  const s = String(v == null ? '' : v);
+  return /^[a-z0-9_-]{1,32}$/i.test(s) ? s : 'unknown';
+}
+
+/**
  * HTML for the row's media cell: the dimension readout plus the "no audio
  * track" badge. Returns '' when there is nothing true to say — an empty cell
  * beats a fabricated resolution.
@@ -684,7 +695,7 @@ function renderDownloadRow(dl) {
         <span class="speed-cell ${dl.speed > 0 ? '' : 'zero'}">${speedStr}</span>
       </td>
       <td class="col-status">
-        <span class="status-badge ${dl.status}">${formatStatus(dl.status)}</span>
+        <span class="status-badge ${sanitizeStateClass(dl.status)}">${formatStatus(dl.status)}</span>
         ${priorityChipHtml(dl)}${limitChipHtml(dl)}
         ${(dl.connections != null || dl.targetConnections != null) ? connChipHtml(dl) : ''}
         ${dl.networkSpread ? netChipHtml(dl) : ''}
@@ -813,7 +824,10 @@ function renderSegments(segments) {
   }
   return `<div class="segments-bar">
     ${segments.map((s, i) => {
-      const state = s.state || 'pending';
+      // Segment states come from the engine OR from imported JSON rows —
+      // the string never reaches an HTML attribute unvalidated.
+      const rawState = String((s && s.state) || 'pending');
+      const state = /^[a-z0-9_-]{1,24}$/i.test(rawState) ? rawState : 'pending';
       const len = (s.end != null && s.end >= 0 && s.start != null) ? (s.end - s.start + 1) : 0;
       const frac = len > 0 ? Math.min(100, Math.round((s.downloaded || 0) / len * 100)) : (state === 'done' ? 100 : 0);
       const cls = ['segment', state, s.tail ? 'tail' : ''].filter(Boolean).join(' ');
@@ -908,7 +922,9 @@ function formatStatus(status) {
     'connecting': 'Connecting',
     'pending-approval': 'Pending',
   };
-  return labels[status] || status;
+  // Unknown status: escape before it touches innerHTML — the label list
+  // above only covers today's engine words.
+  return labels[status] || escapeHtml(String(status || ''));
 }
 
 function matchCategory(d, category) {

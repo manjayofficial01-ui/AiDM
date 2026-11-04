@@ -9,7 +9,7 @@ const { DEFAULT_INTERCEPT_TYPES } = require('./scheduler');
 const { muxAudioVideo, isAvailable: ffmpegAvailable, facebookMediaHeaders } = require('./media-mux');
 const ytdlp = require('./yt-dlp');
 const youtubeResolver = require('./youtube-resolver');
-const { sanitizeEntryUrl, entryUrlWasRepaired, isSingleUseTokenUrl, isGmailAttachmentEntryUrl, isGmailAttachmentCdnUrl, isCourseUrl } = require('./url-hygiene');
+const { sanitizeEntryUrl, entryUrlWasRepaired, isSingleUseTokenUrl, isGmailAttachmentEntryUrl, isGmailAttachmentCdnUrl, isCourseUrl, isSameRegistrableDomain } = require('./url-hygiene');
 const gallerydl = require('./gallery-dl');
 const { filenameFromContentDisposition, extFromMime, ensureExtension, hasFilenameExtension } = require('./engine/probe');
 const { looksLikeAuthWall, looksLikeHtmlHead, sessionExpiredMessage, extensionOfFilename, BINARY_EXTENSIONS } = require('./auth-wall');
@@ -25,6 +25,11 @@ const { robustFetch } = require('./download-engine');
 // a broken extractor must degrade to "no extraction", never break completion.
 let archiveExtract = null;
 try { archiveExtract = require('./archive-extract'); } catch (e) { archiveExtract = null; }
+
+// Windows reserved device names — a file named NUL/NUL.ts/CON targets the
+// device instead of the disk (silent data loss). The engine's sanitizeFilename
+// guards server-side names; the manager applies the same guard to row names.
+const RESERVED_WIN_NAMES = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
 
 // Team A's real geometry reader (width/height/duration/audio-track presence
 // proven from the container bytes). Required defensively: a missing or broken
@@ -214,6 +219,14 @@ function splitCommandLine(cmd) {
   }
   if (hasToken) out.push(cur);
   return out;
+}
+
+// Shells and script interpreters execute their argument by association —
+// spawn("cmd.exe", ["…\\evil.bat"]) runs the batch. The post-download hook
+// must never hand a server-named file to one of these.
+function isInterpreterExe(exe) {
+  const base = path.basename(String(exe || '')).toLowerCase();
+  return /^(cmd|command|cmd32|cmd64|wscript|cscript|mshta|rundll32|regsvr32)(\.(exe|com))?$/.test(base);
 }
 
 /**
@@ -1238,6 +1251,10 @@ class DownloadManager extends EventEmitter {
       .replace(/^[.\s]+/, '')
       .replace(/[.\s]+$/, '');
     if (!name) return null;
+    // Windows reserved device names: a file named NUL/NUL.ts/CON targets the
+    // device, not the disk (silent data loss). Same guard the engine's
+    // sanitizeFilename applies to server-side names.
+    if (RESERVED_WIN_NAMES.test(name)) name = '_' + name;
     if (name.length > 180) name = name.slice(0, 180);
     return name;
   }
@@ -1491,11 +1508,22 @@ class DownloadManager extends EventEmitter {
           continue;
         }
         if (!item || typeof item !== 'object' || !item.url) { out.skipped++; continue; }
+        // Import safety: an exported row's `segments` was the engine's live
+        // segment map. Importing it verbatim would (a) poison the engine,
+        // which expects a connection COUNT here, and (b) hand imported JSON
+        // a path into row rendering. Reduce it to a sane count or nothing.
+        let importedSegments;
+        if (typeof item.segments === 'number') {
+          importedSegments = (item.segments >= 1 && item.segments <= 32) ? Math.floor(item.segments) : undefined;
+        } else if (Array.isArray(item.segments)) {
+          const n = item.segments.length;
+          importedSegments = (n >= 1 && n <= 32) ? n : undefined;
+        }
         const row = this.addDownload({
           url: item.url,
           filename: item.filename || undefined,
           savePath: item.savePath || undefined,
-          segments: item.segments || undefined,
+          segments: importedSegments,
           category: item.category || undefined,
           quality: item.quality || null,
           meta: item.meta || null,
@@ -1767,6 +1795,16 @@ class DownloadManager extends EventEmitter {
       const argv = splitCommandLine(cmd);
       if (!argv.length) return;
       const exe = argv[0];
+      // A completed file can carry ANY name the server chose (Content-
+      // Disposition). Handing it to a shell or script interpreter would run
+      // attacker-chosen code — spawn("cmd.exe", ["…\\evil.bat"]) executes
+      // the batch file. The hook exists for direct tools (an antivirus
+      // scanner); interpreters are refused outright.
+      if (isInterpreterExe(exe)) {
+        dl.postDownloadResult = 'Refused: the post-download command may not be a shell or script interpreter (cmd/wscript/cscript/mshta/rundll32/regsvr32) — a downloaded file could carry an attacker-chosen name.';
+        this._persistDownloads(true);
+        return;
+      }
       const args = argv.slice(1).map(a => a.split('{file}').join(dl.filepath));
       if (!cmd.includes('{file}')) args.push(dl.filepath);
       const timeoutSec = Math.max(10, Number(this.settings.postDownloadCmdTimeoutSec) || 120);
@@ -1917,6 +1955,20 @@ class DownloadManager extends EventEmitter {
         reqHeaders.Referer = download.meta.pageUrl;
       }
       if (download.cookies && !reqHeaders.Cookie) reqHeaders.Cookie = download.cookies;
+      // The audio URL is page/extension-supplied: a forged or redirected
+      // audioUrl on a different registrable domain must not receive the
+      // row's session credentials or the page's Referer.
+      try {
+        const anchor = new URL((download.meta && download.meta.pageUrl) || download.url || '').hostname;
+        const audioHost = new URL(download.audioUrl).hostname;
+        if (!isSameRegistrableDomain(anchor, audioHost)) {
+          delete reqHeaders.Cookie;
+          delete reqHeaders.Referer;
+        }
+      } catch (e) {
+        delete reqHeaders.Cookie;
+        delete reqHeaders.Referer;
+      }
       const prevStatus = download.status;
       download.status = 'muxing';
       this.emit('download-updated', { ...download });
@@ -2850,6 +2902,23 @@ class DownloadManager extends EventEmitter {
     });
   }
 
+  /**
+   * Credential scoping for machine-added targets (metalink mirrors, sibling
+   * rows). Cookies captured for one host must not ride along to a target on
+   * a different registrable domain — those URLs are remote-controlled
+   * content, and the credentials belong to the site the user was on.
+   */
+  _scopedCookies(cookies, originUrl, targetUrl) {
+    if (!cookies) return null;
+    try {
+      const a = new URL(String(originUrl)).hostname;
+      const b = new URL(String(targetUrl)).hostname;
+      return isSameRegistrableDomain(a, b) ? cookies : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
   getSettings() {
     return { ...this.settings };
   }
@@ -3083,6 +3152,7 @@ class DownloadManager extends EventEmitter {
       if (!name || name === '/' || name === parsed.hostname) name = '';
       if (name) {
         name = decodeURIComponent(name).replace(/[<>:"/\\|?*]/g, '_').trim();
+        if (RESERVED_WIN_NAMES.test(name)) name = '_' + name;
       }
       // Windows MAX_PATH is 260; keep the name itself well under that so the
       // full path (save dir + name) never exceeds the limit and causes ENOENT.
@@ -3486,6 +3556,10 @@ class DownloadManager extends EventEmitter {
       download._metalinkSourceUrl = originalUrl;
       download.url = file.urls[0];
       download.mirrors = file.urls.slice(1);
+      // Cookies were captured for the ORIGINAL host. A metalink is untrusted
+      // remote content — a mirror on a different registrable domain must
+      // never receive them.
+      download.cookies = this._scopedCookies(download.cookies, originalUrl, file.urls[0]) || null;
       download.filename = cleanName;
       download.category = detectCategory(cleanName);
       download.filepath = path.join(download.savePath, cleanName);
@@ -3506,7 +3580,7 @@ class DownloadManager extends EventEmitter {
           checksum: additional.checksum ? { algorithm: additional.checksum.algorithm, value: additional.checksum.value } : null,
           pieces: additional.pieces || null,
           headers: reqHeaders,
-          cookies: download.cookies || null,
+          cookies: this._scopedCookies(download.cookies, originalUrl, additional.urls[0]),
           priority: download.priority,
           speedLimit: download.speedLimit || 0,
         });
@@ -3905,7 +3979,10 @@ class DownloadManager extends EventEmitter {
         process.env.USERPROFILE || process.env.HOME || '',
         '.aidm_settings.json'
       );
-      fs.writeFileSync(settingsPath + '.tmp', JSON.stringify(this.settings, null, 2));
+      // The settings file holds the AI API key and file-host credentials —
+      // never world-readable (no-ops where the platform ignores the mode).
+      try { fs.chmodSync(settingsPath, 0o600); } catch (e) { /* fresh file */ }
+      fs.writeFileSync(settingsPath + '.tmp', JSON.stringify(this.settings, null, 2), { mode: 0o600 });
       fs.renameSync(settingsPath + '.tmp', settingsPath);
     } catch (e) {}
   }

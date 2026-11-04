@@ -1,4 +1,4 @@
-# ⚡ AiDM — AI-Powered Download Manager v5.9.1
+# ⚡ AiDM — AI-Powered Download Manager v5.9.2
 
 > Classic IDM-style download manager with a next-generation modular download engine, dynamic in-flight segment splitting, positional random-access disk I/O, multi-mirror failover, atomic `.part.meta` crash recovery, Chrome browser integration, video quality detection, a yt-dlp + FFmpeg extraction engine for YouTube, a gallery-dl engine for 250+ gallery sites, Udemy course downloads, smart per-category file organization, ETA, dual-layer speed limiting, and streaming multi-algorithm checksum verification.
 
@@ -14,6 +14,84 @@
 | *Add New Download — batch paste, segments, per-category save paths* | *Settings — connection caps, speed limits, proxy, global connection budget* |
 | <img src="docs/screenshots/screenshot-scheduler.png" alt="Download Scheduler" width="460"> | <img src="docs/screenshots/screenshot-main-light.png" alt="AiDM main window — light theme" width="460"> |
 | *Download Scheduler — one-time / daily / weekly queue runs* | *The same UI in the light theme (one click in the titlebar)* |
+
+---
+
+## What's New in v5.9.2 — security audit release
+
+A five-surface defensive audit (local HTTP API, renderer + extension XSS,
+filesystem write paths, subprocess/SSRF/secrets, Chrome extension) produced a
+fix list of 19 confirmed issues, all fixed and locked by a new
+`test/security-hardening.js` suite (40 checks, including a live loopback
+redirect test). The audit **confirmed the core is sound** — the origin/Host
+gates block drive-by CSRF and DNS rebinding, zip extraction refuses every
+slip shape, all subprocess spawns are argv-only with `--` separators, the
+cookie vault is DPAPI-encrypted, and exported/persisted data is
+credential-scrubbed.
+
+**Fixed — credential forwarding:**
+- The default file probe (`_probeFileOnce`) forwarded `Cookie`/`Authorization`
+  to whatever host a 302 pointed at — the one transport that had missed the
+  cross-domain credential stripping the other three apply. Redirect hops now
+  strip credentials and drop the cookie jar when the hop leaves the row's
+  registrable domain (live-tested: `127.0.0.1 → localhost` strips, same-host
+  CDN hops keep working).
+- Metalink mirrors and imported mirror lists inherited the row's full
+  credential set. Both metalink expansion and the engine's per-mirror request
+  headers (`headersForTarget`) now attach cookies only to mirrors sharing the
+  row's registrable domain.
+- A forged Drive "confirm form" could aim the cookie-carrying follow-up
+  anywhere; the action URL is now pinned to Google hosts.
+- The audio-mux fetch no longer replays row cookies/Referer to an audioUrl on
+  a foreign registrable domain.
+
+**Fixed — XSS:**
+- The extension popup escaped `&<>` but not quotes inside a `title="…"`
+  attribute — a server-chosen Content-Disposition filename or URL basename
+  could inject markup into the popup (UI spoofing in a privileged context).
+  `escapeHtml` now escapes quotes; the format badge is escaped too.
+- Imported download lists could smuggle a `segments` array with an attacker
+  `state` string into `class="…"` in the row renderer and the block-grid —
+  renderer XSS with full IPC access. Imports now reduce `segments` to a sane
+  connection count, and both renderers validate the state token.
+- Status badges/labels harden their class + fallback paths the same way.
+
+**Fixed — extension hardening:**
+- Click-to-download auto-send and the takeover hotkeys accepted **synthetic**
+  (page-dispatched) events; a hostile page could queue downloads (triggering
+  cookie capture) and flip takeover state with no user gesture. Both now
+  require `event.isTrusted`.
+- The extension only sent http(s) URLs to the desktop; `file:`/`ftp:`/`data:`
+  garbage is refused before the local API call.
+- The floating capsule's shadow root is now **closed** (the page could read
+  row metadata and click its buttons), the `get-panel-data` handler locks
+  content scripts to their own tab's sniffed history, and the DNR Referer
+  rewrite rule is confined to the requesting tab instead of being
+  browser-global for its TTL.
+
+**Fixed — local API & desktop:**
+- Rate limiters on `/api/video-detected` (each call popped the modal quality
+  picker) and the approve/remove/cancel/reject endpoints.
+- The extension-pairing dialog now defaults to **Block** — Enter no longer
+  grants an extension the full API.
+- The post-download command hook refuses shell/script interpreters
+  (cmd/wscript/cscript/mshta/rundll32/regsvr32): a downloaded file can carry
+  any server-chosen name, and `cmd.exe evil.bat` executes it.
+- Imported settings cannot smuggle that class of command either; the hook's
+  refusal is recorded on the row.
+- `~/.aidm_settings.json` (AI key + file-host credentials) is written `0600`
+  and tightened on load.
+- Windows reserved device names (`NUL`, `CON`, `COM1`…) are neutralized in
+  row names — writing `NUL.ts` targeted the NUL device (silent data loss).
+- gallery-dl stderr (full tokenized URLs) is redacted before it reaches row
+  errors, the UI and the state file.
+
+**Known limitations (documented, by design):** the local API does not
+authenticate native processes (no-Origin requests are trusted — CLI/harness
+surface); the extension authenticates the desktop by pairing, not by shared
+secret, so a local process that squats the port before AiDM starts could
+receive extension POST bodies; the gallery-dl installer validates its
+downloaded binary by executing it (no published checksums exist upstream).
 
 ---
 

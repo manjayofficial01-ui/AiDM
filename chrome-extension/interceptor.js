@@ -624,6 +624,9 @@
   const DL_LINK_RE = /\/get_file\/|\/dwnl\/|\.(mp4|m4v|webm|mkv|mov|zip|rar|7z|ts|m3u8)(\?|#|$)/i;
   document.addEventListener('click', (e) => {
     try {
+      // A synthetic click is the page forging a "user grabbed this file" —
+      // only real user gestures may enqueue download links.
+      if (!e.isTrusted) return;
       const t = e.target;
       const a = t && t.closest ? t.closest('a[href], area[href]') : null;
       if (!a || !a.href || !/^https?:/i.test(a.href)) return;

@@ -9,6 +9,7 @@ const { DownloadError, toDownloadError } = require('./errors');
 const { SegmentFileWriter } = require('./file-writer');
 const { MirrorPool } = require('./mirrors');
 const { basicAuthHeader, ensureExtension, filenameFromUrl, probeRemote, sanitizeFilename, splitCredentials } = require('./probe');
+const { isSameRegistrableDomain } = require('../url-hygiene');
 const { TokenBucket } = require('./rate-limiter');
 const { DEFAULT_RETRY_POLICY, backoffDelay } = require('./retry');
 const { SegmentManager } = require('./segments');
@@ -702,7 +703,7 @@ class DownloadTask extends EventEmitter {
       if (mirror.banned) continue;
       try {
         return await probeRemote(mirror.url, {
-          headers: this.baseHeaders,
+          headers: this.headersForTarget(mirror.url),
           fetchImpl: this.config.fetch,
           signal,
           timeoutMs: this.config.connectTimeoutMs,
@@ -968,7 +969,7 @@ class DownloadTask extends EventEmitter {
 
     const run = runSegmentWorker(segment, mirror, {
       fetchImpl: this.config.fetch,
-      headers: this.baseHeaders,
+      headers: this.headersForTarget(mirror && mirror.url),
       info: this.info,
       writer: this.writer,
       limiters: this.limiters,
@@ -1351,6 +1352,29 @@ class DownloadTask extends EventEmitter {
     if (this.config.cookies) headers.Cookie = this.config.cookies;
     if (this.config.auth) headers.Authorization = basicAuthHeader(this.config.auth);
     return headers;
+  }
+
+  /**
+   * Per-target request headers. Mirrors arrive from remote metalink
+   * documents or imported lists — machine-added targets that did not earn
+   * the row's credentials. Unless a mirror shares the row URL's registrable
+   * domain (the normal same-CDN-family case), it is fetched WITHOUT the
+   * row's Cookie/Authorization; the primary URL is always fully credited.
+   */
+  headersForTarget(targetUrl) {
+    const hasCreds = this.baseHeaders && (this.baseHeaders.Cookie || this.baseHeaders.Authorization);
+    if (!hasCreds) return this.baseHeaders;
+    try {
+      const rowHost = new URL(this.config.url).hostname;
+      const tHost = new URL(String(targetUrl)).hostname;
+      if (isSameRegistrableDomain(rowHost, tHost)) return this.baseHeaders;
+    } catch (_) {
+      return this.baseHeaders;
+    }
+    const h = { ...this.baseHeaders };
+    delete h.Cookie;
+    delete h.Authorization;
+    return h;
   }
 
   elapsedMs() {

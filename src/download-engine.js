@@ -1226,6 +1226,25 @@ class DownloadEngine extends EventEmitter {
       return null;
     };
 
+    // A cross-domain redirect hop must not receive the row's credentials —
+    // the same RFC 6265 stripping _probePlainGet and the fetch paths apply.
+    // This was the last probe transport still forwarding Cookie/
+    // Authorization to whatever host the 302 pointed at.
+    const nextHeadersFor = (curUrl, loc) => {
+      try {
+        const curHost = new URL(curUrl).hostname;
+        const nextHost = new URL(loc).hostname;
+        if (!isSameRegistrableDomain(curHost, nextHost)) {
+          const stripped = { ...extraHeaders };
+          for (const k of Object.keys(stripped)) {
+            if (/^(cookie|authorization)$/i.test(k)) delete stripped[k];
+          }
+          return { headers: stripped, jar: { cookies: '' } };
+        }
+      } catch (e) { /* malformed URL — keep the caller's headers */ }
+      return { headers: extraHeaders, jar };
+    };
+
     let head = null;
     try {
       head = await this._openRequestAuto(url, { method: 'HEAD', headers });
@@ -1235,14 +1254,22 @@ class DownloadEngine extends EventEmitter {
     }
     if (head) {
       const loc = redirectTo(head);
-      if (loc) { await head.destroy(); return this._probeFileOnce(loc, extraHeaders, redirectCount + 1, jar); }
+      if (loc) {
+        await head.destroy();
+        const nx = nextHeadersFor(url, loc);
+        return this._probeFileOnce(loc, nx.headers, redirectCount + 1, nx.jar);
+      }
     }
     if (!head || head.status === 405 || head.status === 403 || head.status === 501 || head.status === 401 || head.status === 400) {
       if (head) await head.destroy();
       head = await this._openRequestAuto(url, { method: 'GET', headers: { ...headers, Range: 'bytes=0-0' } });
       jarNote(jar, head.headers);
       const loc = redirectTo(head);
-      if (loc) { await head.destroy(); return this._probeFileOnce(loc, extraHeaders, redirectCount + 1, jar); }
+      if (loc) {
+        await head.destroy();
+        const nx = nextHeadersFor(url, loc);
+        return this._probeFileOnce(loc, nx.headers, redirectCount + 1, nx.jar);
+      }
     }
 
     const contentType = head.headers['content-type'] || '';
@@ -1258,7 +1285,8 @@ class DownloadEngine extends EventEmitter {
       if (loc) {
         await rangeProbe.destroy();
         await head.destroy();
-        return this._probeFileOnce(loc, extraHeaders, redirectCount + 1, jar);
+        const nx = nextHeadersFor(url, loc);
+        return this._probeFileOnce(loc, nx.headers, redirectCount + 1, nx.jar);
       }
       if (rangeProbe.status === 206) {
         supportsRange = true;

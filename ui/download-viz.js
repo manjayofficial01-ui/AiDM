@@ -179,9 +179,17 @@
   function blockGridHtml(segs, esc) {
     const blocks = blocksFromSegments(segs, null);
     if (!blocks.length) return '';
-    const e = typeof esc === 'function' ? esc : function (s) { return String(s); };
+    const e = typeof esc === 'function' ? esc : function (s) {
+      // Fallback escape: never interpolate raw strings into an attribute.
+      return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    };
     const cells = blocks.map(function (b) {
-      const cls = ['block', b.state, b.tail ? 'tail' : ''].filter(Boolean).join(' ');
+      // Block states derive from segment states, which imported JSON rows
+      // can carry — validated before they join an HTML attribute.
+      const rawState = String(b.state || '');
+      const state = /^[a-z0-9_-]{1,24}$/i.test(rawState) ? rawState : '';
+      const cls = ['block', state, b.tail ? 'tail' : ''].filter(Boolean).join(' ');
       return '<div class="' + cls + '" style="flex:0 0 ' + b.width.toFixed(2) +
         '%" title="' + e(b.title) + '"><div class="block-fill" style="width:' + b.pct +
         '%"></div></div>';

@@ -2257,7 +2257,10 @@ function normalizeStreamUrl(u) {
     } catch (e) { /* background unreachable — interception falls back safely */ }
   }
   function trackKey(e, down) {
-    const k = e && e.key;
+    // Synthetic key events are page-controlled — they must never drive the
+    // takeover state machine (Alt to dodge takeover, Shift to force it).
+    if (!e || !e.isTrusted) return;
+    const k = e.key;
     if (!k) return;
     if (k === 'Alt' || k === 'AltGraph' || (!!forceTakeoverKey && k === forceTakeoverKey)) {
       if (down) keysDown.add(k); else keysDown.delete(k);
@@ -2703,7 +2706,10 @@ function normalizeStreamUrl(u) {
       capsuleHost = document.createElement('div');
       capsuleHost.id = 'aidm-capsule-root';
       capsuleHost.style.cssText = 'all: initial !important; display: block !important; position: absolute !important; top: 0 !important; left: 0 !important; width: 0 !important; height: 0 !important; margin: 0 !important; padding: 0 !important; border: 0 !important; overflow: visible !important; z-index: 2147483647 !important; pointer-events: none !important;';
-      capsuleShadow = capsuleHost.attachShadow({ mode: 'open' });
+      // mode:'closed' — the page must not be able to reach into the capsule
+      // (read row titles/URLs as a size oracle, or dispatch clicks on the
+      // download buttons). The content script keeps its own reference.
+      capsuleShadow = capsuleHost.attachShadow({ mode: 'closed' });
       const style = document.createElement('style');
       style.textContent = CAPSULE_CSS;
       capsuleShadow.appendChild(style);
@@ -4354,6 +4360,10 @@ function normalizeStreamUrl(u) {
   // ── Intercept Click-to-Download ──────────────────────────────────────────────
 
   document.addEventListener('click', (e) => {
+    // Synthetic clicks are the page talking, not the user — a hostile page
+    // can dispatch MouseEvents in a loop to queue downloads (and trigger
+    // cookie collection) with no gesture at all. Real clicks only.
+    if (!e.isTrusted) return;
     // Also catch members-area file links whose URL carries no extension
     // (KVS /get_file/<hash>, /dwnl/) — the native download is grabbed by
     // background.js anyway; this makes the grab instant and lets the capsule

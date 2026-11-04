@@ -41,7 +41,7 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const { spawn } = require('child_process');
-const { killTree } = require('./yt-dlp.js');
+const { killTree, redact } = require('./yt-dlp.js');
 
 const IS_WIN = process.platform === 'win32';
 const CODEBERG_API = 'https://codeberg.org/api/v1/repos/mikf/gallery-dl/releases?limit=1';
@@ -368,7 +368,10 @@ const EXIT = { GENERIC: 1, EXTRACTION: 4, CHALLENGE: 8, AUTH: 16, INPUT: 32, NO_
  */
 function mapExitCode(code, filesDone, stderrTail) {
   const c = Number(code) || 0;
-  const tail = String(stderrTail || '').trim().split('\n').filter(Boolean).pop() || '';
+  // gallery-dl stderr carries full page/CDN URLs with signed query params;
+  // the tail lands on the row, the UI and the persisted state file — redact
+  // it exactly like the yt-dlp path does.
+  const tail = redact(String(stderrTail || '').trim().split('\n').filter(Boolean).pop() || '');
   if (c === 0) return null;
   if (c & EXIT.AUTH) {
     return { fatal: filesDone <= 0, code: 'auth', message: 'This gallery needs a login. Set cookies for the site (Settings › gallery-dl, or let the browser extension capture them) and retry.' };
