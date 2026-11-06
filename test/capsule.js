@@ -122,5 +122,43 @@ check('dragging feedback style present',
 check('touch dragging not hijacked by scroll',
   /touch-action: none/.test(ctSrc));
 
+// ── 4. open-panel rebuild gating (Twitter download-button vanish) ─────────
+// The panel used to rebuild (innerHTML wipe + multi-second re-probe) on EVERY
+// refreshOpenPanel() trigger — and the playing-event handler fires it
+// unconditionally, so on looping players (Twitter/X fires `playing` every few
+// seconds) the Download button vanished between hover and click. The rebuild
+// must be gated on real detection-data changes and deferred while the pointer
+// is over the open panel.
+check('refreshOpenPanel gated on data version, not unconditional',
+  /st\.builtPanelDataVersion !== panelDataVersion\) buildCapsulePanel/.test(ctSrc));
+check('closed panel never rebuilds',
+  /st\.panel\.style\.display === 'none'\) return;/.test(ctSrc));
+check('pointer-over-panel defers the rebuild (pendingRefresh)',
+  /st\.pointerInside\) \{ st\.pendingRefresh = true; return; \}/.test(ctSrc));
+check('deferred rebuild flushes on pointerleave',
+  /st\.pendingRefresh = false;\s*\n\s*try \{ refreshOpenPanel\(\); \} catch/.test(ctSrc));
+check('build stamps the content version it rendered from',
+  /st\.builtPanelDataVersion = panelDataVersion;/.test(ctSrc));
+check('direct build supersedes any deferred refresh',
+  /st\.pendingRefresh = false; \/\/ a direct \(re\)build supersedes/.test(ctSrc));
+check('new detection data bumps the version',
+  /detectedVideos\.set\(url, info\);\s*\n\s*if \(n\) detectedNormKeys\.add\(n\);\s*\n\s*panelDataVersion\+\+/.test(ctSrc));
+check('twitter variant bucket growth bumps the version',
+  /const added = noteTwitterVariants[\s\S]*?if \(added\) \{\s*\n\s*panelDataVersion\+\+/.test(ctSrc));
+
+// ── 5. outside-click close must survive the CLOSED shadow root ────────────
+// v5.9.2 switched the capsule shadow root to mode:'closed'. From the document,
+// composedPath() of a press INSIDE our shadow tree is retargeted to the host —
+// st.wrap/st.panel/st.btn never appear in it. The old "outside" test matched
+// every press on the panel, closing it on pointerdown before the Download
+// button's click could fire ("can't click Download / panel wraps up on press").
+// The host IS in the retargeted path, so it is the inside test now.
+check('outside-close handler tests the shadow host (closed-root aware)',
+  /!path\.includes\(capsuleHost\) && !path\.includes\(st\.wrap\)/.test(ctSrc));
+check('genuine outside pointerdown still closes the open panel',
+  /path\.includes\(capsuleHost\)[\s\S]{0,200}st\.panel\.style\.display = 'none';\s*\n\s*openCapsuleVideo = null;/.test(ctSrc));
+check('the shadow root that forces this is closed (keep the two in sync)',
+  /attachShadow\(\{ mode: 'closed' \}\)/.test(ctSrc));
+
 console.log(`\ncapsule: ${pass} passed, ${fail} failed`);
 process.exitCode = fail ? 1 : 0;

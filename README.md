@@ -1,4 +1,4 @@
-# ⚡ AiDM — AI-Powered Download Manager v5.9.2
+# ⚡ AiDM — AI-Powered Download Manager v5.9.3
 
 > Classic IDM-style download manager with a next-generation modular download engine, dynamic in-flight segment splitting, positional random-access disk I/O, multi-mirror failover, atomic `.part.meta` crash recovery, Chrome browser integration, video quality detection, a yt-dlp + FFmpeg extraction engine for YouTube, a gallery-dl engine for 250+ gallery sites, Udemy course downloads, smart per-category file organization, ETA, dual-layer speed limiting, and streaming multi-algorithm checksum verification.
 
@@ -16,6 +16,31 @@
 | *Download Scheduler — one-time / daily / weekly queue runs* | *The same UI in the light theme (one click in the titlebar)* |
 
 ---
+
+## What's New in v5.9.3 — capsule Download button fix
+
+v5.9.2's closed shadow root (so the page can no longer reach the download
+buttons) had a side effect: the capsule panel's own "close on outside click"
+guard could no longer see the panel's internals in `composedPath()` either —
+every press inside the panel was classified as *outside*, the panel closed on
+pointerdown, and the Download button could never be clicked (reported on
+Twitter/X video pages; it affected the capsule on every site).
+
+**Fixed — extension capsule:**
+- The outside-click close guard now recognizes the panel by its shadow HOST
+  (the one node a closed shadow tree still exposes to document listeners);
+  genuine outside presses still close the panel. Verified with trusted clicks
+  in a live Chromium: a press inside yields a path containing the host and no
+  internals, a press outside contains neither.
+- The open panel no longer rebuilds on every `playing` media event. It
+  rebuilds only when detection data actually changed (a new media URL, a
+  grown Twitter variant bucket, a size probe resolving) and defers even that
+  while the cursor is over the panel — looping players (Twitter/X fires
+  `playing` every few seconds) previously wiped the Download button out from
+  under the cursor mid-click.
+- 11 new regression checks in `test/capsule.js`; the `youtube-extension`
+  suite's multi-line source anchors are now CRLF-tolerant (they false-failed
+  7 checks on Windows `core.autocrlf=true` checkouts).
 
 ## What's New in v5.9.2 — security audit release
 

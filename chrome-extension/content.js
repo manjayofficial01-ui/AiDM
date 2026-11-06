@@ -108,6 +108,7 @@
     }
     detectedVideos.set(url, info);
     if (n) detectedNormKeys.add(n);
+    panelDataVersion++; // real new data — an open panel may rebuild now
     // Bounded: a page that mints endless unique media URLs (one ad-rotation
     // or per-request nonce per poll) must not grow this registry forever —
     // the oldest entries are least likely to be the video the user wants.
@@ -1431,6 +1432,13 @@ function normalizeStreamUrl(u) {
   };
 
   let detectedVideos = new Map(); // url -> { url, quality, resolution, size, format }
+  // Bumped whenever panel-relevant detection data actually changes (a new
+  // media URL registered, a size probe resolved, a Twitter variant bucket
+  // grew). The open capsule panel only rebuilds when this moved past what its
+  // rows were built from — callers fire on EVERY media event, and rebuilding
+  // unconditionally wiped the Download button out from under the cursor
+  // (Twitter/X loops fire `playing` every few seconds while it plays).
+  let panelDataVersion = 0;
   // Mirror of normalizeStreamUrl(key) for every detectedVideos entry (see
   // addDetectedVideo) — kept in sync at every direct mutation site.
   const detectedNormKeys = new Set();
@@ -1543,6 +1551,7 @@ function normalizeStreamUrl(u) {
       try {
         const added = noteTwitterVariants(event.data.tweetId, event.data.urls);
         if (added) {
+          panelDataVersion++; // the per-tweet bucket feeds scopedTwitterUrls()
           (event.data.urls || []).forEach(u => {
             if (u && /^https?:/i.test(u) && !isSegmentUrl(u) && isTwitterMp4Url(u)) {
               addDetectedVideo(u, detectQuality(u, null));
@@ -1700,6 +1709,7 @@ function normalizeStreamUrl(u) {
         sizeProbeCache.set(url, size);
         if (size && !info.size) {
           info.size = size;
+          panelDataVersion++; // the size badge on a rendered row would change
           scheduleSyncCapsules();
           refreshOpenPanel();
         }
@@ -1713,12 +1723,23 @@ function normalizeStreamUrl(u) {
     if (sizeProbeCache.size > 200) sizeProbeCache.delete(sizeProbeCache.keys().next().value);
   }
 
-  // Rebuild the currently open capsule panel (e.g. a size probe just resolved)
+  // Rebuild the currently open capsule panel — ONLY when detection data has
+  // actually changed since its rows were built (panelDataVersion moved past
+  // the st.builtPanelDataVersion stamp). Callers fire on every media event,
+  // sniffed-message and probe tick; rebuilding unconditionally wiped the
+  // panel (innerHTML='') and re-probed for seconds, so on looping players
+  // (Twitter/X fires `playing` every few seconds) the Download button
+  // vanished under the cursor between hover and click.
+  // While the pointer is over the open panel even a REAL change is deferred
+  // (st.pendingRefresh) and flushed on pointerleave — a mid-click rebuild can
+  // never yank the button away.
   function refreshOpenPanel() {
     try {
       if (openCapsuleVideo && capsuleState.get(openCapsuleVideo)) {
         const st = capsuleState.get(openCapsuleVideo);
-        if (st.panel.style.display !== 'none') buildCapsulePanel(openCapsuleVideo);
+        if (st.panel.style.display === 'none') return;
+        if (st.pointerInside) { st.pendingRefresh = true; return; }
+        if (st.builtPanelDataVersion !== panelDataVersion) buildCapsulePanel(openCapsuleVideo);
       }
     } catch (e) {}
   }
@@ -3404,6 +3425,18 @@ function normalizeStreamUrl(u) {
 
     const st = { wrap, btn, count, panel };
 
+    // Hover tracking for the open panel: while the cursor is over it,
+    // data-refresh rebuilds are deferred (see refreshOpenPanel) so the
+    // Download button can never be replaced between hover and click.
+    panel.addEventListener('pointerenter', () => { st.pointerInside = true; });
+    panel.addEventListener('pointerleave', () => {
+      st.pointerInside = false;
+      if (st.pendingRefresh) {
+        st.pendingRefresh = false;
+        try { refreshOpenPanel(); } catch (e) {}
+      }
+    });
+
     // Never leave a previous (stale/disconnected) wrapper behind — that is how
     // duplicate pills used to pile up on SPA navigation.
     const prev = capsuleState.get(video);
@@ -3568,6 +3601,7 @@ function normalizeStreamUrl(u) {
   async function buildCapsulePanel(video) {
     const st = capsuleState.get(video);
     if (!st) return;
+    st.pendingRefresh = false; // a direct (re)build supersedes any deferred one
     const title = getVideoTitle(video);
 
     // Superseded-build guard. A build is ASYNC (panel data + the CDN
@@ -3724,6 +3758,12 @@ function normalizeStreamUrl(u) {
     let fbJsonVideos = [];
     try { fbJsonVideos = extractFacebookVideos() || []; } catch (e) {}
     fbJsonVideos.forEach(pushCand);
+
+    // Content stamp: every source the rows derive from (own sources,
+    // intercepted/sniffed URLs, Twitter variant buckets, page JSON) has been
+    // read by now. Only a bump AFTER this point means the rendered rows are
+    // stale — refreshOpenPanel() rebuilds on that, and on nothing else.
+    st.builtPanelDataVersion = panelDataVersion;
 
     // Facebook DASH split-AV: the video-only track and its audio-only
     // counterpart share an efg video_id. Attach the audio URL to its video
@@ -4275,12 +4315,23 @@ function normalizeStreamUrl(u) {
     });
   }
 
-  // Close open panel on outside click / Escape
+  // Close open panel on outside click / Escape.
+  // v5.9.2 made this shadow root CLOSED (the page must not reach the download
+  // buttons). A closed shadow tree is invisible from the document: for a
+  // pointerdown on our own pill/panel the composedPath is RETARGETED to the
+  // host, so st.wrap/st.panel/st.btn never appear in it. Testing only for
+  // them made every press INSIDE the panel count as "outside" — the panel
+  // closed on pointerdown, before `click` could ever reach the Download
+  // button (the "can't click Download / panel wraps up on press" regression,
+  // everywhere the capsule shows, Twitter included). The HOST is visible in
+  // the retargeted path, so "inside" now means the path contains capsuleHost;
+  // the internal-node checks stay as harmless fallbacks.
   document.addEventListener('pointerdown', (e) => {
     if (openCapsuleVideo && capsuleState.get(openCapsuleVideo)) {
       const st = capsuleState.get(openCapsuleVideo);
       const path = e.composedPath ? e.composedPath() : [];
-      if (!path.includes(st.wrap) && !path.includes(st.panel) && !path.includes(st.btn)) {
+      if (!path.includes(capsuleHost) && !path.includes(st.wrap) &&
+          !path.includes(st.panel) && !path.includes(st.btn)) {
         st.panel.style.display = 'none';
         openCapsuleVideo = null;
       }

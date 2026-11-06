@@ -107,7 +107,9 @@ if (!m) {
     !!onHistory && onHistory[1].includes('maybeResolveYouTube(details.url)'));
 
   // A failed resolve must not suppress the page for a full minute.
-  const fn = /function maybeResolveYouTube\(url\) \{([\s\S]*?)\n\}\n/.exec(bg);
+  // \r?\n anchors: core.autocrlf=true checks the sources out with CRLF on
+  // Windows, and a bare-\n anchor then never matches (7 false FAILs).
+  const fn = /function maybeResolveYouTube\(url\) \{([\s\S]*?)\r?\n\}\r?\n/.exec(bg);
   check('failed resolve allows a retry (key deleted)',
     !!fn && /resolvedYtPages\.delete\(key\)/.test(fn[1]));
   check('app not running allows a retry (catch deletes key)',
@@ -128,7 +130,7 @@ if (!m) {
   // ── 3. Desktop endpoint ───────────────────────────────────────────────────
 
   console.log('\nDesktop endpoint');
-  const ep = /req\.url === '\/api\/resolve-youtube'[\s\S]*?\n      \}\n/.exec(srv);
+  const ep = /req\.url === '\/api\/resolve-youtube'[\s\S]*?\r?\n      \}\r?\n/.exec(srv);
   check('/api/resolve-youtube exists', !!ep);
   if (ep) {
     check('rate limited like every resolve endpoint', /RESOLVE_LIMITERS\[req\.url\]\?\.allow\(\)/.test(ep[0]));
