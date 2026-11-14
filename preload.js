@@ -75,6 +75,8 @@ contextBridge.exposeInMainWorld('aidm', {
   quitApp: () => ipcRenderer.invoke('quit-app'),
   getAutostart: () => ipcRenderer.invoke('get-autostart'),
   getAppVersion: () => ipcRenderer.invoke('get-app-version'),
+  /** Open an About-panel link. Allowlisted in main — only the project's own pages. */
+  openExternal: (url) => ipcRenderer.invoke('open-external', String(url || '')),
   deleteFileFromDisk: (filepath) => ipcRenderer.invoke('delete-file-from-disk', { filepath }),
 
   // Approval-dialog helpers

@@ -1,6 +1,6 @@
 {
   "name": "aidm",
-  "version": "5.9.3",
+  "version": "5.9.4",
   "description": "AiDM - AI-powered download manager with a multi-connection engine, YouTube/DASH via yt-dlp, torrent/magnet, HTTP/2, and an IDM-style Chrome extension.",
   "main": "main.js",
   "scripts": {
@@ -13,6 +13,7 @@
     "test:integration": "node test/integration.js",
     "test:engine-v4": "node test/engine-v4.js",
     "test:fb-dedup": "node test/fb-dedup.js",
+    "test:re-download": "node test/re-download.js",
     "test:panel-freshness": "node test/panel-freshness.js",
     "test:dead-link-guard": "node test/dead-link-guard.js",
     "test:mydaddy-title": "node test/mydaddy-title.js",
@@ -81,7 +82,12 @@
     "multi-thread",
     "chrome-extension"
   ],
-  "author": "VibeCoder ManjayOfficial01",
+  "author": "Manjay Dongol",
+  "homepage": "https://github.com/manjayofficial01-ui/AiDM",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/manjayofficial01-ui/AiDM.git"
+  },
   "license": "MIT",
   "dependencies": {
     "ffmpeg-static": "^5.3.0",
@@ -100,7 +106,7 @@
   "build": {
     "appId": "com.aidm.app",
     "productName": "AiDM",
-    "copyright": "Copyright (c) 2026 VibeCoder ManjayOfficial01",
+    "copyright": "Copyright (c) 2026 Manjay Dongol",
     "files": [
       "main.js",
       "preload.js",
@@ -127,7 +133,8 @@
         "nsis"
       ],
       "icon": "build/icon.ico",
-      "artifactName": "AiDM-Setup-${version}.${ext}"
+      "artifactName": "AiDM-Setup-${version}.${ext}",
+      "legalTrademarks": "Distributed under the MIT License. Full license text is shown during installation and ships with this application — https://github.com/manjayofficial01-ui/AiDM"
     },
     "nsis": {
       "oneClick": false,
@@ -137,7 +144,8 @@
       "createStartMenuShortcut": true,
       "shortcutName": "AiDM",
       "uninstallDisplayName": "AiDM Download Manager",
-      "deleteAppDataOnUninstall": false
+      "deleteAppDataOnUninstall": false,
+      "license": "build/license.txt"
     }
   },
   "allowScripts": {

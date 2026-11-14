@@ -1,4 +1,4 @@
-# ⚡ AiDM — AI-Powered Download Manager v5.9.3
+# ⚡ AiDM — AI-Powered Download Manager v5.9.4
 
 > Classic IDM-style download manager with a next-generation modular download engine, dynamic in-flight segment splitting, positional random-access disk I/O, multi-mirror failover, atomic `.part.meta` crash recovery, Chrome browser integration, video quality detection, a yt-dlp + FFmpeg extraction engine for YouTube, a gallery-dl engine for 250+ gallery sites, Udemy course downloads, smart per-category file organization, ETA, dual-layer speed limiting, and streaming multi-algorithm checksum verification.
 
@@ -16,6 +16,33 @@
 | *Download Scheduler — one-time / daily / weekly queue runs* | *The same UI in the light theme (one click in the titlebar)* |
 
 ---
+
+## What's New in v5.9.4 — re-download fix + application identity
+
+**Fixed — second download of the same file never started.**
+`findDuplicate()` matched ANY row sharing the URL — including rows already
+completed, errored or cancelled — so re-adding a finished link was bounced off
+the dead row with "Already in the download list" and nothing downloaded. Now
+only LIVE rows (queued / pending approval / connecting / downloading / paused /
+muxing) dedupe, which keeps the site-button + extension-capsule double-fire
+protection. A finished download's URL is a fresh request: the new copy lands
+alongside the first as `name (1).ext` (the engine's onConflict:'rename' —
+nothing is ever overwritten). HLS re-downloads previously truncated the old
+recording (they open the output with `'w'` and have no `.part` staging); fresh
+HLS starts onto an existing file now retarget the same way. Locked by 18
+checks in `test/re-download.js`.
+
+**Added — application identity (author / publisher / website / license).**
+- Author, Publisher: **Manjay Dongol** — package metadata, the Windows binary
+  version resource (CompanyName/LegalCopyright), the NSIS installer and the
+  Add/Remove Programs entry now all carry it.
+- Publisher website: <https://github.com/manjayofficial01-ui/AiDM> — wired as
+  the app homepage (uninstaller support/about links) and shown clickable in a
+  new Settings › General › About panel (links open in the user's browser via
+  an allowlisted `open-external` IPC — only the project's own GitHub pages).
+- MIT license: full license text shown on its own installer page
+  (`build/license.txt`), stated in the binary's LegalTrademarks, and visible
+  in the About panel.
 
 ## What's New in v5.9.3 — capsule Download button fix
 
@@ -964,4 +991,4 @@ npm run test:youtube
 
 MIT — Free and open source. Inspired by the best, built for the future.
 
-Copyright (c) 2026 VibeCoder ManjayOfficial01. See [LICENSE](LICENSE) for details.
+Copyright (c) 2026 Manjay Dongol. See [LICENSE](LICENSE) for details.

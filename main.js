@@ -1053,6 +1053,24 @@ ipcMain.handle('get-app-version', () => {
 });
 
 /**
+ * Open an external link from the renderer. Allowlist-only: the About panel
+ * links to the project's own GitHub pages, and a compromised renderer must
+ * never be able to make the shell open an arbitrary URL (v5.9.2 posture).
+ */
+const ALLOWED_EXTERNAL_PREFIX = 'https://github.com/manjayofficial01-ui/AiDM';
+ipcMain.handle('open-external', async (event, raw) => {
+  const url = String(raw || '');
+  if (!url.startsWith(ALLOWED_EXTERNAL_PREFIX)) return false;
+  try {
+    await shell.openExternal(url);
+    return true;
+  } catch (e) {
+    console.warn('[AiDM] open-external refused:', e.message);
+    return false;
+  }
+});
+
+/**
  * Delete a downloaded file from disk. Only files inside the configured save
  * paths are allowed — this prevents a compromised renderer from deleting
  * arbitrary system files via a crafted filepath.

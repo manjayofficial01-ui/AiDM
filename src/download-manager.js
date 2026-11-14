@@ -406,6 +406,15 @@ function badRequestMessage() {
     'The link may be malformed or expired, or the page requires a login \u2014 re-copy the link from the source page and try again, or download it from your browser.';
 }
 
+// Row states a re-sent link can still refer to. Terminal states
+// (completed / error / cancelled) are deliberately excluded — a second
+// request for a finished download must start a NEW download, not bounce
+// off the dead row with "Already in the download list".
+const LIVE_STATUSES = new Set([
+  'queued', 'queued-paused', 'pending-approval', 'connecting',
+  'downloading', 'paused', 'muxing',
+]);
+
 // Query params that are per-request signatures/tokens (expiring CDN auth).
 // Stripped for duplicate comparison so the same stream requested twice
 // (e.g. site download button + extension capsule) matches as one download.
@@ -764,7 +773,7 @@ class DownloadManager extends EventEmitter {
         // A progress tick from the old run can fire right after pause() is
         // called (the 500ms ticker doesn't stop instantly), which would
         // overwrite 'paused' back to 'downloading' and confuse resumeDownload.
-        const ACTIVE_OVERRIDABLE = new Set(['connecting', 'downloading', 'queued']);
+        const ACTIVE_OVERRIDABLE = new Set(['connecting', 'downloading', 'queued', 'pending-approval']);
         if (ACTIVE_OVERRIDABLE.has(dl.status)) {
           dl.status = 'downloading';
         }
@@ -918,7 +927,7 @@ class DownloadManager extends EventEmitter {
         dl.uploadSpeed = data.uploadSpeed;
         dl.uploaded = data.uploaded || 0;
         dl.ratio = data.ratio || 0;
-        const ACTIVE_OVERRIDABLE = new Set(['connecting', 'downloading', 'queued']);
+        const ACTIVE_OVERRIDABLE = new Set(['connecting', 'downloading', 'queued', 'pending-approval']);
         if (ACTIVE_OVERRIDABLE.has(dl.status)) dl.status = 'downloading';
         dl.eta = data.eta != null ? data.eta : dl.eta;
       }
@@ -981,7 +990,13 @@ class DownloadManager extends EventEmitter {
   /**
    * Find an existing download for the same media (exact or normalized URL).
    * Used to avoid stacking a duplicate row when the same link is sent twice
-   * (e.g. site download button + extension capsule/popup).
+   * (e.g. site download button + extension capsule/popup) — LIVE rows only.
+   *
+   * A finished row (completed / error / cancelled) never matches: asking for
+   * the same file again is a fresh request, and bouncing it off a dead row
+   * with "Already in the download list" made re-downloads impossible — the
+   * engine's onConflict:'rename' already guarantees the new copy lands as
+   * "clip (1).mp4" instead of overwriting.
    */
   findDuplicate(url, ytFormat) {
     if (!url) return null;
@@ -995,6 +1010,7 @@ class DownloadManager extends EventEmitter {
       !(dl && dl.ytFormat && dl.ytFormat.formatId) ||
       String(dl.ytFormat.formatId) === fmt;
     for (const dl of this.downloads.values()) {
+      if (!LIVE_STATUSES.has(dl.status)) continue;
       if (dl.url === url) {
         if (sameQuality(dl)) return dl;
         continue;
@@ -1050,8 +1066,10 @@ class DownloadManager extends EventEmitter {
    * The caller receives the download object immediately; the actual
    * network work starts only after approveDownload(id, chosenPath) is called.
    *
-   * If the same media is already listed, the existing entry is returned
-   * with `duplicate: true` and no new row/event is created.
+   * If the same media is already listed IN PROGRESS (queued / downloading /
+   * paused / muxing), the existing entry is returned with `duplicate: true`
+   * and no new row/event is created. A link whose earlier row already
+   * finished (or failed) is a fresh download — it lands as "name (1).ext".
    */
   addDownload({ url, filename, savePath, segments, quality, meta, headers, cookies, category, mirrors, checksum, audioUrl, priority, speedLimit, pieces, fileSelection, trackerUrls, webSeedUrls, seedPolicy }) {
     // Every entry point (HTTP API, IPC add-download, clipboard, NL command,
@@ -1333,6 +1351,12 @@ class DownloadManager extends EventEmitter {
     } else {
       this.queue.push(id);
     }
+    // Tell the renderer the row left pending-approval. Without this the row
+    // stayed "Pending" in the UI for the WHOLE transfer (progress ticks could
+    // not fix it — 'pending-approval' was not in the overridable set), so the
+    // toolbar speed summed to 0 B/s while bytes were actually flowing, and
+    // the row's Pause button never appeared.
+    this.emit('download-updated', { ...dl });
     this._persistDownloads(true);
     return dl;
   }
@@ -2656,6 +2680,16 @@ class DownloadManager extends EventEmitter {
         }
       }
       if (download.isHls) {
+        // HLS opens its output with 'w' (no .part staging), so a re-download of
+        // a finished recording would silently truncate the old file. A FRESH
+        // start onto an existing final file retargets to "stream (1).ts" —
+        // resumes keep their path (they own that file already).
+        if (!(download._hlsResumeIndex > 0) && !(download.downloaded > 0) &&
+            fs.existsSync(download.filepath)) {
+          const renamed = uniqueFilePath(download.filepath);
+          download.filename = path.basename(renamed);
+          download.filepath = renamed;
+        }
         // Live (no ENDLIST, e.g. Xtream/IPTV channels) records until stopped
         // or the user's cap elapses. VOD has no cap (0).
         download.maxSeconds = download.isLive ? ((this.settings.maxLiveMinutes || 180) * 60) : 0;

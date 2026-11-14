@@ -98,9 +98,21 @@ async function loadAppVersion() {
     const ver = (v && typeof v === 'object') ? v.version : v;
     const el = document.getElementById('app-version');
     if (el && ver) el.textContent = 'v' + ver;
+    const aboutEl = document.getElementById('about-version');
+    if (aboutEl && ver) aboutEl.textContent = 'v' + ver;
     if (v && typeof v === 'object' && v.apiPort) aidmApiPort = v.apiPort;
   } catch (e) { /* older preload — hide the badge */ }
 }
+
+// About-panel links open in the user's browser, never navigate the app window.
+// The main process allowlists only the project's own GitHub pages.
+document.addEventListener('click', (e) => {
+  const link = e.target && e.target.closest && e.target.closest('a[data-external]');
+  if (!link) return;
+  e.preventDefault();
+  const url = link.getAttribute('data-external');
+  if (url && window.aidm && window.aidm.openExternal) window.aidm.openExternal(url);
+});
 
 let aidmApiPort = 18765;
 
@@ -1540,7 +1552,7 @@ function setupIPCListeners() {
       // Same overridable-status guard as the manager: a stale 500ms tick from
       // the old run must not flip a row the user just paused back to
       // "Downloading".
-      const ACTIVE_OVERRIDABLE = new Set(['connecting', 'downloading', 'queued']);
+      const ACTIVE_OVERRIDABLE = new Set(['connecting', 'downloading', 'queued', 'pending-approval']);
       if (ACTIVE_OVERRIDABLE.has(dl.status)) dl.status = 'downloading';
       if (typeof data.eta === 'number' || data.eta === null) dl.eta = data.eta;
     }
@@ -1625,6 +1637,10 @@ function setupIPCListeners() {
     downloadsGeneration++;
     const dl = downloads.find(d => d.id === data.id);
     if (dl) {
+      // Status first: the approval flow flips Pending -> Queued/Downloading
+      // and the row must leave the Pending category the moment it starts
+      // (otherwise the toolbar speed sums to 0 for the whole transfer).
+      if (typeof data.status === 'string' && data.status) dl.status = data.status;
       dl.filename = data.filename || dl.filename;
       dl.category = data.category || dl.category;
       dl.savePath = data.savePath || dl.savePath;
@@ -3454,18 +3470,22 @@ function updateStats() {
 // ── Live speed sparkline (Plexo ThroughputChart, miniaturised) ───────────────
 
 let speedHistory = [];
-const SPARK_W = 72, SPARK_H = 22, SPARK_PAD = 1.5;
+const SPARK_W = 120, SPARK_H = 28, SPARK_PAD = 2;
 
 function drawSparkline() {
   const svg = document.getElementById('speed-sparkline');
   const line = document.getElementById('spark-line');
   const area = document.getElementById('spark-area');
   const head = document.getElementById('spark-head');
+  const shimmer = document.getElementById('spark-shimmer');
+  const halo = document.getElementById('spark-halo');
   if (!svg || !line || !area) return;
   if (speedHistory.length < 2 || !window.DownloadViz ||
       typeof window.DownloadViz.areaPath !== 'function') {
     line.setAttribute('d', '');
     area.setAttribute('d', '');
+    if (shimmer) shimmer.setAttribute('d', '');
+    if (halo) halo.setAttribute('cx', -10); // park off-canvas
     if (head) head.setAttribute('cx', -10); // park off-canvas
     return;
   }
@@ -3473,22 +3493,53 @@ function drawSparkline() {
   const p = window.DownloadViz.areaPath(speedHistory, SPARK_W, SPARK_H, SPARK_PAD);
   line.setAttribute('d', p.line);
   area.setAttribute('d', p.area);
+  // The shimmer rides the same silhouette as the area fill.
+  if (shimmer) shimmer.setAttribute('d', p.area);
   // Live head dot at the newest sample (mirrors areaPath's point math).
   const max = Math.max(...speedHistory, 1);
   const v = speedHistory[speedHistory.length - 1];
   const y = SPARK_H - SPARK_PAD - (v / max) * (SPARK_H - SPARK_PAD * 2);
+  const live = v > 0;
   if (head) {
     head.setAttribute('cx', SPARK_W);
     head.setAttribute('cy', y.toFixed(1));
-    head.style.display = v > 0 ? '' : 'none';
+    head.style.display = live ? '' : 'none';
   }
-  svg.classList.toggle('idle', !(v > 0));
+  if (halo) {
+    halo.setAttribute('cx', SPARK_W);
+    halo.setAttribute('cy', y.toFixed(1));
+    halo.style.display = live ? '' : 'none';
+  }
+  svg.classList.toggle('idle', !live);
 }
 
 function updateSpeedDisplay() {
   let total = 0;
-  downloads.forEach(d => { if (d.status === 'downloading') total += d.speed || 0; });
+  let pending = 0;
+  downloads.forEach(d => {
+    if (d.status === 'downloading') total += d.speed || 0;
+    else if (d.status === 'pending-approval') pending++;
+  });
   totalSpeed.textContent = formatSpeed(total);
+  // The meter is "live" whenever bytes move; the pending chip covers the
+  // honest zero case (rows awaiting a folder choice are not downloading).
+  const meter = document.getElementById('speed-meter');
+  if (meter) {
+    meter.classList.toggle('meter-live', total > 0);
+    // Speed tier drives the colors; the pulse rate scales with throughput
+    // (a crawl breathes, a blast strobes) via one CSS custom property.
+    const tier = total > 0 ? (total >= 1024 * 1024 ? 'fast' : 'low') : 'idle';
+    meter.dataset.tier = tier;
+    const rate = total > 0
+      ? Math.max(0.5, Math.min(1.8, 1.8 - Math.log10(total + 1) * 0.22))
+      : 1.6;
+    meter.style.setProperty('--meter-rate', rate.toFixed(2) + 's');
+  }
+  const chip = document.getElementById('pending-chip');
+  if (chip) {
+    chip.style.display = pending > 0 ? '' : 'none';
+    chip.textContent = `${pending} awaiting folder`;
+  }
   speedHistory.push(total);
   if (speedHistory.length > 48) speedHistory.shift();
   drawSparkline();

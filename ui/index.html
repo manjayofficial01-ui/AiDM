@@ -76,18 +76,27 @@
       <button class="tool-btn" id="btn-clear-completed" title="Clear completed from list (files stay on disk)" aria-label="Clear completed from list"><span class="btn-icon"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-check"></use></svg></span></button>
     </div>
     <div class="toolbar-group">
-      <div class="speed-display">
-        <span class="speed-label">Speed:</span>
+      <div class="speed-display" id="speed-meter" data-tier="idle">
+        <span class="meter-core" aria-hidden="true"><i></i></span>
         <span class="speed-value" id="total-speed">0 B/s</span>
-        <svg id="speed-sparkline" class="speed-sparkline" width="72" height="22" viewBox="0 0 72 22" preserveAspectRatio="none" aria-hidden="true">
+        <span class="eq" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+        <svg id="speed-sparkline" class="speed-sparkline" width="120" height="28" viewBox="0 0 120 28" preserveAspectRatio="none" aria-hidden="true">
           <defs>
             <linearGradient id="spark-grad" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" class="spark-grad-top" />
               <stop offset="100%" class="spark-grad-bottom" />
             </linearGradient>
+            <linearGradient id="spark-shimmer-grad" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0%" stop-color="rgba(255,255,255,0)" />
+              <stop offset="50%" stop-color="rgba(255,255,255,.4)" />
+              <stop offset="100%" stop-color="rgba(255,255,255,0)" />
+              <animateTransform attributeName="gradientTransform" type="translate" values="-1 0; 1 0" dur="1.6s" repeatCount="indefinite" />
+            </linearGradient>
           </defs>
           <path id="spark-area" class="spark-area" d="" fill="url(#spark-grad)" />
+          <path id="spark-shimmer" class="spark-shimmer" d="" fill="url(#spark-shimmer-grad)" />
           <path id="spark-line" class="spark-line" d="" fill="none" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" />
+          <circle id="spark-halo" class="spark-halo" r="5" cx="-10" cy="0" />
           <circle id="spark-head" class="spark-head" r="1.8" cx="-10" cy="0" />
         </svg>
       </div>
@@ -95,6 +104,9 @@
         <span class="status-label">Active:</span>
         <span class="status-value" id="active-count">0</span>
       </div>
+      <button type="button" id="pending-chip" class="pending-chip" style="display:none"
+              title="These downloads are waiting for a folder choice - click to review them"
+              onclick="document.querySelector('.sidebar-item[data-category=pending]').click()"></button>
     </div>
     <div class="toolbar-group">
       <button class="tool-btn" id="btn-ai-assistant" title="AI Assistant (TokenHarbor)" aria-label="AI Assistant (TokenHarbor)"><span class="btn-icon"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><use href="#i-sparkles"></use></svg></span></button>
@@ -384,6 +396,23 @@
                 <button type="button" class="tool-btn" id="btn-export-downloads">Export list</button>
                 <button type="button" class="tool-btn" id="btn-import-downloads">Import list</button>
               </div>
+            </div>
+
+            <div class="settings-section" id="about-section">
+              <h4>About</h4>
+              <div class="about-grid">
+                <span class="about-label">Application</span>
+                <span>AiDM — AI-Powered Download Manager <span id="about-version"></span></span>
+                <span class="about-label">Author</span>
+                <span>Manjay Dongol</span>
+                <span class="about-label">Publisher</span>
+                <span>Manjay Dongol</span>
+                <span class="about-label">Website</span>
+                <span><a href="https://github.com/manjayofficial01-ui/AiDM" data-external="https://github.com/manjayofficial01-ui/AiDM">https://github.com/manjayofficial01-ui/AiDM</a></span>
+                <span class="about-label">License</span>
+                <span>MIT License — free, open-source software. The full license text ships with this application (shown during installation and in the bundled LICENSE file). <a href="https://github.com/manjayofficial01-ui/AiDM/blob/main/LICENSE" data-external="https://github.com/manjayofficial01-ui/AiDM/blob/main/LICENSE">View license</a></span>
+              </div>
+              <p class="settings-hint">AiDM is distributed under the MIT License. This build is signed metadata-wise as: AiDM · Author/Publisher Manjay Dongol · MIT · <span style="user-select:all;">https://github.com/manjayofficial01-ui/AiDM</span></p>
             </div>
           </section>
 

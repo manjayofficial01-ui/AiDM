@@ -1005,6 +1005,16 @@ textarea:focus-visible {
 .form-group.toggle input[type="checkbox"]:checked::before { left: 18px; background: white; }
 
 .settings-section { margin-bottom: 20px; }
+
+/* About panel (Settings › General) — author / publisher / website / license */
+.about-grid {
+  display: grid; grid-template-columns: 92px 1fr; gap: 7px 14px;
+  font-size: 12px; color: var(--text-primary); margin-bottom: 10px;
+  align-items: baseline;
+}
+.about-label { color: var(--text-muted); font-size: 11px; }
+.about-grid a { color: var(--accent); text-decoration: none; word-break: break-all; }
+.about-grid a:hover { text-decoration: underline; }
 .settings-section h4,
 .settings-pane h4 {
   font-size: 11px; color: var(--accent-soft); margin: 16px 0 12px;
@@ -1313,3 +1323,126 @@ input[type="checkbox"] { accent-color: var(--accent); width: 16px; height: 16px;
   color: var(--text-muted);
 }
 .grab-row .grab-tag.offsite { color: var(--warning); border-color: var(--warning); }
+
+/* ── Throughput Pulse meter (speed display) ────────────────────────────────
+   One animated instrument: a pulse core whose ring rate scales with
+   throughput, a live equalizer, a glowing sparkline with a shimmer sweep and
+   an expanding head halo, tier-colored by throughput. All declarative
+   CSS/SVG — no per-frame JS. Respects prefers-reduced-motion. */
+.speed-display {
+  gap: 10px;
+  padding: 7px 16px 7px 12px;
+  transition: border-color .3s ease, box-shadow .3s ease, background .3s ease;
+}
+.meter-core {
+  width: 14px; height: 14px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  flex-shrink: 0; position: relative;
+  background: radial-gradient(circle, rgba(var(--accent-rgb), .25), transparent 70%);
+}
+.meter-core i {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--text-muted);
+  transition: background .3s ease, box-shadow .3s ease;
+}
+#speed-meter.meter-live .meter-core i {
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent);
+}
+#speed-meter.meter-live .meter-core::before,
+#speed-meter.meter-live .meter-core::after {
+  content: '';
+  position: absolute; inset: 0;
+  border-radius: 50%;
+  border: 1.5px solid var(--accent);
+  animation: core-ring var(--meter-rate, 1.4s) ease-out infinite;
+}
+#speed-meter.meter-live .meter-core::after {
+  animation-delay: calc(var(--meter-rate, 1.4s) / 2);
+}
+@keyframes core-ring {
+  0% { transform: scale(.5); opacity: .9; }
+  100% { transform: scale(1.9); opacity: 0; }
+}
+.speed-value {
+  font-size: 13px; font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .2px;
+  color: var(--text-secondary);
+  transition: color .3s ease, text-shadow .3s ease;
+}
+/* tier colors: idle muted, low accent, fast bright success + glow */
+#speed-meter[data-tier="low"] .speed-value { color: var(--accent-soft); }
+#speed-meter[data-tier="fast"] .speed-value {
+  color: var(--success);
+  text-shadow: 0 0 8px rgba(var(--success-rgb), .55);
+}
+#speed-meter[data-tier="fast"] {
+  border-color: rgba(var(--success-rgb), .4);
+  box-shadow: 0 0 16px rgba(var(--success-rgb), .3);
+}
+/* equalizer: 5 bars dancing only while live */
+.eq {
+  display: inline-flex; align-items: flex-end; gap: 2px;
+  height: 16px; flex-shrink: 0;
+}
+.eq i {
+  width: 3px; border-radius: 1px;
+  background: var(--text-muted);
+  height: 30%;
+  transform-origin: bottom;
+  transition: background .3s ease;
+}
+#speed-meter.meter-live .eq i {
+  background: var(--success);
+  animation: eq-dance var(--meter-rate, 1.4s) ease-in-out infinite alternate;
+}
+#speed-meter.meter-live .eq i:nth-child(1) { animation-duration: calc(var(--meter-rate, 1.4s) * 0.7); }
+#speed-meter.meter-live .eq i:nth-child(2) { animation-duration: calc(var(--meter-rate, 1.4s) * 1.1); }
+#speed-meter.meter-live .eq i:nth-child(3) { animation-duration: calc(var(--meter-rate, 1.4s) * 0.9); }
+#speed-meter.meter-live .eq i:nth-child(4) { animation-duration: calc(var(--meter-rate, 1.4s) * 1.3); }
+#speed-meter.meter-live .eq i:nth-child(5) { animation-duration: calc(var(--meter-rate, 1.4s) * 0.8); }
+@keyframes eq-dance {
+  from { height: 20%; }
+  to { height: 100%; }
+}
+#speed-meter.meter-live[data-tier="fast"] .eq i {
+  background: var(--success);
+}
+/* sparkline: bigger, glowing, shimmer sweep + expanding head halo */
+.speed-sparkline { overflow: visible; }
+.spark-shimmer { opacity: 0; transition: opacity .3s ease; }
+#speed-meter.meter-live .spark-shimmer { opacity: 1; }
+.spark-line { filter: drop-shadow(0 0 3px rgba(var(--accent-rgb), .55)); }
+#speed-meter.meter-live .spark-line {
+  filter: drop-shadow(0 0 5px rgba(var(--success-rgb), .7));
+}
+.spark-halo {
+  fill: none; stroke: var(--success); stroke-width: 1.5;
+  opacity: 0; pointer-events: none;
+}
+#speed-meter.meter-live .spark-halo {
+  opacity: 1;
+  animation: halo-pulse calc(var(--meter-rate, 1.4s) * 1.2) ease-out infinite;
+}
+@keyframes halo-pulse {
+  0% { opacity: .85; r: 2; }
+  100% { opacity: 0; r: 7; }
+}
+.pending-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 12px; border-radius: var(--radius-pill);
+  background: var(--state-warning-bg); color: var(--warning);
+  border: 1px solid var(--state-warning-border);
+  font-size: 12px; font-weight: 600; white-space: nowrap; flex-shrink: 0;
+  cursor: pointer; transition: border-color .15s, background .15s;
+}
+.pending-chip:hover {
+  border-color: var(--warning);
+  background: rgba(var(--warning-rgb), .2);
+}
+@media (prefers-reduced-motion: reduce) {
+  .meter-core::before, .meter-core::after { animation: none; opacity: 0; }
+  .eq i { animation: none !important; }
+  .spark-shimmer, .spark-halo { display: none; }
+}
