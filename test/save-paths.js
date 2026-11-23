@@ -63,6 +63,8 @@ async function check(name, run) {
     const context = vm.createContext({
       isAllowedSavePath,
       ...require('../src/settings-view'),
+      ...require('../src/settings-import'),
+      ...require('../src/ai-service'),
       downloadManager: {
         getSettings: () => settings,
         saveSettings: (next) => { calls.push(['settings', next]); return Object.assign(settings, next); },
@@ -75,6 +77,7 @@ async function check(name, run) {
       locationDialog: { pickFolder: async () => selection },
       resolvers: { hasResolverFor: () => false },
       syncAiConfig: () => {}, applyTimetableSpeed: () => {},
+      syncMcpBridge: () => {},
       scheduler: null, clipboardMonitor: null, tray: null,
     });
     const helpers = main.slice(main.indexOf('function assertAllowedSavePath('), main.indexOf("ipcMain.handle('add-download'"));

@@ -51,6 +51,10 @@ class HostGate {
   /**
    * Register (or replace) a callback invoked when `host` frees a slot.
    * Keyed so a re-arming task never stacks duplicate waiters.
+   *
+   * The callback may return `false` to say "I am gone — give the slot to
+   * somebody else". `_wake` then keeps looking instead of burning the slot
+   * on a dead task.
    */
   waitForSlot(host, key, cb) {
     let m = this.waiters.get(host);
@@ -69,15 +73,54 @@ class HostGate {
     if (m.size === 0) this.waiters.delete(host);
   }
 
+  /**
+   * Drop a key's waiters on EVERY host.
+   *
+   * A task can be waiting on more than one host (a mirror rotates), so
+   * stopping it must clear all of them — a leftover waiter holds a closure
+   * over the whole task and, worse, eats the next released slot.
+   *
+   * @param {string} key
+   * @returns {number} how many waiters were removed
+   */
+  clearWaiters(key) {
+    let removed = 0;
+    for (const [host, m] of this.waiters) {
+      if (m.delete(key)) removed += 1;
+      if (m.size === 0) this.waiters.delete(host);
+    }
+    return removed;
+  }
+
+  /** How many waiters a key holds (diagnostics + tests). */
+  waiterCount(key) {
+    let n = 0;
+    for (const m of this.waiters.values()) if (m.has(key)) n += 1;
+    return n;
+  }
+
+  /**
+   * Wake one live waiter for `host`.
+   *
+   * A waiter whose task has gone returns `false`; the slot is still free, so
+   * the next waiter is tried. Without this a cancelled task's waiter swallows
+   * the release and a LIVE task sits idle while the gate reports capacity.
+   */
   _wake(host) {
     if (this.waiters.size === 0) return;
     if (!this.hasCapacity(host)) return;
     const m = this.waiters.get(host);
     if (!m || m.size === 0) return;
-    const [key, cb] = m.entries().next().value;
-    m.delete(key);
-    if (m.size === 0) this.waiters.delete(host);
-    try { cb(); } catch (e) { /* a dead task's fill() is a no-op */ }
+    for (const [key, cb] of [...m.entries()]) {
+      m.delete(key);
+      if (m.size === 0) this.waiters.delete(host);
+      let consumed = true;
+      try {
+        consumed = cb() !== false;
+      } catch (e) { /* a dead task's fill() is a no-op */ }
+      if (consumed) return;
+      // The task is gone: keep looking for a live waiter.
+    }
   }
 }
 

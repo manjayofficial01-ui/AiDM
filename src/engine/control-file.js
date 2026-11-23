@@ -1,5 +1,6 @@
 // @ts-check
-const { readFile, rename, rm, writeFile } = require('fs/promises');
+const { open, readFile, rename, rm, writeFile } = require('fs/promises');
+const path = require('path');
 
 const CONTROL_FILE_VERSION = 1;
 
@@ -12,16 +13,37 @@ function controlFilePath(partPath) {
 }
 
 /**
- * Crash-safe persistence of the segment bitmap:
- * write to a temp file, fsync-free rename for atomic replacement.
- * @param {string} path
+ * Crash-safe persistence of the segment bitmap.
+ *
+ * The bitmap claims which bytes are on disk, so it must not outlive them:
+ * the data is fsynced by the task BEFORE this runs (see DownloadTask.
+ * saveControl). Here the temp file itself is fsynced and the directory entry
+ * is flushed after the rename, so a power loss can lose the whole control
+ * file (the task then re-downloads — safe) but can never leave a bitmap that
+ * claims bytes the disk does not have (unsafe).
+ *
+ * @param {string} filePath
  * @param {object} data
  * @returns {Promise<void>}
  */
-async function saveControlFile(path, data) {
-  const tmp = `${path}.${process.pid}.tmp`;
+async function saveControlFile(filePath, data) {
+  const tmp = `${filePath}.${process.pid}.tmp`;
   await writeFile(tmp, JSON.stringify(data), 'utf8');
-  await rename(tmp, path);
+  try {
+    const handle = await open(tmp, 'r+');
+    try { await handle.sync(); } finally { await handle.close(); }
+  } catch (e) {
+    // fsync is unavailable on some filesystems — the rename below is still
+    // atomic, so the file is either the old one or the new one.
+  }
+  await rename(tmp, filePath);
+  try {
+    // Flush the directory entry so the rename itself survives a power loss.
+    const dir = await open(path.dirname(filePath), 'r');
+    try { await dir.sync(); } finally { await dir.close(); }
+  } catch (e) {
+    // Windows cannot fsync a directory handle — the rename is still atomic.
+  }
 }
 
 /**

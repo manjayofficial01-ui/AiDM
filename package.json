@@ -1,6 +1,6 @@
 {
   "name": "aidm",
-  "version": "5.9.9",
+  "version": "5.10.0",
   "description": "AiDM - AI-powered download manager with a multi-connection engine, YouTube/DASH via yt-dlp, torrent/magnet, HTTP/2, and an IDM-style Chrome extension.",
   "main": "main.js",
   "scripts": {
@@ -9,6 +9,7 @@
     "pack": "node tools/sync-extension-version.js && electron-builder --dir",
     "dist": "node tools/sync-extension-version.js && electron-builder --win",
     "dist:win": "node tools/sync-extension-version.js && electron-builder --win nsis",
+    "mcp": "node tools/aidm-mcp.js",
     "test:smoke": "node test/smoke.js",
     "test:integration": "node test/integration.js",
     "test:engine-v4": "node test/engine-v4.js",

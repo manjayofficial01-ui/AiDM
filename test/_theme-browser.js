@@ -117,7 +117,7 @@ async (page) => {
     want('--bg-hover', '#22221F') && want('--bg-elevated', '#1E1E1C'), dark.vars.join(' '));
   check('Qoder green accent', want('--accent', '#2ADB5C') && want('--accent-soft', '#8EE5A1'), dark.vars.join(' '));
   check('Qoder neutral text ramp', want('--text-primary', '#EEEEEB') && want('--text-secondary', '#B4B4AC') &&
-    want('--text-muted', '#7B7B74'), dark.vars.join(' '));
+    want('--text-muted', '#8A8A82'), dark.vars.join(' '));
   check('Qoder dark status colours', want('--warning', '#FAAD14') && want('--error', '#FF6B70') &&
     want('--state-fresh', '#C3A0DF'), dark.vars.join(' '));
   const legible = ['textOnCanvas', 'secondaryOnCanvas', 'mutedOnCanvas', 'successOnCanvas',

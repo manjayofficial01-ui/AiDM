@@ -118,6 +118,20 @@ class GlobalConnectionBudget {
   waitForSlot(key, cb) {
     this.gate.waitForSlot(GLOBAL_GATE_KEY, key, cb);
   }
+
+  /**
+   * Drop a task's waiter on the global gate.
+   *
+   * A task that stops (pause/cancel/complete/fail) must not leave a waiter
+   * behind: the next released connection would wake the dead task, the slot
+   * would be spent, and a live download would sit idle while the budget
+   * reports capacity.
+   *
+   * @param {string} taskId
+   */
+  clearWaiter(taskId) {
+    this.gate.clearWaiter(GLOBAL_GATE_KEY, taskId);
+  }
 }
 
 module.exports = { GlobalConnectionBudget, GLOBAL_GATE_KEY };

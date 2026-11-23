@@ -13,6 +13,7 @@ const { isSameRegistrableDomain } = require('../url-hygiene');
 const { TokenBucket } = require('./rate-limiter');
 const { DEFAULT_RETRY_POLICY, backoffDelay } = require('./retry');
 const { SegmentManager } = require('./segments');
+const { findUnwrittenSegments, demoteSegments } = require('./restore-verify');
 const { RampController, dynamicMinSplitBytes } = require('./ramp-controller');
 const { SpeedMeter } = require('./speed');
 const { DEFAULT_TASK_DEFAULTS } = require('./types');
@@ -132,6 +133,8 @@ class DownloadTask extends EventEmitter {
     this.globalBudget = deps.globalBudget || null;
     /** Shared, persisted per-domain connection-cap store (null = ungated). */
     this.domainConnCaps = deps.domainConnCaps || null;
+    /** Hosts this task is currently waiting on (shared-gate waiters). */
+    this._gateWaitHosts = new Set();
     /** Adaptive ramp controller (FluxDown port); null when not adaptive. */
     this.ramp = null;
     /** Live minimum split threshold (lowered as throughput drops). */
@@ -344,6 +347,10 @@ class DownloadTask extends EventEmitter {
     } finally {
       this.stopTicker();
       this.clearRetryTimer();
+      // The task is finishing one way or another (completed, paused, failed,
+      // cancelled): it must not leave a waiter behind. A stale waiter would
+      // eat the next released connection slot and stall a LIVE download.
+      this.releaseGateWaiters();
       await this.closeWriter();
       if (this.stateValue === 'paused' || this.stateValue === 'failed') {
         await this.saveControl().catch(() => {});
@@ -394,6 +401,37 @@ class DownloadTask extends EventEmitter {
     if (wasRunning) await this.runFinished?.promise;
     await this.closeWriter();
     if (opts.deleteFiles ?? true) await this.deleteArtifacts();
+  }
+
+  /**
+   * Drop any restored segment whose bytes are not actually on disk.
+   *
+   * The `.part` file is preallocated sparse, so its size always reports the
+   * full resource length and cannot tell a written byte from a hole. A
+   * bitmap written by an older build — or by a power loss between the data
+   * flush and the bitmap flush — can therefore claim a segment it never
+   * wrote, and the finished file would carry a zero-filled hole while the
+   * app reported success. The bytes are read back here; a segment that reads
+   * as a hole is re-downloaded instead.
+   *
+   * @param {string} partPath
+   * @param {any} restored a SegmentManager
+   */
+  async _verifyRestoredBytes(partPath, restored) {
+    if (!restored || !partPath) return;
+    const segments = restored.all;
+    if (!Array.isArray(segments) || !segments.length) return;
+    let unwritten;
+    try {
+      unwritten = await findUnwrittenSegments(partPath, segments);
+    } catch (e) {
+      return; // a verification failure must never break the resume
+    }
+    if (!unwritten.length) return;
+    const demoted = demoteSegments(segments, unwritten);
+    if (demoted) {
+      this.log('warn', `Re-downloading ${demoted} segment(s) whose bytes were missing from the partial file`);
+    }
   }
 
   /**
@@ -569,6 +607,7 @@ class DownloadTask extends EventEmitter {
         // zero-filled holes in a file reported as complete.
         const onDisk = await fileSize(partPath);
         restored = SegmentManager.restore(ctl.segments, info.size, this.segmentOptions(info), onDisk);
+        await this._verifyRestoredBytes(partPath, restored);
         this.createdAt = ctl.createdAt;
         this.log('info', `Resuming from control file (${restored.downloadedBytes} bytes done)`);
       }
@@ -595,6 +634,7 @@ class DownloadTask extends EventEmitter {
         if (snapshots.length) {
           const onDisk = await fileSize(partPath);
           restored = SegmentManager.restore(snapshots, info.size, this.segmentOptions(info), onDisk);
+          await this._verifyRestoredBytes(partPath, restored);
           this.log('info', `Resuming from persisted segment map (${restored.downloadedBytes} bytes done)`);
         }
       }
@@ -625,6 +665,7 @@ class DownloadTask extends EventEmitter {
         }
         const onDisk = await fileSize(partPath);
         restored = SegmentManager.restore(snapshots, totalSize, this.segmentOptions(info), onDisk);
+        await this._verifyRestoredBytes(partPath, restored);
         this.log('info', `Resuming from persisted offsets (${restored.downloadedBytes} bytes done)`);
       }
     }
@@ -908,7 +949,10 @@ class DownloadTask extends EventEmitter {
         // Another download already holds every slot for this host: give the
         // segment back and let the releasing connection wake us (no polling).
         segments.release(segment);
-        this.hostGate.waitForSlot(mirror.host, this.id, () => this.fill());
+        this._gateWaitHosts.add(mirror.host);
+        // `false` tells the gate we are gone so it hands the freed slot to
+        // somebody else instead of burning it on this dead waiter.
+        this.hostGate.waitForSlot(mirror.host, this.id, () => this._onGateWake());
         break;
       }
       if (this.globalBudget && !this.globalBudget.hasCapacity()) {
@@ -918,7 +962,7 @@ class DownloadTask extends EventEmitter {
         // is the polite half — so N concurrent downloads can never burst
         // budget+overshoot connections at one CDN.
         segments.release(segment);
-        this.globalBudget.waitForSlot(this.id, () => this.fill());
+        this.globalBudget.waitForSlot(this.id, () => this._onGateWake());
         break;
       }
       this.launch(segment, mirror);
@@ -936,6 +980,36 @@ class DownloadTask extends EventEmitter {
         );
       }
     }
+  }
+
+  /**
+   * A shared gate freed a slot and woke this task.
+   *
+   * Returns `false` when the task is no longer interested (paused, cancelled,
+   * failed or completed) so the gate keeps looking for a LIVE waiter instead
+   * of losing the slot on a dead one.
+   *
+   * @returns {boolean} whether this task consumed the released slot
+   */
+  _onGateWake() {
+    if (this.stopping || this.fatal || this.isTerminal) return false;
+    this.fill();
+    return true;
+  }
+
+  /**
+   * Drop this task's shared-gate waiters.
+   *
+   * A leftover waiter is worse than a leak: the next released connection
+   * wakes the DEAD task, the slot is spent, and a live download sits idle
+   * while the gate still reports capacity.
+   */
+  releaseGateWaiters() {
+    if (this.hostGate) {
+      for (const host of this._gateWaitHosts) this.hostGate.clearWaiter(host, this.id);
+    }
+    if (this.globalBudget) this.globalBudget.clearWaiter(this.id);
+    this._gateWaitHosts.clear();
   }
 
   /**
@@ -1246,13 +1320,11 @@ class DownloadTask extends EventEmitter {
       if (now - this.lastSaveAt >= SAVE_INTERVAL_MS) {
         this.lastSaveAt = now;
         const save = () => this.saveControl().catch((err) => this.log('warn', `Control file save failed: ${String(err)}`));
-        // fsync BEFORE recording progress: with sparse preallocation the .part
-        // reports its final size from the very first tick, so the on-disk
-        // trim guard cannot see unwritten holes — a power loss would leave
-        // the control file claiming bytes that never reached the disk.
-        const w = this.writer;
-        if (w && !w.closed) w.sync().then(save, save);
-        else save();
+        // saveControl() flushes the data before it writes the bitmap that
+        // claims it — with sparse preallocation the .part reports its final
+        // size from the very first tick, so the on-disk trim guard cannot see
+        // unwritten holes. The write ORDER is the guard.
+        save();
       }
       if (now - this.lastAdaptAt >= ADAPT_INTERVAL_MS) {
         this.lastAdaptAt = now;
@@ -1272,6 +1344,15 @@ class DownloadTask extends EventEmitter {
   async saveControl() {
     const data = this.toControlFile();
     if (!data || !this.partPath || !this.info?.acceptRanges || !this.config.resumable) return;
+    // Flush the DATA before the bitmap that claims it. With sparse
+    // preallocation the .part reports its final size from the very first
+    // tick, so nothing on disk can contradict the bitmap — the ordering is
+    // the only thing that keeps the bitmap honest. Every write path goes
+    // through here, so no caller can forget it.
+    const w = this.writer;
+    if (w && !w.closed) {
+      try { await w.sync(); } catch (e) { /* sync failed — the bitmap still records what the writer saw */ }
+    }
     await saveControlFile(controlFilePath(this.partPath), data);
   }
 

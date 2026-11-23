@@ -8,6 +8,7 @@ let settings = {};
 let activeCategory = 'all';
 let selectedIds = new Set();
 let contextTarget = null;
+let contextMenuOpener = null; // the element that opened the menu (focus is restored to it)
 let marqueeEndTime = 0; // timestamp of last marquee drag — suppresses stray clicks
 // Race guard: a getDownloads() fetch must not clobber mutations that IPC
 // events applied while the fetch was in flight. Every mutation of `downloads`
@@ -23,6 +24,34 @@ const searchInput = document.getElementById('search-input');
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 let bootState = 'loading';
+
+/**
+ * Subscribe to an IPC event, but only when the preload provides it.
+ *
+ * The renderer used to call `window.aidm.onSomething(cb)` directly. A preload
+ * that does not expose one of those channels made the call throw, and because
+ * the subscription list runs inside the DOMContentLoaded handler, the throw
+ * ABORTED the rest of the start-up — the library never loaded and the window
+ * sat on the loading spinner forever, with no error and no Retry button.
+ *
+ * A missing channel is now a no-op instead of a crash.
+ *
+ * @param {string} name the preload method
+ * @param {Function} cb the listener
+ * @returns {boolean} whether the channel existed and was subscribed
+ */
+function onIpc(name, cb) {
+  try {
+    const fn = window.aidm && window.aidm[name];
+    if (typeof fn === 'function') { fn(cb); return true; }
+  } catch (e) { /* a broken preload must never wedge the UI */ }
+  return false;
+}
+
+/** The IPC bridge, or an empty object when the preload is missing. */
+function ipc() {
+  return window.aidm || {};
+}
 
 /**
  * Explicit startup states (APP-007): loading / ready / error.
@@ -48,19 +77,35 @@ function setBootState(state, message) {
       (state === 'error' ? 'Could not load your downloads.' : 'Loading your library…');
   }
   if (retry) retry.style.display = state === 'error' ? '' : 'none';
-  if (table) table.style.display = state === 'ready' ? '' : 'none';
+  if (table) {
+    table.style.display = state === 'ready' ? '' : 'none';
+    // The column budget can only be measured once the table is on screen:
+    // a hidden table reports every column as 0px wide.
+    if (state === 'ready') applyColumnLayout();
+  }
   if (emptyState) emptyState.style.display = 'none';
 }
 
 async function bootstrapLibrary() {
   setBootState('loading');
+  // A boot that never finishes is a dead window. If the IPC round-trip has
+  // not settled in 10 s the shell flips to the error state, so Retry is
+  // reachable instead of the spinner spinning forever.
+  let timedOut = false;
+  const watchdog = setTimeout(() => {
+    if (bootState === 'loading') {
+      timedOut = true;
+      setBootState('error', 'The app did not answer in time.');
+    }
+  }, 10000);
   try {
     // One round of IPC; each call is guarded so a settings failure does not
     // discard a perfectly good download list.
     const [rows, loadedSettings] = await Promise.all([
-      window.aidm.getDownloads(),
-      window.aidm.getSettings().catch(() => ({})),
+      ipc().getDownloads ? ipc().getDownloads() : Promise.resolve([]),
+      (ipc().getSettings ? ipc().getSettings() : Promise.resolve({})).catch(() => ({})),
     ]);
+    if (timedOut) return;
     downloadsGeneration++;
     downloads = Array.isArray(rows) ? rows : [];
     settings = loadedSettings || {};
@@ -68,25 +113,30 @@ async function bootstrapLibrary() {
     renderDownloads();
     updateStats();
   } catch (e) {
+    if (timedOut) return;
     const detail = e && e.message ? e.message : '';
     setBootState('error', 'Could not load your downloads.' + (detail ? ' ' + detail : ''));
     // Keep the shell usable: Add URL / Settings still work with defaults.
     settings = settings || {};
     renderDownloads();
     updateStats();
+  } finally {
+    clearTimeout(watchdog);
   }
 }
 
 document.addEventListener('DOMContentLoaded', () => {
   initTheme();
   setBootState('loading');
-  setupEventListeners();
-  setupIPCListeners();
-  updateStats();
-  updateExtensionStatus();
-  loadAppVersion();
+  // Each start-up step is independent: one throwing must not stop the rest,
+  // or the window can end up half-wired (or dead on the loading spinner).
+  try { setupEventListeners(); } catch (e) { console.warn('[AiDM] event listeners failed:', e && e.message); }
+  try { setupIPCListeners(); } catch (e) { console.warn('[AiDM] IPC listeners failed:', e && e.message); }
+  try { updateStats(); } catch (e) { /* the shell still works */ }
+  try { updateExtensionStatus(); } catch (e) { /* the status bar stays unknown */ }
+  try { loadAppVersion(); } catch (e) { /* the version chip stays empty */ }
   // Poll extension connectivity every 30s so the status bar stays honest
-  setInterval(updateExtensionStatus, 30000);
+  setInterval(() => { try { updateExtensionStatus(); } catch (e) {} }, 30000);
   bootstrapLibrary();
 });
 
@@ -355,6 +405,9 @@ function refreshSelectionClasses() {
   downloadList.querySelectorAll('tr[data-id]').forEach(row => {
     const sel = selectedIds.has(row.dataset.id);
     row.classList.toggle('selected', sel);
+    // The selection is otherwise invisible to a screen reader: the row is
+    // "selected" only as a class, so the state was never announced.
+    row.setAttribute('aria-selected', sel ? 'true' : 'false');
     const cb = row.querySelector('input[type="checkbox"]');
     if (cb) cb.checked = sel;
   });
@@ -1338,7 +1391,7 @@ async function confirmDeleteModal() {
 
 // ── Context Menu ──────────────────────────────────────────────────────────────
 
-function showContextMenu(x, y, dl) {
+function showContextMenu(x, y, dl, opener) {
   const menu = document.getElementById('context-menu');
   menu.style.display = 'block';
   menu.style.left = `${Math.min(x, window.innerWidth - 200)}px`;
@@ -1363,8 +1416,79 @@ function showContextMenu(x, y, dl) {
       item.style.display = 'none';
     }
   });
+  // Keyboard entry point: the menu opens with the FIRST item focused, so a
+  // keyboard user can arrow through it (WCAG 2.1.1 — every action reachable).
+  contextMenuOpener = opener || null;
+  const visible = contextMenuItems();
+  if (visible.length) { try { visible[0].focus(); } catch (e) { /* not focusable yet */ } }
 }
-function hideContextMenu() { document.getElementById('context-menu').style.display = 'none'; }
+
+/** Visible (not hidden) items of the context menu, in order. */
+function contextMenuItems() {
+  const menu = document.getElementById('context-menu');
+  if (!menu) return [];
+  return Array.from(menu.querySelectorAll('.ctx-item'))
+    .filter(item => item.style.display !== 'none' && item.offsetParent !== null);
+}
+
+function hideContextMenu() {
+  const menu = document.getElementById('context-menu');
+  if (menu) menu.style.display = 'none';
+  // Give the focus back to whatever opened the menu.
+  if (contextMenuOpener && typeof contextMenuOpener.focus === 'function') {
+    try { contextMenuOpener.focus(); } catch (e) { /* the row is gone */ }
+  }
+  contextMenuOpener = null;
+}
+
+/**
+ * Open the context menu for a row from the keyboard (Shift+F10 or the Menu
+ * key) — the standard "open the menu for this item" shortcut.
+ */
+function openContextMenuForRow(tr, dl) {
+  if (!tr || !dl) return;
+  const rect = tr.getBoundingClientRect();
+  contextTarget = dl.id;
+  showContextMenu(rect.left + 24, rect.top + 8, dl, tr);
+}
+
+/**
+ * Arrow-key navigation inside the row context menu.
+ *
+ * A menu that opens with a right-click and cannot be moved through with the
+ * keyboard is unusable without a mouse. Arrow keys move between the visible
+ * items, Home/End jump to the ends, Escape closes and returns the focus to
+ * the row that opened it.
+ */
+function setupContextMenuKeyboard() {
+  const menu = document.getElementById('context-menu');
+  if (!menu) return;
+  menu.addEventListener('keydown', (e) => {
+    const items = contextMenuItems();
+    if (!items.length) return;
+    const idx = items.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      items[(idx + 1) % items.length].focus();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      items[(idx - 1 + items.length) % items.length].focus();
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      items[0].focus();
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      items[items.length - 1].focus();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      hideContextMenu();
+    } else if (e.key === 'Tab') {
+      // A menu is a transient popup: Tab closes it instead of walking into
+      // the page behind it.
+      hideContextMenu();
+    }
+  });
+}
 
 // ── Marquee (rubber-band) selection ───────────────────────────────────────────
 // Press left button on empty space (or a row) and drag: a blue rectangle
@@ -1437,24 +1561,150 @@ function applyMarqueeSelection(rect, addMode) {
 // ── Resizable table columns ───────────────────────────────────────────────────
 // Drag a header's right-edge handle to expand/shrink the column.
 // Widths persist in localStorage; double-click a handle to reset it.
+//
+// The column budget (see ui/styles.css): the file-name column is ELASTIC —
+// it absorbs whatever width is left — while every other column keeps the
+// width the user chose. `table-layout: fixed` ignores a cell's `min-width`
+// and hands the leftover to the auto column, which is exactly why the old
+// min-width-only layout collapsed the file name to 78px and pushed the
+// Actions column out of the table area at the app's 900px minimum width.
+//
+// The Actions column holds Pause / Resume / Remove, so it is never allowed
+// out of the visible table area: if the chosen widths no longer fit, the
+// least important columns give way first and Actions gives way last.
+const COL_MIN_WIDTH = { name: 140, size: 64, dims: 70, progress: 96, speed: 60, status: 84, actions: 76 };
+const COL_DEFAULT_WIDTH = { size: 70, dims: 78, progress: 108, speed: 66, status: 90, actions: 84 };
+// The select-all checkbox column is fixed by the stylesheet and is not
+// resizable, so its width is a constant rather than a measured value (a
+// hidden table measures every column as 0px). It is 36px so the 16px
+// checkbox keeps its WCAG 2.2 target spacing (test/ui-focus.js).
+const COL_CHECK_WIDTH = 36;
+// Give-way order when the widths do not fit: Dimensions (a video-only
+// nicety) first, Actions last.
+const COL_SHRINK_ORDER = ['dims', 'speed', 'size', 'progress', 'status', 'actions'];
+// Persisted widths for the fixed columns. The file name is elastic and is
+// therefore not stored.
+let colWidths = Object.assign({}, COL_DEFAULT_WIDTH);
 
-const COL_MIN_WIDTH = { name: 140, size: 70, dims: 70, progress: 110, speed: 70, status: 80, actions: 80 };
+function colTh(key) {
+  return document.querySelector(`#download-table th[data-col="${key}"]`);
+}
+
+// The width the table area offers to its columns.
+function columnSpace() {
+  const container = document.querySelector('.download-table-container');
+  if (!container) return 0;
+  return container.clientWidth - COL_CHECK_WIDTH;
+}
+
+// Give the columns their final widths: the fixed ones keep the user's
+// choice, the file name takes the rest, and if that does not fit, the
+// give-way order absorbs the difference so Actions always stays on screen.
+function applyColumnLayout() {
+  const space = columnSpace();
+  if (!space) return;
+  const widths = {};
+  for (const key of Object.keys(COL_MIN_WIDTH)) {
+    if (key === 'name') continue;
+    widths[key] = Math.max(COL_MIN_WIDTH[key], colWidths[key] || COL_DEFAULT_WIDTH[key]);
+  }
+  const total = () => Object.keys(widths).reduce((sum, k) => sum + widths[k], 0);
+  const nameFloor = COL_MIN_WIDTH.name;
+  // Make room for the file name's floor.
+  let excess = total() + nameFloor - space;
+  if (excess > 0) {
+    for (const key of COL_SHRINK_ORDER) {
+      if (excess <= 0) break;
+      const cut = Math.min(widths[key] - COL_MIN_WIDTH[key], excess);
+      if (cut > 0) { widths[key] -= cut; excess -= cut; }
+    }
+  }
+  const nameWidth = Math.max(nameFloor, space - total());
+  for (const key of Object.keys(widths)) {
+    const th = colTh(key);
+    if (th) th.style.width = widths[key] + 'px';
+  }
+  const nameTh = colTh('name');
+  if (nameTh) nameTh.style.width = nameWidth + 'px';
+}
 
 function loadColWidths() {
   let saved = {};
   try { saved = JSON.parse(localStorage.getItem('aidm-col-widths') || '{}'); } catch (e) {}
-  document.querySelectorAll('#download-table th[data-col]').forEach(th => {
-    const w = saved[th.dataset.col];
-    if (w && w >= (COL_MIN_WIDTH[th.dataset.col] || 60)) th.style.width = w + 'px';
-  });
+  for (const key of Object.keys(COL_DEFAULT_WIDTH)) {
+    const w = saved[key];
+    if (w && w >= COL_MIN_WIDTH[key]) colWidths[key] = w;
+  }
+  applyColumnLayout();
 }
 
 function saveColWidths() {
   const out = {};
-  document.querySelectorAll('#download-table th[data-col]').forEach(th => {
-    out[th.dataset.col] = Math.round(th.getBoundingClientRect().width);
-  });
+  for (const key of Object.keys(COL_DEFAULT_WIDTH)) {
+    const th = colTh(key);
+    out[key] = th ? Math.round(th.getBoundingClientRect().width) : colWidths[key];
+  }
   try { localStorage.setItem('aidm-col-widths', JSON.stringify(out)); } catch (e) {}
+}
+
+// Resize a fixed column. The file name gives way (or takes the difference),
+// and if the table still does not fit, the give-way order absorbs it.
+function resizeFixedColumn(key, desired) {
+  const floor = COL_MIN_WIDTH[key] || 60;
+  colWidths[key] = Math.max(floor, Math.round(desired));
+  applyColumnLayout();
+}
+
+// Resize the elastic file-name column: the difference is shared out among
+// the fixed columns so the divider behaves like every other table.
+function resizeNameColumn(desired) {
+  const nameTh = colTh('name');
+  const current = nameTh ? Math.round(nameTh.getBoundingClientRect().width) : 0;
+  const delta = Math.round(desired) - current;
+  if (!delta) return;
+  // Growing the file name takes the width from the fixed columns; shrinking
+  // it hands the width back.
+  shiftFixedColumns(-delta);
+  applyColumnLayout();
+}
+
+// Move `delta` pixels between the fixed columns. Negative takes width away
+// (the widest column with room gives it up first), positive shares the width
+// out in proportion to what each column already has.
+function shiftFixedColumns(delta) {
+  const keys = Object.keys(COL_DEFAULT_WIDTH);
+  if (delta < 0) {
+    let need = -delta;
+    for (let pass = 0; pass < 8 && need > 0; pass++) {
+      const eligible = keys.filter(k => colWidths[k] > COL_MIN_WIDTH[k]);
+      if (!eligible.length) return;
+      const room = eligible.reduce((s, k) => s + (colWidths[k] - COL_MIN_WIDTH[k]), 0);
+      if (room <= 0) return;
+      let taken = 0;
+      for (const k of eligible) {
+        const share = Math.max(1, Math.floor(need * (colWidths[k] - COL_MIN_WIDTH[k]) / room));
+        const cut = Math.min(share, colWidths[k] - COL_MIN_WIDTH[k], need - taken);
+        if (cut > 0) { colWidths[k] -= cut; taken += cut; }
+        if (taken >= need) break;
+      }
+      need -= taken;
+      if (taken === 0) return;
+    }
+    return;
+  }
+  if (delta > 0) {
+    const base = keys.reduce((s, k) => s + colWidths[k], 0) || 1;
+    let given = 0;
+    for (const k of keys) {
+      const share = Math.max(1, Math.round(delta * colWidths[k] / base));
+      colWidths[k] += share;
+      given += share;
+    }
+    // Correct the rounding drift so the columns keep their exact share.
+    const drift = delta - given;
+    const first = keys[0];
+    colWidths[first] = Math.max(COL_MIN_WIDTH[first], colWidths[first] + drift);
+  }
 }
 
 function setupColResize() {
@@ -1466,15 +1716,19 @@ function setupColResize() {
       e.stopPropagation();
       const startX = e.clientX;
       const startW = th.offsetWidth;
-      const minW = COL_MIN_WIDTH[th.dataset.col] || 60;
+      const key = th.dataset.col;
+      const minW = COL_MIN_WIDTH[key] || 60;
       handle.classList.add('dragging');
       const onMove = (ev) => {
-        th.style.width = Math.max(minW, startW + ev.clientX - startX) + 'px';
+        const wanted = startW + ev.clientX - startX;
+        if (key === 'name') resizeNameColumn(Math.max(minW, wanted));
+        else resizeFixedColumn(key, Math.max(minW, wanted));
       };
       const onUp = () => {
         window.removeEventListener('mousemove', onMove);
         window.removeEventListener('mouseup', onUp);
         handle.classList.remove('dragging');
+        applyColumnLayout();
         saveColWidths();
       };
       window.addEventListener('mousemove', onMove);
@@ -1484,7 +1738,15 @@ function setupColResize() {
     handle.addEventListener('dblclick', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      th.style.width = '';
+      const key = th.dataset.col;
+      if (key === 'name') {
+        // The file name is elastic: reset it by giving the fixed columns
+        // their default share again.
+        colWidths = Object.assign({}, COL_DEFAULT_WIDTH);
+      } else {
+        colWidths[key] = COL_DEFAULT_WIDTH[key] || COL_MIN_WIDTH[key];
+      }
+      applyColumnLayout();
       saveColWidths();
     });
     // Keyboard equivalent (AUD-015): the handle is a real button, so column
@@ -1496,14 +1758,18 @@ function setupColResize() {
         e.stopPropagation();
         const step = (e.shiftKey ? 48 : 16) * (e.key === 'ArrowLeft' ? -1 : 1);
         const current = th.getBoundingClientRect().width;
-        th.style.width = Math.max(minW, Math.round(current + step)) + 'px';
+        if (th.dataset.col === 'name') resizeNameColumn(Math.max(minW, current + step));
+        else resizeFixedColumn(th.dataset.col, Math.max(minW, current + step));
         saveColWidths();
         return;
       }
       if (e.key === 'Home') {
         e.preventDefault();
         e.stopPropagation();
-        th.style.width = '';
+        const key = th.dataset.col;
+        if (key === 'name') colWidths = Object.assign({}, COL_DEFAULT_WIDTH);
+        else colWidths[key] = COL_DEFAULT_WIDTH[key] || COL_MIN_WIDTH[key];
+        applyColumnLayout();
         saveColWidths();
       }
     });
@@ -1526,14 +1792,14 @@ function toggleSidebar() {
 // ── IPC Listeners ─────────────────────────────────────────────────────────────
 
 function setupIPCListeners() {
-  window.aidm.onDownloadAdded((data) => {
+  onIpc('onDownloadAdded', (data) => {
     downloadsGeneration++;
     if (!downloads.find(d => d.id === data.id)) downloads.push(data);
     renderDownloads();
     updateStats();
   });
 
-  window.aidm.onDownloadProgress((data) => {
+  onIpc('onDownloadProgress', (data) => {
     downloadsGeneration++;
     const dl = downloads.find(d => d.id === data.id);
     if (dl) {
@@ -1559,7 +1825,7 @@ function setupIPCListeners() {
     scheduleProgressRender(data.id);
   });
 
-  window.aidm.onDownloadComplete((data) => {
+  onIpc('onDownloadComplete', (data) => {
     downloadsGeneration++;
     const dl = downloads.find(d => d.id === data.id);
     if (dl) {
@@ -1587,7 +1853,7 @@ function setupIPCListeners() {
     showNotification(`Download complete: ${dl?.filename || 'File'}`);
   });
 
-  window.aidm.onDownloadError((data) => {
+  onIpc('onDownloadError', (data) => {
     downloadsGeneration++;
     const dl = downloads.find(d => d.id === data.id);
     if (dl) { dl.status = 'error'; dl.error = data.error; dl.speed = 0; }
@@ -1596,7 +1862,7 @@ function setupIPCListeners() {
     showNotification(`Download failed: ${data.error || 'unknown error'}`, 'error');
   });
 
-  window.aidm.onDownloadPaused((data) => {
+  onIpc('onDownloadPaused', (data) => {
     downloadsGeneration++;
     const dl = downloads.find(d => d.id === data.id);
     if (dl) { dl.status = 'paused'; dl.speed = 0; }
@@ -1604,7 +1870,7 @@ function setupIPCListeners() {
     updateStats();
   });
 
-  window.aidm.onDownloadResumed((data) => {
+  onIpc('onDownloadResumed', (data) => {
     downloadsGeneration++;
     const dl = downloads.find(d => d.id === data.id);
     if (dl) dl.status = 'downloading';
@@ -1614,7 +1880,7 @@ function setupIPCListeners() {
     updateStats();
   });
 
-  window.aidm.onDownloadRemoved((data) => {
+  onIpc('onDownloadRemoved', (data) => {
     downloadsGeneration++;
     downloads = downloads.filter(d => d.id !== data.id);
     renderDownloads();
@@ -1625,15 +1891,15 @@ function setupIPCListeners() {
   // a toast — a disk that cannot be written is a standing condition, not an
   // event the user should miss after 4 seconds.
   if (window.aidm.onPersistError) {
-    window.aidm.onPersistError((data) => setPersistStatus(data && data.message, true));
+    onIpc('onPersistError', (data) => setPersistStatus(data && data.message, true));
   }
   if (window.aidm.onPersistRecovered) {
-    window.aidm.onPersistRecovered(() => setPersistStatus(null, false));
+    onIpc('onPersistRecovered', () => setPersistStatus(null, false));
   }
 
   // File name/path refined (e.g. learned from the server before download):
   // refresh the matching row so the title and any pending badge stay right.
-  window.aidm.onDownloadUpdated((data) => {
+  onIpc('onDownloadUpdated', (data) => {
     downloadsGeneration++;
     const dl = downloads.find(d => d.id === data.id);
     if (dl) {
@@ -1667,13 +1933,13 @@ function setupIPCListeners() {
     updateStats();
   });
 
-  window.aidm.onClipboardLink((url) => {
+  onIpc('onClipboardLink', (url) => {
     document.getElementById('input-url').value = url;
     showAddModal();
   });
 
   // ── New: Ask-every-time approval ──────────────────────────────────────────
-  window.aidm.onDownloadAskLocation(async (data) => {
+  onIpc('onDownloadAskLocation', async (data) => {
     // The topmost location dialog is opened by the main process. The list only
     // needs to catch up so the row shows "Pending" while it is being answered.
     try {
@@ -1687,13 +1953,13 @@ function setupIPCListeners() {
   });
 
   // ── New: Video quality detected ──────────────────────────────────────────
-  window.aidm.onVideoDetected((data) => {
+  onIpc('onVideoDetected', (data) => {
     showQualityPicker(data);
   });
 
   // ── New: scheduler events (v4.3.0) ───────────────────────────────────────
   if (window.aidm.onSchedulerEvent) {
-    window.aidm.onSchedulerEvent((data) => {
+    onIpc('onSchedulerEvent', (data) => {
       if (data && data.message) showNotification(data.message);
       try {
         if (document.getElementById('scheduler-overlay').style.display !== 'none') {
@@ -1706,7 +1972,7 @@ function setupIPCListeners() {
   // SHA-256 arrives asynchronously after completion — refresh the row so the
   // hash is available via the context menu / file title tooltip.
   if (window.aidm.onDownloadHash) {
-    window.aidm.onDownloadHash((data) => {
+    onIpc('onDownloadHash', (data) => {
       const dl = downloads.find(d => d.id === data.id);
       if (dl) {
         downloadsGeneration++;
@@ -1829,12 +2095,27 @@ function setupEventListeners() {
   // Photoshop-style marquee selection on the download list
   setupMarquee();
 
+  // Arrow-key navigation inside the row context menu
+  setupContextMenuKeyboard();
+
   // Shared overlay behavior: backdrop close, focus trap, focus restore
   setupOverlayPlumbing();
 
   // Resizable columns (widths restored from previous session)
   loadColWidths();
   setupColResize();
+
+  // The column budget depends on the space the table actually has, so it is
+  // re-fitted whenever that space changes: the window is resized, the
+  // sidebar is collapsed/expanded, or the table gains a scrollbar.
+  let refitTimer = null;
+  const scheduleColumnRefit = () => {
+    if (refitTimer) clearTimeout(refitTimer);
+    refitTimer = setTimeout(() => { refitTimer = null; applyColumnLayout(); }, 80);
+  };
+  window.addEventListener('resize', scheduleColumnRefit);
+  const sidebarToggle = document.getElementById('btn-sidebar-collapse');
+  if (sidebarToggle) sidebarToggle.addEventListener('click', scheduleColumnRefit);
 
   // Add URL modal
   document.getElementById('modal-close').addEventListener('click', hideAddModal);
@@ -1927,7 +2208,7 @@ function setupEventListeners() {
   });
   // Live progress of the in-app yt-dlp update ("Downloading yt-dlp.exe…").
   if (window.aidm.onYtDlpUpdateStatus) {
-    window.aidm.onYtDlpUpdateStatus(({ stage, message }) => {
+    onIpc('onYtDlpUpdateStatus', ({ stage, message }) => {
       if (!ytdlpUpdateInFlight) return;
       const hint = document.getElementById('ytdlp-update-hint');
       if (hint && message) hint.textContent = message;
@@ -1937,7 +2218,7 @@ function setupEventListeners() {
   const btnGalleryDlUpdate = document.getElementById('btn-gallerydl-update');
   if (btnGalleryDlUpdate) btnGalleryDlUpdate.addEventListener('click', updateGalleryDl);
   if (window.aidm.onGalleryDlUpdateStatus) {
-    window.aidm.onGalleryDlUpdateStatus(({ message }) => {
+    onIpc('onGalleryDlUpdateStatus', ({ message }) => {
       if (!galleryDlUpdateInFlight) return;
       const hint = document.getElementById('gallerydl-update-hint');
       if (hint && message) hint.textContent = message;
@@ -1978,6 +2259,21 @@ function setupEventListeners() {
       // focused button still activates the button, not open-file).
       const onControl = !!(e.target.closest && e.target.closest('button, a, input, textarea, select'));
       if (!onControl) {
+        // The context menu used to be reachable by RIGHT-CLICK only, so every
+        // row action (pause, priority, open folder, copy URL, delete…) was
+        // keyboard-unreachable. Shift+F10 and the Menu key are the standard
+        // "open the menu for this item" shortcuts (WCAG 2.1.1).
+        if ((e.key === 'F10' && e.shiftKey) || e.key === 'ContextMenu') {
+          const focused = e.target.closest && e.target.closest('tr[data-id]');
+          const id = focused ? focused.dataset.id : [...selectedIds][0];
+          const dl = downloads.find(d => d.id === id);
+          const tr = dl && rowEls.get(dl.id);
+          if (dl && tr) {
+            e.preventDefault();
+            openContextMenuForRow(tr, dl);
+            return;
+          }
+        }
         if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
           e.preventDefault();
           moveSelection(e.key === 'ArrowDown' ? 1 : -1);
@@ -2656,6 +2952,12 @@ async function showSettingsModal() {
   document.getElementById('setting-ai-primary').value = settings.aiPrimaryModel || 'mimo-v2.5:free';
   document.getElementById('setting-ai-fallback').value = settings.aiFallbackModel || 'deepseek-v4-flash:free';
   document.getElementById('ai-status-hint').textContent = 'Key is stored locally only. Env var takes precedence when set.';
+  // AI assistants (MCP) — the local bridge an assistant drives the app through.
+  const mcpEnabled = document.getElementById('setting-mcp-enabled');
+  if (mcpEnabled) mcpEnabled.checked = settings.mcpEnabled === true;
+  const mcpLevel = document.getElementById('setting-mcp-level');
+  if (mcpLevel) mcpLevel.value = settings.mcpAccessLevel || 'standard';
+  refreshMcpStatus();
 
   // File hosts (v4.5.0) — never echo a saved password back; placeholder only.
   const rg = settings.fileHosts?.rapidgator || {};
@@ -2938,6 +3240,10 @@ async function saveSettings() {
     aiBaseURL: document.getElementById('setting-ai-baseurl').value.trim() || 'https://tokenharbor.ai/v1',
     aiPrimaryModel: document.getElementById('setting-ai-primary').value,
     aiFallbackModel: document.getElementById('setting-ai-fallback').value,
+    // AI assistants (MCP): the bridge an assistant drives the app through, and
+    // the ceiling every connection is held to.
+    mcpEnabled: document.getElementById('setting-mcp-enabled').checked,
+    mcpAccessLevel: document.getElementById('setting-mcp-level').value,
     // Only overwrite stored key when user typed a new one
     ...(aiKeyInput ? { aiApiKey: aiKeyInput } : {}),
   };
@@ -3092,7 +3398,7 @@ async function addGrabbedFiles() {
   // Progress arrives while the scan runs; the buttons themselves are wired in
   // setupEventListeners() alongside every other toolbar control.
   if (window.aidm && window.aidm.onGrabProgress) {
-    window.aidm.onGrabProgress((p) => {
+    onIpc('onGrabProgress', (p) => {
       const status = document.getElementById('grab-status');
       if (status && p) status.textContent = `Scanning… ${p.pages} page(s), ${p.files} file(s)`;
     });
@@ -3270,7 +3576,10 @@ function appendAiMessage(role, text) {
   const box = document.getElementById('ai-history');
   const div = document.createElement('div');
   div.style.cssText = role === 'user'
-    ? 'align-self:flex-end;background:var(--accent);color:#fff;padding:8px 12px;border-radius:12px 12px 4px 12px;max-width:85%;font-size:13px;'
+    // --on-accent, not #fff: the accent fill is bright, and white ink on it
+    // measured 1.84:1 (WCAG AA needs 4.5:1). The token is the theme's own
+    // answer — near-black ink on the dark theme's green, white on light.
+    ? 'align-self:flex-end;background:var(--accent);color:var(--on-accent);padding:8px 12px;border-radius:12px 12px 4px 12px;max-width:85%;font-size:13px;'
     : 'align-self:flex-start;background:var(--bg-elevated);border:1px solid var(--border);color:var(--text-primary);padding:8px 12px;border-radius:12px 12px 12px 4px;max-width:85%;font-size:13px;white-space:pre-wrap;';
   div.textContent = (role === 'user' ? '🧑 ' : '✨ ') + text;
   box.appendChild(div);
@@ -3356,6 +3665,29 @@ async function testAiConnection() {
     hint.textContent = r.ok ? `✅ Connected (${r.model}, ${r.latencyMs}ms${r.fallbackUsed ? ', via fallback' : ''})` : '⚠️ Unexpected reply';
   } catch (err) {
     hint.textContent = `❌ ${err.message || err}`;
+  }
+}
+
+/**
+ * Show what the MCP bridge is doing, so the user can tell "off" from
+ * "on but not listening" without reading a log.
+ */
+async function refreshMcpStatus() {
+  const hint = document.getElementById('mcp-status-hint');
+  if (!hint || !window.aidm || typeof window.aidm.getMcpStatus !== 'function') return;
+  try {
+    const status = await window.aidm.getMcpStatus();
+    if (!status.enabled) {
+      hint.textContent = 'Off. Nothing on this computer can drive AiDM.';
+      return;
+    }
+    if (!status.running) {
+      hint.textContent = 'Enabled, but the bridge is not listening yet — it starts with the app.';
+      return;
+    }
+    hint.textContent = `Listening on this computer only. Access level: ${status.level}. Start the assistant with: node "${status.command}"`;
+  } catch (err) {
+    hint.textContent = `Bridge status unavailable: ${err && err.message ? err.message : err}`;
   }
 }
 

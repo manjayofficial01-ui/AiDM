@@ -21,6 +21,21 @@ const DEFAULT_BASE_URL = 'https://tokenharbor.ai/v1';
 const DEFAULT_PRIMARY_MODEL = 'mimo-v2.5:free';
 const DEFAULT_FALLBACK_MODEL = 'deepseek-v4-flash:free';
 
+/**
+ * Host of a base URL (lowercased, port included). Used to decide whether a
+ * stored API key may still be used against a new base URL.
+ *
+ * @param {string} baseURL
+ * @returns {string}
+ */
+function hostOf(baseURL) {
+  try {
+    return new URL(String(baseURL)).host.toLowerCase();
+  } catch (e) {
+    return '';
+  }
+}
+
 class AiService {
   constructor(opts = {}) {
     this.baseURL = (opts.baseURL || process.env.TOKENHARBOR_BASE_URL || DEFAULT_BASE_URL).replace(/\/$/, '');
@@ -28,11 +43,27 @@ class AiService {
     this.primaryModel = opts.primaryModel || process.env.TOKENHARBOR_PRIMARY_MODEL || DEFAULT_PRIMARY_MODEL;
     this.fallbackModel = opts.fallbackModel || process.env.TOKENHARBOR_FALLBACK_MODEL || DEFAULT_FALLBACK_MODEL;
     this.timeoutMs = opts.timeoutMs || 60000;
+    /** Host the current key was issued for. */
+    this.keyHost = hostOf(this.baseURL);
   }
 
   configure({ baseURL, apiKey, primaryModel, fallbackModel, timeoutMs } = {}) {
-    if (baseURL) this.baseURL = String(baseURL).replace(/\/$/, '');
-    if (typeof apiKey === 'string' && apiKey.length > 0) this.apiKey = apiKey;
+    if (baseURL) {
+      const next = String(baseURL).replace(/\/$/, '');
+      // A key belongs to the host it was issued for. Pointing the client at a
+      // DIFFERENT host and keeping the key would hand that host the user's
+      // API key on the next request — so the key is dropped and the user has
+      // to enter it again for the new host.
+      if (next !== this.baseURL && hostOf(next) !== this.keyHost) {
+        this.apiKey = '';
+      }
+      this.baseURL = next;
+      this.keyHost = hostOf(next);
+    }
+    if (typeof apiKey === 'string' && apiKey.length > 0) {
+      this.apiKey = apiKey;
+      this.keyHost = hostOf(this.baseURL);
+    }
     if (primaryModel) this.primaryModel = primaryModel;
     if (fallbackModel) this.fallbackModel = fallbackModel;
     if (timeoutMs) this.timeoutMs = timeoutMs;
@@ -40,6 +71,7 @@ class AiService {
 
   setApiKey(key) {
     if (typeof key === 'string') this.apiKey = key;
+    this.keyHost = hostOf(this.baseURL);
   }
 
   isConfigured() {
@@ -200,4 +232,4 @@ class AiService {
   }
 }
 
-module.exports = { AiService, DEFAULT_BASE_URL, DEFAULT_PRIMARY_MODEL, DEFAULT_FALLBACK_MODEL };
+module.exports = { AiService, hostOf, DEFAULT_BASE_URL, DEFAULT_PRIMARY_MODEL, DEFAULT_FALLBACK_MODEL };

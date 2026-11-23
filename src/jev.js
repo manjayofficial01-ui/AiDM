@@ -148,7 +148,7 @@ async function classifyLink(url, context = {}) {
   if (context.pageUrl) ctx.push(`Captured from page: ${context.pageUrl}`);
   const state = [
     'A download manager captured this URL and its static rules (file-extension regexes, known host lists) could not classify it.',
-    `URL: ${url}`,
+    `URL: ${redactUrl(url)}`,
     anatomy,
     ...ctx,
     '',
@@ -200,14 +200,70 @@ function describeUrl(url) {
   const ext = (/\.([a-z0-9]{1,6})$/i.exec(u.pathname) || [])[1];
   if (ext) parts.push(`extension: .${ext.toLowerCase()}`);
   else parts.push('extension: none');
-  if (u.search) parts.push(`query: ${u.search.slice(0, 200)}`);
+  if (u.search) parts.push(`query: ${redactSearch(u.search).slice(0, 200)}`);
   return parts.join(' | ');
+}
+
+/**
+ * Query parameters whose VALUES are credentials.
+ *
+ * The URL is classified by a remote model, so the shape of the query matters
+ * ("tokenized media URLs count as downloadable") but the secret itself must
+ * not leave the machine. The parameter NAME is kept — the model only needs to
+ * know that the URL is signed.
+ */
+const SECRET_QUERY_KEY = /^(sig|lsig|s|sp|signature|token|access_token|auth|authorization|key|apikey|api_key|password|pwd|secret|session|sid|policy|st|exp|expire|expires|expiretime|validto|hash|hmac|credential|x-amz-[^&]*|x-ms-[^&]*|x-goog-[^&]*)$/i;
+
+/**
+ * Replace secret-class query values with a placeholder, keeping the names.
+ *
+ * @param {string} search a URL search string (with or without the leading '?')
+ * @returns {string}
+ */
+function redactSearch(search) {
+  const raw = String(search == null ? '' : search);
+  const body = raw.startsWith('?') ? raw.slice(1) : raw;
+  if (!body) return raw;
+  return body
+    .split('&')
+    .map((pair) => {
+      if (!pair) return pair;
+      const eq = pair.indexOf('=');
+      if (eq < 0) return pair;
+      const name = pair.slice(0, eq);
+      const value = pair.slice(eq + 1);
+      if (!SECRET_QUERY_KEY.test(decodeURIComponent(name))) return pair;
+      return `${name}=REDACTED`;
+    })
+    .join('&');
+}
+
+/**
+ * A URL that is safe to send to a remote classifier: the secret-class query
+ * values are replaced, everything else (scheme, host, path, file extension)
+ * is preserved so the model can still judge it.
+ *
+ * @param {string} url
+ * @returns {string}
+ */
+function redactUrl(url) {
+  const raw = String(url == null ? '' : url);
+  try {
+    const u = new URL(raw);
+    if (!u.search) return raw;
+    const redacted = redactSearch(u.search);
+    return u.toString().replace(u.search, redacted ? `?${redacted}` : '');
+  } catch (e) {
+    return raw;
+  }
 }
 
 module.exports = {
   ask,
   classifyLink,
   describeUrl,
+  redactUrl,
+  redactSearch,
   isConfigured,
   setFetchImpl,
   resetJev,

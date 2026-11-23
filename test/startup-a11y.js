@@ -100,29 +100,55 @@ check('dialogs expose dialog semantics and take initial focus', () => {
   assert(/overlayReturnFocus[\s\S]{0,300}?prev\.focus/.test(appSrc), 'closing restores focus');
 });
 check('every form control has an accessible name', () => {
-  // A label "counts" when it has for= OR wraps its own control (weekday
-  // checkboxes). Everything else must carry aria-label.
-  const labelBlocks = html.match(/<label(?:\s[^>]*)?>[\s\S]*?<\/label>/g) || [];
-  const unassociated = labelBlocks.filter(l => !/for="/.test(l) && !/<input|<select|<textarea/.test(l));
-  assert(unassociated.length <= 1, 'unassociated labels remain: ' + unassociated.length);
-  const controls = html.match(/<(input|select|textarea)\b[^>]*>/g) || [];
-  const unnamed = controls.filter(tag => {
-    if (/type="hidden"/.test(tag)) return false;
-    if (/aria-label=/.test(tag)) return false;
-    const id = /id="([^"]+)"/.exec(tag);
-    if (id && html.includes(`for="${id[1]}"`)) return false;
-    // Wrapped by its own label: find the nearest preceding <label ...> whose
-    // block contains this exact tag.
-    const at = html.indexOf(tag);
-    const before = html.lastIndexOf('<label', at);
-    if (before !== -1) {
-      const close = html.indexOf('</label>', at);
-      const block = html.slice(before, close === -1 ? at : close + 8);
-      if (block.includes('<input') || block.includes('<select')) return false;
-    }
+  // A label "counts" when it has for= pointing at THIS control, or when it
+  // actually wraps it. The previous heuristic looked only for "the nearest
+  // preceding <label>" and treated ANY input/select inside that slice as a
+  // wrapper — which let an unlabelled control borrow the label of a
+  // different control further up the page (the seven category-path inputs
+  // slipped through that way). Labels are now matched to their real bounds.
+  const labelOpens = [];
+  const openRe = /<label(?:\s[^>]*)?>/g;
+  let m;
+  while ((m = openRe.exec(html)) !== null) {
+    labelOpens.push({ start: m.index, end: m.index + m[0].length, for: (/for="([^"]+)"/.exec(m[0]) || [])[1] });
+  }
+  const labelCloses = [];
+  const closeRe = /<\/label>/g;
+  while ((m = closeRe.exec(html)) !== null) labelCloses.push(m.index);
+  // Match each label opening with its closing tag (labels are not nested).
+  for (const l of labelOpens) {
+    l.close = labelCloses.find(c => c > l.start);
+    l.body = l.close === undefined ? html.slice(l.end) : html.slice(l.end, l.close);
+  }
+  // A control is wrapped when it sits between a label's open and close.
+  const wrappedBy = (at) => labelOpens.find(l => l.close !== undefined && l.start < at && at < l.close);
+
+  // Every label must either point at a control or contain one.
+  const unassociated = labelOpens.filter(l => !l.for && !/<input|<select|<textarea/.test(l.body));
+  assert(unassociated.length === 0,
+    'labels with neither a for= nor a contained control: ' + unassociated.length);
+
+  const controls = [];
+  const controlRe = /<(input|select|textarea)\b[^>]*>/g;
+  while ((m = controlRe.exec(html)) !== null) controls.push({ tag: m[0], at: m.index });
+  const unnamed = controls.filter(c => {
+    if (/type="hidden"/.test(c.tag)) return false;
+    if (/aria-label=/.test(c.tag) || /aria-labelledby=/.test(c.tag)) return false;
+    const id = (/id="([^"]+)"/.exec(c.tag) || [])[1];
+    if (id && labelOpens.some(l => l.for === id)) return false;
+    const wrapper = wrappedBy(c.at);
+    if (wrapper && /<input|<select|<textarea/.test(wrapper.body)) return false;
     return true;
   });
-  assert(unnamed.length === 0, 'unnamed controls: ' + unnamed.map(t => t.slice(0, 80)).join(' | '));
+  assert(unnamed.length === 0, 'unnamed controls: ' + unnamed.map(c => c.tag.slice(0, 80)).join(' | '));
+
+  // The category-path inputs are the ones this heuristic used to miss.
+  const catPaths = controls.filter(c => /id="cat-path-/.test(c.tag));
+  assert(catPaths.length === 7, 'seven category-path inputs, got ' + catPaths.length);
+  for (const c of catPaths) {
+    const id = (/id="([^"]+)"/.exec(c.tag) || [])[1];
+    assert(labelOpens.some(l => l.for === id), 'category path input has no label: ' + id);
+  }
 });
 check('toasts are announced (polite status, assertive errors)', () => {
   assert(/setAttribute\('aria-live', 'polite'\)/.test(appSrc));

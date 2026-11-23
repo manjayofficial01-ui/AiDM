@@ -400,8 +400,10 @@ function writeDiagnosticLog(logPath, { code, url, formatSpec, runner, tail }) {
       'error code:  ' + code,
       'format:      ' + String(formatSpec || '-'),
       // The page url is safe (it is the canonical watch url); signatures are
-      // stripped from everything else below.
-      'url:         ' + String(url || '-'),
+      // stripped from everything else below. The URL is redacted too: a media
+      // URL can carry a signed token, and this file is a plain-text log the
+      // user can open and share.
+      'url:         ' + redact(String(url || '-')),
       '',
       '— extractor output (signatures and tokens redacted) —',
       redact(String(tail || '')).slice(-4000),

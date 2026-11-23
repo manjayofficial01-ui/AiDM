@@ -5,15 +5,19 @@ const { DownloadManager, youtubeLogDir } = require('./src/download-manager');
 const { destroyAgents } = require('./src/engine/agents');
 const { ClipboardMonitor } = require('./src/clipboard-monitor');
 const { IPCServer } = require('./src/server');
-const { AiService } = require('./src/ai-service');
+const { AiService, hostOf, DEFAULT_BASE_URL } = require('./src/ai-service');
 const resolvers = require('./src/resolvers');
 const locationDialog = require('./src/location-dialog');
 const { Scheduler, parseSpeedRules, speedLimitAt, validateSchedule } = require('./src/scheduler');
 const cli = require('./src/cli');
 const { KeepAwake, countActiveTransfers } = require('./src/keep-awake');
 const { isAllowedSavePath } = require('./src/save-paths');
+const { sanitizeImportedSettings } = require('./src/settings-import');
 const { publicSettings } = require('./src/settings-view');
 const { pairExtension } = require('./src/extension-pairing');
+const { BridgeServer } = require('./src/mcp/bridge-server');
+const { AuditLog } = require('./src/mcp/audit');
+const { bridgeFile } = require('./src/mcp/paths');
 const { exec } = require('child_process');
 
 let mainWindow;
@@ -23,6 +27,7 @@ let downloadManager;
 let clipboardMonitor;
 let ipcServer;
 let aiService;
+let mcpBridge = null;
 const approvedSaveFolders = new WeakMap();
 // Download scheduler (v4.3.0) + its active session, if any.
 let scheduler = null;
@@ -189,19 +194,57 @@ function getAiService() {
 function syncAiConfig() {
   if (!downloadManager) return;
   const s = downloadManager.getSettings();
+  const base = String(s.aiBaseURL || '');
+  // The environment key belongs to the default provider only. A custom host
+  // must use a key the user entered for THAT host, so a base-URL change can
+  // never carry a credential to a new destination.
+  const envKey = process.env.TOKENHARBOR_API_KEY || '';
+  const usingDefaultHost = !base || hostOf(base) === hostOf(DEFAULT_BASE_URL);
   getAiService().configure({
-    baseURL: s.aiBaseURL,
-    apiKey: process.env.TOKENHARBOR_API_KEY || s.aiApiKey || '',
+    baseURL: base || undefined,
+    apiKey: (usingDefaultHost ? envKey : '') || s.aiApiKey || '',
     primaryModel: s.aiPrimaryModel,
     fallbackModel: s.aiFallbackModel,
   });
+}
+
+/**
+ * Start or stop the MCP bridge, so it follows the setting live.
+ *
+ * The bridge is the door an AI assistant uses to drive this app. It is off
+ * until the user turns it on, and the access level the app allows is the
+ * ceiling for every connection — a client may ask for less, never for more.
+ * @returns {Promise<void>}
+ */
+async function syncMcpBridge() {
+  if (!downloadManager) return;
+  const settings = downloadManager.getSettings();
+  const wanted = settings.mcpEnabled === true;
+  try {
+    if (wanted && !mcpBridge) {
+      mcpBridge = new BridgeServer({
+        manager: downloadManager,
+        level: settings.mcpAccessLevel || 'standard',
+        audit: new AuditLog({}),
+        file: bridgeFile(),
+      });
+      await mcpBridge.start();
+    } else if (!wanted && mcpBridge) {
+      const bridge = mcpBridge;
+      mcpBridge = null;
+      await bridge.stop();
+    }
+  } catch (e) {
+    // A bridge that cannot start must never take the app with it.
+    console.warn('[AiDM] MCP bridge:', e && e.message);
+    mcpBridge = null;
+  }
 }
 
 // Origins the user blocked this session. A denial is deliberately NOT
 // persisted: a mis-click must not lock the real extension out forever, and a
 // restart simply asks again.
 const deniedExtensionOrigins = new Set();
-
 /**
  * Ask the user to allow a browser extension (AUD-012).
  *
@@ -259,11 +302,25 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      // Explicit, not implicit: Electron 45 sandboxes renderers when
+      // nodeIntegration is off, but that is a default, not a guarantee — a
+      // future flag could change it silently.
+      sandbox: true,
     },
     backgroundColor: '#080807',
     frame: false,
     titleBarStyle: 'hidden',
   });
+
+  // The window only ever shows the app's own ui/index.html. A navigation (or a
+  // new window) would re-run the preload in a REMOTE page's context, handing
+  // it every IPC channel — read-clipboard, delete-file-from-disk,
+  // add-download. Both are refused outright.
+  mainWindow.webContents.on('will-navigate', (event) => {
+    event.preventDefault();
+    console.warn('[AiDM] navigation refused — the main window stays on ui/index.html');
+  });
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 
   mainWindow.loadFile(path.join(__dirname, 'ui', 'index.html'));
 
@@ -1056,13 +1113,26 @@ ipcMain.handle('get-app-version', () => {
  * Open an external link from the renderer. Allowlist-only: the About panel
  * links to the project's own GitHub pages, and a compromised renderer must
  * never be able to make the shell open an arbitrary URL (v5.9.2 posture).
+ *
+ * The allowlist is checked by PARSED host + path, not by string prefix: a
+ * prefix check also accepts "…/AiDM/../../other/repo" and any host that
+ * merely starts with the allowed text.
  */
-const ALLOWED_EXTERNAL_PREFIX = 'https://github.com/manjayofficial01-ui/AiDM';
+const ALLOWED_EXTERNAL_HOST = 'github.com';
+const ALLOWED_EXTERNAL_PATH_PREFIX = '/manjayofficial01-ui/AiDM';
 ipcMain.handle('open-external', async (event, raw) => {
   const url = String(raw || '');
-  if (!url.startsWith(ALLOWED_EXTERNAL_PREFIX)) return false;
+  let parsed;
   try {
-    await shell.openExternal(url);
+    parsed = new URL(url);
+  } catch (e) {
+    return false;
+  }
+  if (parsed.protocol !== 'https:') return false;
+  if (parsed.hostname.toLowerCase() !== ALLOWED_EXTERNAL_HOST) return false;
+  if (!parsed.pathname.startsWith(ALLOWED_EXTERNAL_PATH_PREFIX)) return false;
+  try {
+    await shell.openExternal(parsed.toString());
     return true;
   } catch (e) {
     console.warn('[AiDM] open-external refused:', e.message);
@@ -1078,18 +1148,14 @@ ipcMain.handle('open-external', async (event, raw) => {
 ipcMain.handle('delete-file-from-disk', async (event, { filepath }) => {
   if (!filepath || typeof filepath !== 'string' || filepath.includes('\0')) return false;
   try {
-    const abs = path.resolve(filepath);
-    const base = path.resolve(downloadManager.settings.defaultSavePath || '');
-    // Also allow any configured category path
-    const allowedRoots = [base];
-    for (const p of Object.values(downloadManager.settings.categoryPaths || {})) {
-      if (p) allowedRoots.push(path.resolve(p));
-    }
-    const underAllowed = allowedRoots.some(root => abs === root || abs.startsWith(root + path.sep));
-    if (!underAllowed) {
-      console.warn('[AiDM] delete refused — outside save paths:', abs);
+    // Realpath-canonicalising containment: a symlink inside the download
+    // folder must not become a door to an arbitrary file on disk.
+    const settings = downloadManager ? downloadManager.getSettings() : null;
+    if (!isAllowedSavePath(settings, filepath, [])) {
+      console.warn('[AiDM] delete refused — outside save paths:', filepath);
       return false;
     }
+    const abs = path.resolve(filepath);
     if (!fs.existsSync(abs)) return false;
     fs.unlinkSync(abs);
     return true;
@@ -1101,6 +1167,22 @@ ipcMain.handle('delete-file-from-disk', async (event, { filepath }) => {
 
 ipcMain.handle('get-settings', async () => {
   return publicSettings(downloadManager.getSettings());
+});
+
+/**
+ * What the Settings pane shows about the MCP bridge: whether it is on,
+ * whether it is listening, where the connection file is and what access
+ * level the app currently allows.
+ */
+ipcMain.handle('get-mcp-status', async () => {
+  const settings = downloadManager.getSettings();
+  return {
+    enabled: settings.mcpEnabled === true,
+    running: !!mcpBridge,
+    level: settings.mcpAccessLevel || 'standard',
+    file: bridgeFile(),
+    command: path.join(__dirname, 'tools', 'aidm-mcp.js'),
+  };
 });
 
 ipcMain.handle('get-network-interfaces', async () => {
@@ -1117,8 +1199,20 @@ ipcMain.handle('get-network-interfaces', async () => {
 
 ipcMain.handle('save-settings', async (event, settings) => {
   assertAllowedSettingsPaths(settings, event);
-  const saved = downloadManager.saveSettings(settings);
+  const payload = { ...(settings && typeof settings === 'object' ? settings : {}) };
+  // The AI API key belongs to the host it was issued for. Pointing the client
+  // at a DIFFERENT host must not carry the stored key along — the key is
+  // dropped unless this very save carries a freshly typed one (the renderer
+  // never receives the stored key, so a key in the payload is always new).
+  const current = downloadManager ? downloadManager.getSettings() : {};
+  if (payload.aiBaseURL && hostOf(payload.aiBaseURL) !== hostOf(current.aiBaseURL) && !payload.aiApiKey) {
+    payload.aiApiKey = '';
+  }
+  const saved = downloadManager.saveSettings(payload);
   syncAiConfig();
+  // The MCP bridge follows its toggle live: turning it on starts the
+  // listener, turning it off closes it and removes the connection file.
+  syncMcpBridge();
   // Keep the scheduler and the timetabled speed limit in sync with edits.
   try { if (scheduler) scheduler.configure(saved); } catch (e) {}
   try { applyTimetableSpeed(); } catch (e) {}
@@ -1259,9 +1353,15 @@ ipcMain.handle('import-settings', async (event, settings) => {
   const payload = (settings && typeof settings === 'object' && !Array.isArray(settings))
     ? { ...settings } : settings;
   if (payload && typeof payload === 'object') delete payload.trustedExtensionOrigins;
-  downloadManager.saveSettings(payload);
+  // An import is a FILE, not a local action: it must not carry a command to
+  // run, the host that receives the AI key, or the binary yt-dlp executes.
+  // Those are set by hand in Settings instead. See src/settings-import.js.
+  const { payload: safe, skipped } = sanitizeImportedSettings(payload);
+  downloadManager.saveSettings(safe);
   syncAiConfig();
-  return publicSettings(downloadManager.getSettings());
+  const result = publicSettings(downloadManager.getSettings());
+  result.skippedOnImport = skipped;
+  return result;
 });
 
 // The renderer's extension indicator asks the main process instead of
@@ -1435,6 +1535,9 @@ if (!gotLock) {
   });
   app.whenReady().then(() => {
     createWindow();
+    // The MCP bridge (when the user turned it on) listens on the loopback
+    // interface only. It never delays the window.
+    syncMcpBridge();
     // Cold start with URLs: the window and manager now exist, so the resolver
     // routing is available. Deliberately not awaited — the window must paint
     // even if a resolver is slow.
@@ -1463,6 +1566,9 @@ app.on('before-quit', () => {
   // Drop queued/retrying webhook deliveries (AUD-013) so no timer or socket
   // outlives the app.
   try { downloadManager.engine.webhooks.close(); } catch (e) { /* not started */ }
+  // Close the MCP bridge and remove its connection file, so a stale file
+  // never points a client at a dead app.
+  try { if (mcpBridge) { const bridge = mcpBridge; mcpBridge = null; bridge.stop(); } } catch (e) { /* not started */ }
 });
 
 app.on('window-all-closed', () => {

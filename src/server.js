@@ -4,6 +4,7 @@ const facebookResolver = require('./facebook-resolver.js');
 const resolvers = require('./resolvers.js');
 const { sanitizeDownloadPayload: sanitizeApiPayload } = require('./download-privacy');
 const { isExtensionOrigin, isPairedExtension, normalizeExtensionOrigin } = require('./extension-pairing');
+const { isAllowedSavePath } = require('./save-paths');
 
 // Headers the extension is allowed to attach to a download so the desktop
 // engine can replay anti-hotlink checks (Referer/Origin/UA). Everything
@@ -110,6 +111,25 @@ function isLocalHost(host) {
     return u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '[::1]';
   } catch (e) {
     return false; // malformed Host  untrusted
+  }
+}
+
+/**
+ * A local web page: http(s) on localhost / 127.0.0.1 / [::1], any port.
+ *
+ * Any other app on this machine (a dev server, a dashboard, a random
+ * localhost site the user visits) serves pages from such an origin and can
+ * therefore REACH this API. Reads are harmless; a state-changing call from
+ * such a page is a cross-site request the browser sends with the user's
+ * session, which is exactly what the origin gate exists to prevent.
+ */
+function isLocalHttpOrigin(origin) {
+  try {
+    const u = new URL(String(origin || ''));
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    return u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '[::1]';
+  } catch (e) {
+    return false;
   }
 }
 
@@ -320,17 +340,13 @@ class IPCServer {
 
   _isAllowedSavePath(p) {
     if (!p || typeof p !== 'string' || p.includes('\0')) return false;
-    let abs;
-    try { abs = path.resolve(p); } catch (e) { return false; }
-    const roots = [];
+    // Realpath-canonicalising containment (src/save-paths.js): a symlink
+    // inside a download folder must not become a door to an arbitrary path.
     try {
-      const s = this.dm.getSettings();
-      if (s.defaultSavePath) roots.push(path.resolve(s.defaultSavePath));
-      for (const cp of Object.values(s.categoryPaths || {})) {
-        if (cp) roots.push(path.resolve(cp));
-      }
-    } catch (e) { /* settings unavailable → deny */ }
-    return roots.some(root => abs === root || abs.startsWith(root + path.sep));
+      return isAllowedSavePath(this.dm.getSettings(), p, []);
+    } catch (e) {
+      return false; // settings unavailable → deny
+    }
   }
 
   start() {
@@ -859,6 +875,14 @@ class IPCServer {
       if (!isTrustedOrigin(origin, this._pairedOrigins())) {
         res.writeHead(403, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Origin not allowed' }));
+        return;
+      }
+      // A local web page is trusted for READS only. A POST from such a page
+      // is a cross-site request the browser sends with the user's session —
+      // refuse it before routing so the side effect never happens.
+      if (origin && isLocalHttpOrigin(origin) && req.method !== 'GET' && req.method !== 'HEAD') {
+        res.writeHead(403, { 'Content-Type': 'application/json', 'Vary': 'Origin' });
+        res.end(JSON.stringify({ error: 'Origin not allowed for state changes' }));
         return;
       }
       serve(req, res, origin);

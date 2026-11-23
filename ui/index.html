@@ -215,7 +215,7 @@
               <th class="col-actions" data-col="actions">Actions<button type="button" class="col-resizer" aria-label="Resize the Actions column" title="Drag to resize • Arrow keys resize • Home resets"></button></th>
             </tr>
           </thead>
-          <tbody id="download-list"></tbody>
+          <tbody id="download-list" role="log" aria-live="polite" aria-relevant="additions text" aria-label="Download list"></tbody>
         </table>
         <div class="empty-state" id="empty-state" style="display:none;" role="status" aria-live="polite">
           <div class="empty-icon" aria-hidden="true"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><use href="#i-download"></use></svg></div>
@@ -516,49 +516,49 @@
             <p class="settings-hint">Files are automatically saved to these folders based on type. Leave empty to use the default path above.</p>
 
             <div class="category-path-row">
-              <span class="category-path-label">Videos</span>
+              <label class="category-path-label" for="cat-path-video">Videos</label>
               <div class="path-input category-path-input">
                 <input type="text" id="cat-path-video" placeholder="Default" />
                 <button class="tool-btn small btn-browse-cat" data-cat="video">Browse</button>
               </div>
             </div>
             <div class="category-path-row">
-              <span class="category-path-label">Music</span>
+              <label class="category-path-label" for="cat-path-audio">Music</label>
               <div class="path-input category-path-input">
                 <input type="text" id="cat-path-audio" placeholder="Default" />
                 <button class="tool-btn small btn-browse-cat" data-cat="audio">Browse</button>
               </div>
             </div>
             <div class="category-path-row">
-              <span class="category-path-label">Documents</span>
+              <label class="category-path-label" for="cat-path-document">Documents</label>
               <div class="path-input category-path-input">
                 <input type="text" id="cat-path-document" placeholder="Default" />
                 <button class="tool-btn small btn-browse-cat" data-cat="document">Browse</button>
               </div>
             </div>
             <div class="category-path-row">
-              <span class="category-path-label">PDFs</span>
+              <label class="category-path-label" for="cat-path-pdf">PDFs</label>
               <div class="path-input category-path-input">
                 <input type="text" id="cat-path-pdf" placeholder="Default" />
                 <button class="tool-btn small btn-browse-cat" data-cat="pdf">Browse</button>
               </div>
             </div>
             <div class="category-path-row">
-              <span class="category-path-label">Archives</span>
+              <label class="category-path-label" for="cat-path-archive">Archives</label>
               <div class="path-input category-path-input">
                 <input type="text" id="cat-path-archive" placeholder="Default" />
                 <button class="tool-btn small btn-browse-cat" data-cat="archive">Browse</button>
               </div>
             </div>
             <div class="category-path-row">
-              <span class="category-path-label">Software</span>
+              <label class="category-path-label" for="cat-path-software">Software</label>
               <div class="path-input category-path-input">
                 <input type="text" id="cat-path-software" placeholder="Default" />
                 <button class="tool-btn small btn-browse-cat" data-cat="software">Browse</button>
               </div>
             </div>
             <div class="category-path-row">
-              <span class="category-path-label">Images</span>
+              <label class="category-path-label" for="cat-path-image">Images</label>
               <div class="path-input category-path-input">
                 <input type="text" id="cat-path-image" placeholder="Default" />
                 <button class="tool-btn small btn-browse-cat" data-cat="image">Browse</button>
@@ -671,6 +671,22 @@
                 </select>
               </div>
             </div>
+            <h4>AI assistants (MCP)</h4>
+            <p class="settings-hint">Let an AI assistant (Claude, Cursor, VS Code…) work with your downloads over the Model Context Protocol. Off by default: while it is off, nothing on this computer can drive AiDM. The bridge listens on the loopback interface only and needs a one-time token, and an assistant can never delete a file or choose a folder.</p>
+            <div class="form-group toggle">
+              <label for="setting-mcp-enabled">Allow AI assistants to use AiDM</label>
+              <input type="checkbox" id="setting-mcp-enabled" />
+            </div>
+            <div class="form-group">
+              <label for="setting-mcp-level">Access level</label>
+              <select id="setting-mcp-level">
+                <option value="look">Look only — read the list and the status</option>
+                <option value="standard">Standard — add, pause, resume, cancel</option>
+                <option value="full">Full — also take a row off the list</option>
+              </select>
+              <div class="settings-hint">The ceiling for every connection. An assistant may ask for less, never for more. Every call is written to the audit log.</div>
+            </div>
+            <div class="settings-hint" id="mcp-status-hint">Not running.</div>
           </section>
 
           <section class="settings-pane" data-settings-pane="features">
@@ -779,7 +795,7 @@
             <input type="date" id="sched-date" />
           </div>
           <div class="form-group" id="sched-days-row" style="display:none;">
-            <label id="sched-days-label">Weekdays</label>
+            <div id="sched-days-label" class="field-label">Weekdays</div>
             <div class="sched-days" id="sched-days" role="group" aria-labelledby="sched-days-label">
               <label><input type="checkbox" value="1" checked /> Mon</label>
               <label><input type="checkbox" value="2" checked /> Tue</label>
@@ -887,7 +903,7 @@
       </div>
       <div class="modal-body">
         <div class="settings-hint" id="ai-model-hint">Primary mimo-v2.5:free → fallback deepseek-v4-flash:free</div>
-        <div id="ai-history" style="max-height:300px;overflow-y:auto;margin:10px 0;display:flex;flex-direction:column;gap:8px;"></div>
+        <div id="ai-history" role="log" aria-live="polite" aria-label="AI conversation" style="max-height:300px;overflow-y:auto;margin:10px 0;display:flex;flex-direction:column;gap:8px;"></div>
         <div class="form-group">
           <label for="ai-input">Ask about downloads, filenames, errors…</label>
           <div class="path-input">
@@ -903,23 +919,23 @@
   </div>
 
   <!-- Context Menu -->
-  <div class="context-menu" id="context-menu" style="display:none;">
-    <div class="ctx-item" data-action="pause"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><use href="#i-pause"></use></svg> Pause</div>
-    <div class="ctx-item" data-action="resume"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><use href="#i-play"></use></svg> Resume</div>
-    <div class="ctx-item" data-action="cancel"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-close"></use></svg> Cancel</div>
+  <div class="context-menu" id="context-menu" role="menu" aria-label="Download actions" style="display:none;">
+    <button type="button" class="ctx-item" data-action="pause"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><use href="#i-pause"></use></svg> Pause</button>
+    <button type="button" class="ctx-item" data-action="resume"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><use href="#i-play"></use></svg> Resume</button>
+    <button type="button" class="ctx-item" data-action="cancel"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-close"></use></svg> Cancel</button>
     <div class="ctx-divider"></div>
-    <div class="ctx-item" data-action="priority-high"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-priority-up"></use></svg> Set high priority</div>
-    <div class="ctx-item" data-action="priority-normal"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-priority-neutral"></use></svg> Set normal priority</div>
-    <div class="ctx-item" data-action="priority-low"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-priority-down"></use></svg> Set low priority</div>
-    <div class="ctx-item" data-action="options"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-gear"></use></svg> Download options…</div>
+    <button type="button" class="ctx-item" data-action="priority-high"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-priority-up"></use></svg> Set high priority</button>
+    <button type="button" class="ctx-item" data-action="priority-normal"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-priority-neutral"></use></svg> Set normal priority</button>
+    <button type="button" class="ctx-item" data-action="priority-low"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-priority-down"></use></svg> Set low priority</button>
+    <button type="button" class="ctx-item" data-action="options"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-gear"></use></svg> Download options…</button>
     <div class="ctx-divider"></div>
-    <div class="ctx-item" data-action="open-file"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-external"></use></svg> Open File</div>
-    <div class="ctx-item" data-action="open-folder"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-folder"></use></svg> Open Containing Folder</div>
-    <div class="ctx-item" data-action="copy-url"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-link"></use></svg> Copy URL</div>
-    <div class="ctx-item" data-action="copy-hash"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-hash"></use></svg> Copy SHA-256</div>
+    <button type="button" class="ctx-item" data-action="open-file"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-external"></use></svg> Open File</button>
+    <button type="button" class="ctx-item" data-action="open-folder"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-folder"></use></svg> Open Containing Folder</button>
+    <button type="button" class="ctx-item" data-action="copy-url"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-link"></use></svg> Copy URL</button>
+    <button type="button" class="ctx-item" data-action="copy-hash"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-hash"></use></svg> Copy SHA-256</button>
     <div class="ctx-divider"></div>
-    <div class="ctx-item" data-action="remove"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-list-x"></use></svg> Remove from list</div>
-    <div class="ctx-item danger" data-action="delete-file"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-trash"></use></svg> Delete from disk…</div>
+    <button type="button" class="ctx-item" data-action="remove"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-list-x"></use></svg> Remove from list</button>
+    <button type="button" class="ctx-item" danger" data-action="delete-file"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-trash"></use></svg> Delete from disk…</button>
   </div>
 
   <!-- Delete Files Confirmation Modal (IDM-style) -->
@@ -986,7 +1002,7 @@
     </div>
   </div>
 
-  <div class="toast-stack" id="toast-stack"></div>
+  <div class="toast-stack" id="toast-stack" role="log" aria-live="polite" aria-label="Notifications"></div>
 
   <script src="download-viz.js"></script>
   <script src="app.js"></script>

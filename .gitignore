@@ -4,6 +4,12 @@ node_modules/
 # Build output (regenerable via npm run dist / electron-builder)
 dist/
 out/
+# Alternate electron-builder output dirs (a failed build leaves a locked
+# win-unpacked.tmp behind; see docs/UPGRADE-PLAN.md)
+dist2/
+dist3/
+dist4/
+dist5/
 
 # Local environment / secrets
 .env

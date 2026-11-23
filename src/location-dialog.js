@@ -25,6 +25,7 @@
 
 const { BrowserWindow, ipcMain, dialog, screen, Notification } = require('electron');
 const path = require('path');
+const { isAllowedSavePath } = require('./save-paths');
 
 const DIALOG_W = 520;
 const DIALOG_H = 452;
@@ -254,6 +255,12 @@ function teardown() {
  * reflected in the initial `location-init` data instead of being lost.
  */
 const latest = new Map(); // id -> payload
+/**
+ * Folders the user approved natively through THIS dialog's Browse button.
+ * A path outside the configured save roots is accepted only when it is one of
+ * these (or inside one of them).
+ */
+const browsedFolders = new Set();
 
 function requestLocation(payload) {
   if (!payload || !payload.id) return;
@@ -294,6 +301,18 @@ async function drain() {
       const dm = getDownloadManager();
       try {
         if (result && result.savePath) {
+          if (dm) {
+            // The dialog can name ANY folder. The IPC edge in main.js
+            // confines save paths to the configured roots (plus folders the
+            // user approved natively) — this window reaches the manager
+            // directly, so it must apply the same confinement itself.
+            const settings = dm.getSettings();
+            if (!isAllowedSavePath(settings, result.savePath, [...browsedFolders])) {
+              console.warn('[AiDM] location dialog refused a save path outside the approved folders');
+              dm.rejectDownload(item.id);
+              return;
+            }
+          }
           if (result.remember && result.category && dm) {
             const s = dm.getSettings();
             dm.saveSettings({
@@ -343,7 +362,14 @@ function init(opts = {}) {
     return true;
   });
 
-  ipcMain.handle('location-browse', async () => pickFolder(dialogWin));
+  ipcMain.handle('location-browse', async () => {
+    const picked = await pickFolder(dialogWin);
+    // A folder the user picked natively is APPROVED: it becomes a valid save
+    // root for this session, exactly like a folder approved through the main
+    // window's Browse button.
+    if (picked) browsedFolders.add(picked);
+    return picked;
+  });
 }
 
 module.exports = {

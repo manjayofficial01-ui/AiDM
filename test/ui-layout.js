@@ -60,7 +60,9 @@ check('download area can shrink with the window',
 check('table scrolls both axes instead of clipping',
   /\.download-table-container\s*\{[^}]*overflow:\s*auto/.test(css));
 check('name column is flexible (no 250px floor)',
-  !/\.col-name\s*\{\s*min-width:\s*250px/.test(css) && /\.col-name\s*\{[^}]*min-width:\s*140px/.test(css));
+  !/\.col-name\s*\{\s*min-width:\s*250px/.test(css) && /\.col-name\s*\{[^}]*width:\s*auto/.test(css));
+check('the name column keeps a floor (140px) enforced by the renderer',
+  /COL_MIN_WIDTH\s*=\s*\{[^}]*name:\s*140/.test(app));
 check('file names fill the cell instead of a fixed 300px cap',
   !/max-width:\s*300px/.test(css));
 
@@ -82,7 +84,12 @@ check('modals cap to the viewport',
 check('status bar wraps instead of overflowing',
   /\.status-bar\s*\{[^}]*flex-wrap:\s*wrap/.test(css));
 check('narrow-window rules shed chrome',
-  /@media\s*\(max-width:\s*640px\)/.test(css) && /\.app-subtitle\s*\{\s*display:\s*none/.test(css));
+  /@media\s*\(max-width:\s*1000px\)/.test(css) && /\.app-subtitle\s*\{\s*display:\s*none/.test(css));
+check('the narrow-window breakpoint is reachable (the window minimum is 900px)',
+  (() => {
+    const widths = [...css.matchAll(/@media\s*\(max-width:\s*(\d+)px\)/g)].map(m => Number(m[1]));
+    return widths.length > 0 && widths.every(w => w >= 900);
+  })());
 check('form rows wrap in narrow modals',
   /\.form-row\s*\{[^}]*flex-wrap:\s*wrap/.test(css));
 

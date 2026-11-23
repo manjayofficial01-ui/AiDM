@@ -30,10 +30,17 @@ const context = vm.createContext({
   downloadManager: manager,
   ipcMain: { handle: (name, handler) => handlers.set(name, handler) },
   assertAllowedSettingsPaths() {}, syncAiConfig() {}, applyTimetableSpeed() {},
+  syncMcpBridge() {},
   scheduler: null, clipboardMonitor: null, tray: null,
 });
 const viewPath = path.join(__dirname, '../src/settings-view.js');
 if (fs.existsSync(viewPath)) Object.assign(context, require(viewPath));
+// The settings handlers now consult the import sanitizer and the AI host
+// helper — inject them the same way the view module is injected.
+const importPath = path.join(__dirname, '../src/settings-import.js');
+if (fs.existsSync(importPath)) Object.assign(context, require(importPath));
+const aiPath = path.join(__dirname, '../src/ai-service.js');
+if (fs.existsSync(aiPath)) Object.assign(context, { hostOf: require(aiPath).hostOf });
 for (const name of ['get-settings', 'save-settings', 'import-settings', 'export-settings']) {
   const match = new RegExp("ipcMain\\.handle\\('" + name + "'[\\s\\S]*?\\n\\}\\);").exec(source);
   assert.ok(match, name);

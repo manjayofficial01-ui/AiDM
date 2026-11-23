@@ -28,10 +28,14 @@
   --on-danger: #080807;
   --text-primary: #EEEEEB;
   --text-secondary: #B4B4AC;
-  --text-muted: #7B7B74;
+  /* 5.76:1 on the canvas, 5.43:1 on a surface, 4.80:1 on an elevated panel
+     (was 4.70 / 4.43 / 3.92 — below 4.5:1 on two of the three). */
+  --text-muted: #8A8A82;
   --border: #292926;
   --border-light: #3B3A35;
-  --progress-bg: #20201E;
+  /* 3.06:1 against the canvas — the pending segment track must be visible
+     (WCAG 1.4.11 needs 3:1 for a meaningful graphic). */
+  --progress-bg: #5E5E56;
   --progress-fill: linear-gradient(90deg, #1FA04A, #2ADB5C 70%, #8EE5A1);
   --progress-done-fill: linear-gradient(90deg, #3FAF72, var(--success));
   --shadow: 0 12px 40px rgba(0, 0, 0, .55), 0 0 0 1px rgba(255, 255, 255, .04);
@@ -88,26 +92,32 @@ html[data-theme="light"] {
   --bg-hover: #E8EFF8;
   --accent: #2563EB;
   --accent-rgb: 37, 99, 235;
-  --accent-soft: #3B82F6;
+  /* --accent-soft carries TEXT in several rules (status value, sortable
+     headers, sidebar counts) — it must clear 4.5:1 on the light canvas, so
+     it is a DEEPER blue than --accent, not a lighter one. */
+  --accent-soft: #1D4ED8;
   --accent-glow: rgba(37, 99, 235, .18);
-  --accent-dark: #1D4ED8;
-  --success: #059669;
-  --success-rgb: 5, 150, 105;
-  --warning: #D97706;
-  --warning-rgb: 217, 119, 6;
-  --error: #DC2626;
-  --error-rgb: 220, 38, 38;
+  --accent-dark: #1E3A8A;
+  --success: #047857;
+  --success-rgb: 4, 120, 87;
+  --warning: #92400E;
+  --warning-rgb: 146, 64, 14;
+  --error: #B91C1C;
+  --error-rgb: 185, 28, 28;
   --on-accent: #FFFFFF;
   --on-danger: #FFFFFF;
   --fresh-rgb: 124, 58, 237;
   --text-primary: #0F1B2D;
   --text-secondary: #33445C;
-  --text-muted: #6B7C93;
+  /* 4.91:1 on the canvas, 4.61:1 on the secondary surface (was 4.04 / 3.79). */
+  --text-muted: #5F6E85;
   --border: #D5DEEB;
   --border-light: #BCC9DB;
-  --progress-bg: #E2EAF5;
+  /* 3.19:1 against the canvas — the pending segment track must be visible
+     (WCAG 1.4.11 needs 3:1 for a meaningful graphic). */
+  --progress-bg: #7E8DA4;
   --progress-fill: linear-gradient(90deg, #2563EB, #60A5FA 70%, #93C5FD);
-  --progress-done-fill: linear-gradient(90deg, #059669, var(--success));
+  --progress-done-fill: linear-gradient(90deg, #047857, var(--success));
   --shadow: 0 16px 48px rgba(15, 27, 45, .14), 0 0 0 1px rgba(15, 27, 45, .04);
   --glass: rgba(255, 255, 255, .86);
   --glass-border: rgba(15, 27, 45, .06);
@@ -117,14 +127,14 @@ html[data-theme="light"] {
 
   /* Semantic state contract — light-theme values (same roles, darker ink). */
   --state-success: var(--success);
-  --state-success-bg: rgba(5, 150, 105, .10);
-  --state-success-border: rgba(5, 150, 105, .30);
+  --state-success-bg: rgba(4, 120, 87, .10);
+  --state-success-border: rgba(4, 120, 87, .30);
   --state-warning: var(--warning);
-  --state-warning-bg: rgba(217, 119, 6, .10);
-  --state-warning-border: rgba(217, 119, 6, .30);
+  --state-warning-bg: rgba(146, 64, 14, .10);
+  --state-warning-border: rgba(146, 64, 14, .30);
   --state-danger: var(--error);
-  --state-danger-bg: rgba(220, 38, 38, .09);
-  --state-danger-border: rgba(220, 38, 38, .28);
+  --state-danger-bg: rgba(185, 28, 28, .09);
+  --state-danger-border: rgba(185, 28, 28, .28);
   --state-info: var(--accent);
   --state-info-bg: rgba(37, 99, 235, .09);
   --state-info-border: rgba(37, 99, 235, .28);
@@ -134,9 +144,9 @@ html[data-theme="light"] {
   --state-fresh: #7C3AED;
   --state-fresh-bg: rgba(124, 58, 237, .09);
   --state-fresh-border: rgba(124, 58, 237, .28);
-  --state-pending: #EA580C;
-  --state-pending-bg: rgba(234, 88, 12, .10);
-  --state-pending-border: rgba(234, 88, 12, .30);
+  --state-pending: #C2410C;
+  --state-pending-bg: rgba(194, 65, 12, .10);
+  --state-pending-border: rgba(194, 65, 12, .30);
 
   --elevation-1: 0 1px 2px rgba(15, 27, 45, .08), 0 0 0 1px rgba(15, 27, 45, .04);
   --elevation-2: var(--shadow);
@@ -217,8 +227,12 @@ svg.icon, .btn-icon svg, .cat-icon svg, .empty-icon svg, .modal-header svg, .ctx
 .title-btn:hover { background: rgba(255,255,255,.10); color: #fff; }
 .btn-close:hover { background: #E11D48; color: white; }
 
-/* ── Narrow windows: shed chrome, keep function ──────────────────────────── */
-@media (max-width: 640px) {
+/* ── Narrow windows: shed chrome, keep function ────────────────────────────
+   The breakpoint must be REACHABLE: main.js pins minWidth to 900, so the old
+   640px query could never fire — it was dead CSS pretending to be responsive.
+   1000px is the first width where the chrome actually starts to crowd the
+   download list, so that is where these rules live now. */
+@media (max-width: 1000px) {
   .app-subtitle { display: none; }
   .toolbar { padding: 6px 8px; gap: 6px 8px; }
   .speed-label, .status-label { display: none; }
@@ -430,7 +444,15 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
 
 /* ── Download Table ────────────────────────────────────────────────────────── */
 
-.download-table-container { flex: 1; overflow: auto; position: relative; min-width: 0; }
+.download-table-container {
+  flex: 1; overflow: auto; position: relative; min-width: 0;
+}
+.download-table {
+  width: 100%; border-collapse: collapse; font-size: 12px; table-layout: fixed;
+  /* A floor under the table: the sum of the column floors is 626px, so below
+     that the table scrolls instead of crushing the columns further. */
+  min-width: 626px;
+}
 
 /* Photoshop-style marquee (rubber-band) selection rectangle */
 .marquee-rect {
@@ -458,6 +480,11 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
 }
 .col-resizer:hover::after { background: rgba(var(--accent-rgb), .55); }
 .col-resizer.dragging::after { background: rgba(var(--accent-rgb), .85); }
+/* The grab strip straddles the column edge (right: -7px), so the LAST column's
+   handle used to push 7px past the table and hand the container a pointless
+   horizontal scrollbar. Pull the final handle inside the table. */
+.download-table th:last-child .col-resizer { right: 0; }
+.download-table th:last-child .col-resizer::after { left: auto; right: 6px; }
 .download-table th {
   background: color-mix(in srgb, var(--bg-secondary) 92%, var(--accent) 8%);
   padding: 9px 12px; text-align: left;
@@ -486,14 +513,24 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
 .download-table tbody tr.selected { background: var(--row-selected); }
 .download-table tbody tr.selected td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
 
+/* Column budget.
+   `table-layout: fixed` distributes the table width over the columns from
+   their FIRST-ROW widths and ignores a cell's `min-width`, so the old
+   min-width-only columns (name, progress) collapsed to 78px while the
+   Actions column was pushed out of the 682px table area entirely.
+   Every column now has an explicit width and the file name takes the
+   leftover, so the table always ends flush with its container. The sum of
+   the floors is 622px — below the app's narrowest table area (682px at the
+   900px minimum window), so the columns fit without a horizontal scroll and
+   without dropping any information. */
 .col-check { width: 36px; text-align: center; }
-.col-name { min-width: 140px; }
-.col-size { width: 86px; }
-.col-dims { width: 96px; }
-.col-progress { min-width: 130px; }
-.col-speed { width: 84px; }
-.col-status { width: 116px; }
-.col-actions { width: 108px; }
+.col-name { width: auto; }
+.col-size { width: 70px; }
+.col-dims { width: 78px; }
+.col-progress { width: 108px; }
+.col-speed { width: 66px; }
+.col-status { width: 90px; }
+.col-actions { width: 84px; }
 
 .file-info { display: flex; align-items: center; gap: 10px; }
 .file-icon {
@@ -938,7 +975,8 @@ textarea:focus-visible {
 }
 
 .form-group { margin-bottom: 14px; }
-.form-group label {
+.form-group label,
+.form-group .field-label {
   display: block; font-size: 11.5px; font-weight: 600;
   color: var(--text-secondary); margin-bottom: 5px;
   letter-spacing: .2px;
@@ -1202,7 +1240,13 @@ textarea:focus-visible {
   padding: 8px 12px; font-size: 12.5px; color: var(--text-primary);
   cursor: pointer; transition: background .12s;
   border-radius: 8px;
+  /* The items are real <button>s now: a menu item must be focusable and
+     reachable by keyboard (WCAG 2.1.1). Reset the button chrome so they
+     still look like menu rows. */
+  width: 100%; text-align: left; font-family: inherit;
+  background: none; border: 0;
 }
+.ctx-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .ctx-item svg { color: var(--text-muted); flex-shrink: 0; }
 .ctx-item:hover { background: var(--row-hover); }
 .ctx-item:hover svg { color: var(--accent-soft); }

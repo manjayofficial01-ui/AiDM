@@ -5,6 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const { sanitizeDownloadPayload } = require('./download-privacy');
 const { isGenericFilename, cleanPageTitle, specificUrlBasename } = require('./titles');
+const { isInterpreterExe, interpreterRefusalReason } = require('./exec-safety');
 const { DEFAULT_INTERCEPT_TYPES } = require('./scheduler');
 const { muxAudioVideo, isAvailable: ffmpegAvailable, facebookMediaHeaders } = require('./media-mux');
 const ytdlp = require('./yt-dlp');
@@ -223,11 +224,8 @@ function splitCommandLine(cmd) {
 
 // Shells and script interpreters execute their argument by association —
 // spawn("cmd.exe", ["…\\evil.bat"]) runs the batch. The post-download hook
-// must never hand a server-named file to one of these.
-function isInterpreterExe(exe) {
-  const base = path.basename(String(exe || '')).toLowerCase();
-  return /^(cmd|command|cmd32|cmd64|wscript|cscript|mshta|rundll32|regsvr32)(\.(exe|com))?$/.test(base);
-}
+// must never hand a server-named file to one of these. The rule itself
+// lives in src/exec-safety.js so it can be unit-tested on its own.
 
 /**
  * Pick the file yt-dlp actually produced for `stem` inside `dir`.
@@ -711,6 +709,12 @@ const DEFAULT_SETTINGS = {
   // Clipboard/AI row summary toggle checked by _aiSummarize; the settings UI
   // writes it, so it must exist in the defaults (was a phantom key in v4).
   aiSummarize: true,
+  // AI assistants (MCP): the local bridge an assistant talks to. Off until
+  // the user turns it on — an assistant must never be able to drive the app
+  // by accident. The access level is the ceiling for every connection: a
+  // client may ask for less, never for more.
+  mcpEnabled: false,
+  mcpAccessLevel: 'standard',
 };
 
 class DownloadManager extends EventEmitter {
@@ -1825,7 +1829,7 @@ class DownloadManager extends EventEmitter {
       // the batch file. The hook exists for direct tools (an antivirus
       // scanner); interpreters are refused outright.
       if (isInterpreterExe(exe)) {
-        dl.postDownloadResult = 'Refused: the post-download command may not be a shell or script interpreter (cmd/wscript/cscript/mshta/rundll32/regsvr32) — a downloaded file could carry an attacker-chosen name.';
+        dl.postDownloadResult = interpreterRefusalReason(exe);
         this._persistDownloads(true);
         return;
       }
@@ -2896,11 +2900,21 @@ class DownloadManager extends EventEmitter {
     return true;
   }
 
-  removeDownload(id) {
+  /**
+   * Take a row off the list.
+   *
+   * `opts.keepFiles` keeps the bytes on disk. The app's own remove button
+   * deletes a torrent's payload (that is what the user asked for), but the
+   * MCP bridge always passes keepFiles: an assistant may take a row off the
+   * list, never delete what it downloaded.
+   * @param {string} id
+   * @param {{ keepFiles?: boolean }} [opts]
+   */
+  removeDownload(id, opts = {}) {
     const dl = this.downloads.get(id);
     if (!dl) return false;
     dl._cancelRequested = true;
-    if (dl.isTorrent) this.torrent.remove(id, { deleteFiles: true });
+    if (dl.isTorrent) this.torrent.remove(id, { deleteFiles: opts.keepFiles !== true });
     // Cancel unconditionally (a no-op when the engine isn't running it): a
     // 'connecting' download used to survive removal and start anyway,
     // writing a file for a row that no longer exists.

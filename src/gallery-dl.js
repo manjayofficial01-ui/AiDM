@@ -29,10 +29,11 @@
  * Update logistics: gallery-dl's stable channel moved to Codeberg and its
  * built-in self-updater still targets GitHub (404 today), so AiDM owns the
  * update path — Codeberg for stable, gdl-org/builds for nightly — exactly
- * like the yt-dlp flow. No published SHA256SUMS ship with these releases, so
- * the downloaded binary is validated by EXECUTING it (`--version` must answer
- * in the expected shape) before it replaces the old one; a binary that does
- * not run never lands in the bin dir.
+ * like the yt-dlp flow. Stable releases publish a SHA256SUMS file, so the
+ * downloaded binary is verified against it BEFORE it is executed; the
+ * nightly channel publishes no sums and is validated by EXECUTING it
+ * (`--version` must answer in the expected shape) before it replaces the old
+ * one; a binary that does not run never lands in the bin dir.
  */
 
 'use strict';
@@ -193,7 +194,36 @@ async function fetchLatestRelease(channel) {
   const assets = Array.isArray(rel.assets) ? rel.assets : [];
   const asset = assets.find((a) => a && a.name === 'gallery-dl.exe' && a.browser_download_url);
   if (!asset) throw new Error('The latest gallery-dl release (' + rel.tag_name + ') has no Windows binary attached.');
-  return { tag: rel.tag_name, assetUrl: asset.browser_download_url, assetName: 'gallery-dl.exe' };
+  // The release also publishes SHA256SUMS — verify the binary against it.
+  const sums = assets.find((a) => a && a.name === 'SHA256SUMS' && a.browser_download_url);
+  return {
+    tag: rel.tag_name,
+    assetUrl: asset.browser_download_url,
+    assetName: 'gallery-dl.exe',
+    sumsUrl: sums ? sums.browser_download_url : null,
+  };
+}
+
+/**
+ * The SHA-256 a `SHA256SUMS` file lists for `name`.
+ *
+ * @param {string} text the SHA256SUMS file body
+ * @param {string} name the asset name
+ * @returns {string|null} the lowercase hex digest, or null
+ */
+function parseSums(text, name) {
+  const wanted = String(name || '').toLowerCase();
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const m = /^\s*([0-9a-f]{64})\s+\*?(.+?)\s*$/i.exec(line);
+    if (!m) continue;
+    if (String(m[2]).toLowerCase() === wanted) return m[1].toLowerCase();
+  }
+  return null;
+}
+
+/** SHA-256 of a buffer, lowercase hex. */
+function sha256(buf) {
+  return require('crypto').createHash('sha256').update(buf).digest('hex');
 }
 
 function httpsGetJson(url) {
@@ -253,6 +283,24 @@ async function installGalleryDl({ channel = 'stable', log = () => {} } = {}) {
     log('Downloaded ' + Math.round(n / 1024) + ' KB…');
   });
   if (buf.length < 1024 * 1024) throw new Error('The downloaded gallery-dl binary is suspiciously small — refusing to install it.');
+
+  // Verify BEFORE anything is executed: "the binary runs" is not proof of
+  // provenance, and running an unverified binary IS running it.
+  let verified = false;
+  if (rel.sumsUrl) {
+    const sumsText = (await httpsGet(rel.sumsUrl, 30000, 1024 * 1024)).toString('utf8');
+    const expected = parseSums(sumsText, rel.assetName);
+    if (!expected) throw new Error('No published checksum for ' + rel.assetName + ' — nothing was installed.');
+    const actual = sha256(buf);
+    if (actual !== expected) {
+      throw new Error('Checksum mismatch for ' + rel.assetName + ' — expected ' + expected + ' got ' + actual + '. Nothing was installed.');
+    }
+    verified = true;
+    log('Checksum verified (' + actual.slice(0, 16) + '…)');
+  } else {
+    log('WARNING: this release publishes no SHA256SUMS — installing without checksum verification.');
+  }
+
   fs.writeFileSync(staging, buf);
 
   // Validate by executing: `--version` must answer in the expected shape

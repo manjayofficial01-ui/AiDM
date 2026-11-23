@@ -38,6 +38,8 @@ contextBridge.exposeInMainWorld('aidm', {
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (settings) => ipcRenderer.invoke('save-settings', settings),
   getNetworkInterfaces: () => ipcRenderer.invoke('get-network-interfaces'),
+  // AI assistants (MCP): whether the local bridge is on and what it allows.
+  getMcpStatus: () => ipcRenderer.invoke('get-mcp-status'),
 
   // yt-dlp engine (Settings › YouTube): detected version + one-click update
   getYtDlpStatus: () => ipcRenderer.invoke('yt-dlp-status'),
