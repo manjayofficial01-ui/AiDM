@@ -98,6 +98,24 @@ check('short but sizable file kept (needs both signals)',
 check('long audio-kept? no — trackless always drops',
   ctDrop({ probed: true, hasVideo: false, durationSec: 0, sizeBytes: 0 }) === 'audio');
 
+// ── 1b. playlist exemption ("badge 6 · 0 downloadable links", 2026-11-23) ──
+// mindgeek-class CDNs ship manifests as audio/x-mpegurl (legacy Apple type);
+// the audio verdict must never fire for a manifest URL. All three copies.
+const TOKENED = 'https://stream-private-ht.project1content.com/hls/ab12cd34ef56/video/0a1b2c3d4e5f.mp4/master.m3u8?validto=1799999999&ip=192.0.2.9&hash=feedface';
+const TOKENED_MPD = 'https://cdn.example.com/video/0a1b.mpd?token=t';
+for (const [name, drop] of [['content', ctDrop], ['background', bgDrop], ['popup', popDrop]]) {
+  check(name + ': audio/x-mpegurl manifest KEPT (the empty-pill bug)',
+    drop({ contentType: 'audio/x-mpegurl', url: TOKENED }) === null);
+  check(name + ': audio/mpegurl manifest KEPT',
+    drop({ contentType: 'audio/mpegurl', url: TOKENED }) === null);
+  check(name + ': audio type on .mpd manifest KEPT',
+    drop({ contentType: 'audio/aac', url: TOKENED_MPD }) === null);
+  check(name + ': audio type on a real file still drops',
+    drop({ contentType: 'audio/mp4', url: 'https://cdn.example.com/media/audio-slice.mp4' }) === 'audio');
+  check(name + ': audio type with NO url still drops (fail closed)',
+    drop({ contentType: 'audio/mp4' }) === 'audio');
+}
+
 // ── 2. parity across copies ────────────────────────────────────────────────
 {
   const corpus = [
@@ -136,8 +154,8 @@ check('progressive mp4 is not a dash signal',
 }
 
 // ── 4. wiring ──────────────────────────────────────────────────────────────
-check('capsule drops audio-typed candidates',
-  /dropVideoCandidate\(\{ contentType: nm && nm\.contentType \}\)/.test(ctSrc));
+check('capsule drops audio-typed candidates (url passed for playlist exemption)',
+  /dropVideoCandidate\(\{ contentType: nm && nm\.contentType, url: v\.url \}\)/.test(ctSrc));
 check('capsule drops probed junk rows + refreshes counts',
   /dropVideoCandidate\(\{\s*contentType: null,/.test(ctSrc) && /dropRow\(v, row\)/.test(ctSrc));
 check('capsule shows protected row when stranded',
@@ -147,10 +165,10 @@ check('probe reports duration for preview detection',
   /durationSec/.test(ctSrc));
 check('background tracks dash traffic + flags panel data',
   /isDashSignalUrl\(details\.url\)/.test(bgSrc) && /dashActive: isDashActiveTab/.test(bgSrc));
-check('background drops audio variants before the picker',
-  /dropVideoCandidate\(\{ contentType: mm && mm\.contentType \}\)/.test(bgSrc));
-check('popup drops audio variants',
-  /dropVideoCandidateInline\(\{ contentType: ct \}\)/.test(popSrc));
+check('background drops audio variants before the picker (url passed)',
+  /dropVideoCandidate\(\{ contentType: mm && mm\.contentType, url: v\.url \}\)/.test(bgSrc));
+check('popup drops audio variants (url passed)',
+  /dropVideoCandidateInline\(\{ contentType: ct, url: m\.url \}\)/.test(popSrc));
 
 console.log(`\nfacebook-junk: ${pass} passed, ${fail} failed`);
 process.exitCode = fail ? 1 : 0;

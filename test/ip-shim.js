@@ -9,14 +9,23 @@
 // Run: node test/ip-shim.js
 'use strict';
 
+const path = require('path');
+
 let pass = 0, fail = 0;
 function check(name, cond, extra) {
   if (cond) { pass++; console.log('  OK   ' + name + (extra ? ' — ' + extra : '')); }
   else { fail++; console.log('  FAIL ' + name + (extra ? ' — ' + extra : '')); }
 }
 
-// Load through the SAME path shape the tracker's ESM import resolves to.
-const ip = require('../node_modules/bittorrent-tracker/node_modules/ip');
+// Load through the SAME resolution the tracker's import uses. The npm
+// override maps `ip` → the audited shim everywhere; WHERE it lands in the
+// tree is npm-version-dependent (older installs nested a copy under
+// bittorrent-tracker, newer ones dedupe flat) — resolve from the tracker's
+// own context instead of hardcoding a tree shape.
+const TRACKER_DIR = path.join(__dirname, '..', 'node_modules', 'bittorrent-tracker');
+const ip = require(require.resolve('ip', { paths: [TRACKER_DIR] }));
+check('tracker resolves ip to the audited shim',
+  require.resolve('ip', { paths: [TRACKER_DIR] }).replace(/\\/g, '/').indexOf('tools/shims/node-ip') > 0);
 
 console.log('\n── 1. GHSA-2p57-rm9w-gvfp: shorthand loopbacks are never public ──');
 for (const addr of ['127.1', '0x7f.1', '012.1.2.3', '000:0:0000::01', '127.0.0.1', '10.0.0.1', '172.16.0.1', '192.168.1.1', '0.0.0.0', '169.254.1.1', '100.64.0.1']) {
@@ -69,7 +78,7 @@ check('isLoopback', ip.isLoopback('127.0.0.1') === true && ip.isLoopback('127.1'
 console.log('\n── 5. ESM default-import interop (how the tracker loads it) ──');
 const { pathToFileURL } = require('url');
 (async () => {
-  const mod = await import(pathToFileURL(require.resolve('../node_modules/bittorrent-tracker/node_modules/ip')).href);
+  const mod = await import(pathToFileURL(require.resolve('ip', { paths: [TRACKER_DIR] })).href);
   check('default export is the api object', typeof mod.default.isPublic === 'function' && typeof mod.default.toString === 'function');
 
   console.log(`\n${pass} passed, ${fail} failed`);

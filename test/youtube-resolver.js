@@ -386,7 +386,10 @@ eq('empty meta → no fields', Object.keys(youtubeFields(null)).length, 0);
 
 console.log('\nDuplicate detection (same page, different quality)');
 const dupCtx = (rows) => ({ downloads: new Map(rows.map(r => [r.id, r])) });
-const existing = { id: 'a', url: CANON, _normUrl: 'norm-yt', ytFormat: { formatId: '137', audioFormatId: '140', progressive: false } };
+// v5.9.4 semantics: only LIVE rows dedupe (queued/downloading/paused/…) — a
+// finished row must never bounce a re-download (test/re-download.js locks
+// that). The fixture row is therefore an in-flight download.
+const existing = { id: 'a', status: 'downloading', url: CANON, _normUrl: 'norm-yt', ytFormat: { formatId: '137', audioFormatId: '140', progressive: false } };
 const c1 = dupCtx([existing]);
 check('same url + same quality is a duplicate',
   DownloadManager.prototype.findDuplicate.call(c1, CANON, { formatId: '137' }) === existing);
@@ -396,7 +399,10 @@ check('normalized match + different quality is NOT a duplicate',
   DownloadManager.prototype.findDuplicate.call(c1, 'https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=9', { formatId: '248' }) === null);
 check('no format given keeps the old behaviour (duplicate)',
   DownloadManager.prototype.findDuplicate.call(c1, CANON, null) === existing);
-const c2 = dupCtx([{ id: 'b', url: 'https://cdn.example.com/clip.mp4', _normUrl: 'norm-file' }]);
+check('a COMPLETED row never dedupes (re-download fix)',
+  DownloadManager.prototype.findDuplicate.call(
+    dupCtx([{ ...existing, status: 'completed' }]), CANON, { formatId: '137' }) === null);
+const c2 = dupCtx([{ id: 'b', status: 'downloading', url: 'https://cdn.example.com/clip.mp4', _normUrl: 'norm-file' }]);
 check('non-YouTube urls are unaffected',
   DownloadManager.prototype.findDuplicate.call(c2, 'https://cdn.example.com/clip.mp4') !== null);
 check('unrelated url → null',

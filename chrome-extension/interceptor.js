@@ -88,14 +88,16 @@
   const AUDIO_RE = /\.(mp3|wav|flac|aac|ogg|wma|m4a|opus)(\?|#|$)/i;
   const CDN_RE = /googlevideo\.com|cdn.*video|video.*cdn|\.cdn\.|akamaihd\.net|cloudfront\.net|fastly|fbcdn\.net|scontent\.|cdninstagram\.com/i;
   const XTREAM_RE = /\/(live|movie|series)\/[^/?#]+\/[^/?#]+\/\d+(?:\.(m3u8|ts|mp4|mkv|avi))?(?:$|[/?#])/i;
-  const PATH_RE = /videoplayback|\/get_file\/|\/hls\/|\/dash\/|\/mp4\/|\/videos?\/|video\.php|watchparty|\/reel/i;
+  const PATH_RE = /videoplayback|\/get_file\/|\/get_video\?|\/hls\/|\/dash\/|\/mp4\/|\/videos?\/|video\.php|watchparty|\/reel/i;
   const IMAGE_RE = /\.(jpe?g|png|gif|webp|avif|bmp|svg|tiff?|ico|heic|heif)(\?|#|$)/i;
   // Facebook video hosts — extensionless …/v/t… URLs carry no .mp4 suffix.
   const FB_HOST_RE = /fbcdn\.net|scontent\.|facebook\.com|fb\.com|instagram\.com|cdninstagram\.com/i;
   const FB_VIDEO_PATH_RE = /\/v\/t|video\.php|playable|bytestart|\/dash\/|\/hls\//i;
   // Raw DASH/HLS segments are never playable downloads — one video would
   // otherwise surface as dozens of seg-3.m4s / chunk rows.
-  const SEGMENT_RE = /\.m4s($|\?|#|;)|init\.mp4($|\?|#)|seg-?\d+|chunklist|fragment|frag-?\d+|\/range\//i;
+  // init[-_]*.mp4: mindgeek init segments (init-v1-a1.mp4) — keep in sync
+  // with SEGMENT_RE in content.js / SEGMENT_URL_RE in background.js.
+  const SEGMENT_RE = /\.m4s($|\?|#|;)|init\.mp4($|\?|#)|init[-_][^/?#]*\.mp4($|\?|#)|seg-?\d+|chunklist|fragment|frag-?\d+|\/range\//i;
 
   function isSegmentUrl(url) {
     if (!url || typeof url !== 'string') return false;
@@ -262,6 +264,31 @@
         urls.forEach(u => notifyUrl(u, { via, contentType: 'video/mp4' }));
       }
     } catch (e) { /* swallow */ }
+  }
+
+  // ── Generic manifest-in-body scan ───────────────────────────────────────────
+  // SPA data APIs (mindgeek /v2/releases, CMS "player config" endpoints, …)
+  // return JSON bodies that embed the real master.m3u8 / .mpd URLs — often
+  // the ONLY place the master appears before the player fetches anything, and
+  // independent of the player entirely (a page whose hls.js fetch rides a
+  // worker, or whose prototypes are frozen against patching, still hands the
+  // master over here). Bounded: cheap text gate, 3 MB cap, max 6 URLs,
+  // dedupe via notifyUrl's sentUrls.
+  function notifyManifestsInBody(text, via) {
+    if (!text || typeof text !== 'string' || text.length < 16 || text.length > 3000000) return;
+    if (!/\.m3u8|\.mpd/i.test(text)) return;
+    let norm;
+    try {
+      // JSON-escaped forms: "https:\/\/cdn…m3u8?…\u0026hash=…"
+      norm = text.replace(/\\u002[fF]/g, '/').replace(/\\\//g, '/').replace(/\\u0026/g, '&');
+    } catch (e) { return; }
+    const re = /https?:\/\/[^\s"'`<>\\]{1,400}\.(?:m3u8|mpd)(?:\?[^\s"'`<>\\]{0,400})?/gi;
+    let m;
+    let count = 0;
+    while ((m = re.exec(norm)) !== null && count < 6) {
+      notifyUrl(m[0], { via });
+      count++;
+    }
   }
 
   /**
@@ -440,6 +467,20 @@
             }
             if (body) notifyTwitterMp4s(body, 'twitter-xhr');
           }
+          // SPA data APIs embed the real master playlist URLs in JSON bodies
+          // (mindgeek releases, CMS player configs) — often BEFORE the
+          // player's own manifest XHR, and independent of it entirely.
+          if (url2 && !isSegmentUrl(url2)) {
+            try {
+              const rt = this.responseType;
+              if (rt === '' || rt === 'text') {
+                const ct2 = String(ct || '');
+                if (!ct2 || /json|javascript|text\/plain|xml/i.test(ct2)) {
+                  notifyManifestsInBody(this.responseText, 'xhr-json');
+                }
+              }
+            } catch (e) { /* responseText unavailable — skip */ }
+          }
         } catch (e) { /* swallow */ }
       }, { once: true });
     } catch (e) { /* swallow */ }
@@ -482,6 +523,17 @@
               const cloned = resp.clone();
               cloned.text()
                 .then(body => notifyTwitterMp4s(body, 'twitter-graphql'))
+                .catch(() => { /* swallow */ });
+            } catch (e) { /* swallow */ }
+          }
+          // Generic manifest-in-JSON scan (see notifyManifestsInBody) — the
+          // same clone trick, bounded by its own gates. Text-typed responses
+          // only; media/segment downloads skip on both the URL and CT gate.
+          if (!isSegmentUrl(finalUrl) && (!ct || /json|javascript|text\/plain|xml/i.test(ct))) {
+            try {
+              const cloned2 = resp.clone();
+              cloned2.text()
+                .then(body => notifyManifestsInBody(body, 'fetch-json'))
                 .catch(() => { /* swallow */ });
             } catch (e) { /* swallow */ }
           }

@@ -69,7 +69,7 @@ const KEY_STATE_TTL_MS = 4000;
 // Catches manifests / media that page-level scans miss: players (Nubiles,
 // Xtream, …) load .m3u8/.mp4 over XHR/fetch with no plain <video src>.
 const STREAM_REQ_RE = /\.(m3u8|mpd|mp4|m4v|webm|mkv|mov|ts|m4s|key|akamai)($|\?|#)/i;
-const STREAM_PATH_RE = /videoplayback|\/live\/|\/movie\/|\/series\/|\/hls\/|\/get_file\/|\/mp4\/|\.akamaihd\.net|\/secure\/|\/videos?\//i;
+const STREAM_PATH_RE = /videoplayback|\/live\/|\/movie\/|\/series\/|\/hls\/|\/get_file\/|\/get_video\?|\/mp4\/|\.akamaihd\.net|\/secure\/|\/videos?\//i;
 // Facebook / Instagram serve video from fbcdn/scontent, often WITHOUT a file
 // extension (…/v/t59.4756-21/…?oh=…&oe=…&bytestart=…). Without these patterns
 // the webRequest sniffer never saw Facebook video at all.
@@ -82,7 +82,9 @@ const FB_PATH_RE = /\/v\/t|video\.php|watchparty|\/reel|\/watch\/|playable|bytes
 // is a byte-slice of the full progressive MP4 and is rewritten to the full
 // file via stripFbRange() before dedup/download. Only repeated bytestart
 // params (an MSE slice-chain artefact) count as a segment here.
-const SEGMENT_URL_RE = /\.m4s($|\?|#|;)|init\.mp4($|\?|#)|seg-?\d+|chunklist|chunk-?store|fragment|frag-?\d+|\/range\/|bytestart=\d+.*&.*bytestart/i;
+// init[-_]*.mp4: mindgeek init segments (init-v1-a1.mp4) — keep in sync
+// with SEGMENT_RE in content.js / interceptor.js.
+const SEGMENT_URL_RE = /\.m4s($|\?|#|;)|init\.mp4($|\?|#)|init[-_][^/?#]*\.mp4($|\?|#)|seg-?\d+|chunklist|chunk-?store|fragment|frag-?\d+|\/range\/|bytestart=\d+.*&.*bytestart/i;
 
 function isSegmentUrl(u) {
   if (!u || typeof u !== 'string') return false;
@@ -217,6 +219,28 @@ function getCapturedRequest(store, url) {
 // Exact browser header sets keyed by media URL (see noteCapturedRequest).
 const capturedReqHeaders = new Map();
 
+/**
+ * Register a DERIVED URL under its source's captured browser headers so the
+ * desktop replays the real Referer/Origin/UA/Cookie set for it too. Needed
+ * for URLs the browser never requested itself: HLS variant playlists parsed
+ * out of a master, and reconstructed master URLs (see
+ * reconstructMasterCandidates) — without this they fell back to the CDN's
+ * own origin as Referer, which strict CDNs reject outright.
+ */
+function copyCapturedRequest(sourceUrl, urls) {
+  if (!sourceUrl || !Array.isArray(urls) || !urls.length) return;
+  const entry = getCapturedRequest(capturedReqHeaders, sourceUrl);
+  if (!entry) return;
+  for (const u of urls) {
+    if (u && /^https?:/i.test(u) && !capturedReqHeaders.has(u)) {
+      capturedReqHeaders.set(u, { ...entry, time: Date.now() });
+    }
+  }
+  if (capturedReqHeaders.size > CAPTURE_MAX) {
+    capturedReqHeaders.delete(capturedReqHeaders.keys().next().value);
+  }
+}
+
 // Tabs with recent segmented-stream (DASH) traffic: tabId -> epoch ms.
 // Lets the capsule show an honest "protected" row instead of junk when a
 // blob-playing video has no direct file. Pure helpers below.
@@ -246,11 +270,20 @@ function isDashActiveTab(store, tabId) {
 /**
  * Not-a-video verdict (mirrors dropVideoCandidate in content.js — keep the
  * two in sync; test/facebook-junk.js asserts parity). Audio-typed responses
- * complete fine but contain no video track.
+ * complete fine but contain no video track. EXCEPTION: HLS/DASH playlists
+ * legitimately ship with the legacy Apple types (audio/x-mpegurl,
+ * audio/mpegurl) — a manifest is NOT an audio rendition; classifying it as
+ * 'audio' deleted every sniffed master/variant row while the pill badge kept
+ * counting them ("badge 6 · 0 downloadable links", members.nubiles-porn.com,
+ * 2026-11-23).
  */
 function dropVideoCandidate(o) {
   const ct = String((o && o.contentType) || '');
-  if (/^audio\//i.test(ct)) return 'audio';
+  // Playlists ship with the legacy Apple types (audio/x-mpegurl,
+  // audio/mpegurl) on many CDNs — a manifest is NOT an audio rendition.
+  // Inline check: the shipped-code tests extract this function alone.
+  if (/^audio\//i.test(ct) &&
+      !/\.(m3u8|mpd)(\?|#|$)/i.test(String((o && o.url) || ''))) return 'audio';
   if (o && o.probed) {
     if (!o.hasVideo) return 'audio';
     const dur = Number(o.durationSec) || 0;
@@ -908,13 +941,27 @@ function normalizeSentUrl(u) {
  */
 const BROAD_DOMAIN_COOKIE_SKIP_RE = /(^|\.)(google\.[a-z.]+|googleusercontent\.com|googleapis\.com|youtube\.com|facebook\.com|fbcdn\.net|instagram\.com|twitter\.com|x\.com|github\.com|microsoft\.com|live\.com|apple\.com|amazon\.com|cloudflare\.com)$/i;
 
-async function collectCookies(hosts) {
+/**
+ * Cookies the browser would send for `hosts`. `topSite` (the page's own
+ * origin, when known) additionally opens the PARTITIONED cookie jars: media
+ * CDNs are third-party requests, and modern Chrome stores their cookies
+ * (Cloudflare's cf_clearance/__cf_bm, KVS sessions) per top-level site
+ * (CHIPS). The unpartitioned getAll alone is exactly the "browser plays it,
+ * AiDM gets 403" bug.
+ */
+async function collectCookies(hosts, topSite) {
   const cookieSet = new Set();
   try {
     for (const h of hosts) {
       try {
         const url = h.startsWith('http') ? h : 'https://' + h + '/';
         (await chrome.cookies.getAll({ url })).forEach(c => cookieSet.add(c.name + '=' + c.value));
+        if (topSite) {
+          try {
+            (await chrome.cookies.getAll({ url, partitionKey: { topLevelSite: topSite } }))
+              .forEach(c => cookieSet.add(c.name + '=' + c.value));
+          } catch (e) { /* older Chrome without the CHIPS API */ }
+        }
       } catch (e) { /* CSP / no access */ }
     }
     const domains = new Set();
@@ -1154,6 +1201,7 @@ async function probeStreamUrl(url, referrer) {
     const resp = await fetch(url, {
       method: 'GET',
       headers,
+      credentials: 'include', // host_permissions cover the CDN — cookies flow
       redirect: 'follow',
       signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
     });
@@ -1183,6 +1231,7 @@ async function probeStreamUrl(url, referrer) {
         const resp2 = await fetch(url, {
           method: 'GET',
           headers: plainHeaders,
+          credentials: 'include',
           redirect: 'follow',
           signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
         });
@@ -1218,6 +1267,171 @@ async function probeStreamUrls(urls, referrer) {
     .slice(0, PROBE_MAX_URLS);
   const out = {};
   await Promise.all(list.map(async (u) => { out[u] = await probeStreamUrl(u, referrer); }));
+  return out;
+}
+
+
+// ── HLS manifest expansion (background, CORS-free) ───────────────────────────
+// The content script used to fetch master playlists itself, but a page-side
+// fetch is subject to the PAGE's CORS policy — private CDNs (mindgeek /
+// project1content stream-private-*, KVS, IPTV) send no CORS headers, so every
+// cross-origin expansion failed silently and master playlists surfaced as one
+// quality-less "m3u8" row (or not at all). The service worker's fetch is not
+// subject to page CORS (host_permissions: <all_urls>), so expansion lives
+// here. Cookies for the manifest host are collected for availability (fetch
+// cannot set a Cookie header; Chrome attaches its own for permitted hosts).
+//
+// The same machinery validates RECONSTRUCTED master URLs: when only a child/
+// variant playlist was seen (…/video/<hash>.mp4/720p/playlist.m3u8), the
+// master is often reachable at a sibling path (…/video/<hash>.mp4/master.m3u8)
+// with the SAME token query (validto/ip/hash) — see reconstructMasterCandidates
+// in content.js.
+
+const HLS_EXPAND_TTL_MS = 60 * 1000;
+const HLS_EXPAND_TIMEOUT_MS = 8000;
+const HLS_EXPAND_MAX_BYTES = 2 * 1024 * 1024;
+const hlsExpandBgCache = new Map(); // url -> { result, time }
+
+function qualityFromHeightBg(h) {
+  if (h >= 2160) return '2160p';
+  if (h >= 1440) return '1440p';
+  if (h >= 1080) return '1080p';
+  if (h >= 720) return '720p';
+  if (h >= 480) return '480p';
+  if (h >= 360) return '360p';
+  return h + 'p';
+}
+
+/**
+ * Auth-query params that gate a tokened CDN tree (mindgeek validto/ip/hash,
+ * KVS md5/expires, Akamai hdnts, …). When a master carries one, its RELATIVE
+ * variant URIs must inherit the query — plain resolution drops it and every
+ * quality row would 474 on click.
+ */
+const HLS_AUTH_QUERY_RE_BG = /^(validto|validfrom|expires|expiry|exp|hash|sig|signature|sign|token|md5|wmsauthsign|hdnts|hdnea|hdntl|auth|authkey|policy|secure|sk)$/i;
+
+function hlsAuthQueryBg(parentUrl) {
+  try {
+    const q = new URL(String(parentUrl || '')).search;
+    if (!q || q.length < 3) return null;
+    for (const [k] of new URLSearchParams(q)) {
+      if (HLS_AUTH_QUERY_RE_BG.test(k)) return q;
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/** Parse a master playlist into the same variant shape content.js builds. */
+function parseMasterPlaylistBg(text, baseUrl) {
+  const authQuery = hlsAuthQueryBg(baseUrl);
+  const lines = String(text || '').split('\n');
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!/^#EXT-X-STREAM-INF/i.test(line)) continue;
+    const bw = /BANDWIDTH=(\d+)/i.exec(line);
+    const res = /RESOLUTION=(\d+)x(\d+)/i.exec(line);
+    let uri = null;
+    for (let j = i + 1; j < lines.length; j++) {
+      const l = lines[j].trim();
+      if (l && l[0] !== '#') { uri = l; break; }
+    }
+    if (!uri) continue;
+    try {
+      const vUrl = new URL(uri, baseUrl);
+      if (authQuery && !vUrl.search) vUrl.search = authQuery;
+      const height = res ? parseInt(res[2], 10) : 0;
+      out.push({
+        url: vUrl.href,
+        hls: true,
+        encrypted: false,
+        bandwidth: bw ? parseInt(bw[1], 10) : 0,
+        resolution: res ? res[1] + 'x' + res[2] : null,
+        quality: height ? qualityFromHeightBg(height) : 'unknown',
+        format: 'm3u8',
+      });
+    } catch (e) { /* relative URI unresolvable — skip variant */ }
+  }
+  return out;
+}
+
+/** Fetch an HLS manifest body from the service worker (page-CORS exempt). */
+async function fetchHlsManifest(url, referrer) {
+  const headers = {
+    'Referer': referrer || new URL(url).origin + '/',
+    'Accept': '*/*',
+    'Accept-Language': (navigator.language || 'en-US') + ',en;q=0.9',
+  };
+  try {
+    const cookieHosts = new Set([url, new URL(url).hostname]);
+    if (referrer) {
+      try { cookieHosts.add(referrer); } catch (e) {}
+      try { cookieHosts.add(new URL(referrer).hostname); } catch (e) {}
+    }
+    await collectCookies(cookieHosts);
+  } catch (e) { /* cookies unavailable — fetch without them */ }
+  const resp = await fetch(url, {
+    method: 'GET',
+    headers,
+    redirect: 'follow',
+    credentials: 'include',
+    signal: AbortSignal.timeout(HLS_EXPAND_TIMEOUT_MS),
+  });
+  if (!resp.ok) return null;
+  const len = parseInt(resp.headers.get('content-length') || '0', 10);
+  if (len > HLS_EXPAND_MAX_BYTES) return null;
+  const text = await resp.text();
+  if (text.length > HLS_EXPAND_MAX_BYTES) return null;
+  return { text, finalUrl: resp.url || url };
+}
+
+/**
+ * Expand one manifest URL: { ok, isMaster, encrypted, variants[] }.
+ * ok=false when unreachable/not a playlist (caller falls back or drops).
+ */
+async function expandHlsUrl(url, referrer) {
+  const cached = hlsExpandBgCache.get(url);
+  if (cached && Date.now() - cached.time < HLS_EXPAND_TTL_MS) return cached.result;
+  let result = { ok: false, isMaster: false, encrypted: false, variants: [] };
+  try {
+    const got = await fetchHlsManifest(url, referrer);
+    if (got && /#EXTM3U/i.test(got.text)) {
+      const variants = parseMasterPlaylistBg(got.text, got.finalUrl);
+      result = {
+        ok: true,
+        isMaster: /#EXT-X-STREAM-INF/i.test(got.text),
+        encrypted: /#EXT-X-SESSION-KEY|#EXT-X-KEY/i.test(got.text),
+        variants,
+      };
+      // Variant playlists were never requested by the browser — inherit the
+      // manifest's captured header set so the desktop replays the same
+      // Referer/Origin/UA/Cookie the player used.
+      try { copyCapturedRequest(url, variants.map(v => v.url)); } catch (e) {}
+    }
+  } catch (e) { /* unreachable — ok:false */ }
+  hlsExpandBgCache.set(url, { result, time: Date.now() });
+  if (hlsExpandBgCache.size > 200) hlsExpandBgCache.delete(hlsExpandBgCache.keys().next().value);
+  return result;
+}
+
+/** Batch-validate reconstructed master candidates (one round-trip). */
+async function expandHlsUrls(urls, referrer, sources) {
+  const list = (Array.isArray(urls) ? urls : [])
+    .filter(u => typeof u === 'string' && /^https?:/i.test(u) && !u.startsWith(AIDM_API_BASE))
+    .slice(0, 8);
+  const out = {};
+  await Promise.all(list.map(async (u) => {
+    out[u] = await expandHlsUrl(u, referrer);
+    // A reconstructed master inherits the headers of the row it was derived
+    // from — the browser never requested it, so getCapturedRequest would
+    // otherwise find nothing (and the engine would send CDN-origin Referer).
+    const src = sources && typeof sources === 'object' ? sources[u] : null;
+    if (out[u] && out[u].ok) {
+      try { copyCapturedRequest(src, [u]); } catch (e) {}
+    }
+  }));
   return out;
 }
 
@@ -1259,6 +1473,74 @@ function updateBadge() {
 }
 
 // ── Download to AiDM ──────────────────────────────────────────────────────────
+
+// ── Cloudflare-wall pre-flight ────────────────────────────────────────────────
+// Hosts behind a Cloudflare challenge refuse ANY non-browser client: the
+// signed link can be perfectly fresh and the desktop engine still answers
+// 403 — the browser's TLS fingerprint plus its own cookie jar is the only
+// key that turns (verified live: mediaboxplayer.com 403s curl + the engine
+// while the same URL plays in Chrome). A quick service-worker fetch runs on
+// Chrome's own stack with the page's cookies — if even THIS context is
+// refused, the engine cannot possibly do better, so the file is handed to
+// Chrome natively instead of creating a doomed row.
+const WALL_CHECK_TTL_MS = 5 * 60 * 1000;
+const wallCheckCache = new Map(); // origin -> { blocked, time }
+
+async function swWallCheck(url, referrer) {
+  try {
+    // HLS/DASH playlists must never route to the native-download fallback:
+    // Chrome's downloader would save the 300-byte manifest TEXT as
+    // "video.mp4" — the "HLS link downloaded but the file is empty/broken"
+    // report. The desktop engine owns playlist URLs (it expands
+    // master → variant → segments with the captured browser headers), so
+    // report NO wall here and let sendToAiDM hand the playlist over intact.
+    if (/\.(m3u8|mpd)(\?|#|$)/i.test(String(url || ''))) return false;
+    const origin = new URL(url).origin;
+    const cached = wallCheckCache.get(origin);
+    if (cached && Date.now() - cached.time < WALL_CHECK_TTL_MS) return cached.blocked;
+    let blocked = false;
+    // Single-use-token URLs must not be probed (Gmail/Drive one-shots die on
+    // any extra request) — assume no wall, let the engine have the request.
+    let singleUse = false;
+    try { singleUse = isSingleUseTokenUrl(url) || isGmailAttachmentEntryUrl(url); } catch (e) {}
+    if (!singleUse) {
+      const headers = {
+        'Range': 'bytes=0-0',
+        'Referer': referrer || origin + '/',
+        'Accept-Language': (navigator.language || 'en-US') + ',en;q=0.9',
+      };
+      let status = 0;
+      try {
+        const resp = await fetch(url, {
+          method: 'GET', headers, credentials: 'include',
+          redirect: 'follow', signal: AbortSignal.timeout(6000),
+        });
+        try { if (resp.body) resp.body.cancel(); } catch (e) {}
+        status = resp.status;
+      } catch (e) { /* network error — not a wall */ }
+      // Strict CDNs 403 a Range probe but serve plain GETs — mirror the
+      // engine's own retry before declaring a wall.
+      if (status === 403 || status === 401) {
+        try {
+          const plain = { ...headers };
+          delete plain.Range; delete plain.range;
+          const resp2 = await fetch(url, {
+            method: 'GET', headers: plain, credentials: 'include',
+            redirect: 'follow', signal: AbortSignal.timeout(6000),
+          });
+          try { if (resp2.body) resp2.body.cancel(); } catch (e) {}
+          status = resp2.status;
+        } catch (e) { /* keep the first status */ }
+      }
+      blocked = status === 403 || status === 401 || status === 503;
+    }
+    wallCheckCache.set(origin, { blocked, time: Date.now() });
+    if (wallCheckCache.size > 100) wallCheckCache.delete(wallCheckCache.keys().next().value);
+    return blocked;
+  } catch (e) {
+    return false; // never let the pre-flight break the normal path
+  }
+}
 
 // `blob:` URLs (AI-generated images on Leonardo, canvas snapshots, in-page
 // image previews) are in-memory browser objects the Electron main process
@@ -1343,7 +1625,11 @@ async function sendToAiDM(url, filename, opts = {}) {
   // the file (missing the MP4 header) and saves as an unplayable video.
   // Strip the range params so the full progressive file is fetched instead.
   try { url = stripFbRange(url); } catch {}
-  if (isSent(url)) return { sent: false, success: true, duplicate: true };
+  // Sent-guard: stop the capsule/popup double-fire from stacking rows. An
+  // explicit RE-download (the user re-clicking a "✓ In AiDM" row — e.g. after
+  // a failed attempt) must pass: the desktop's LIVE_STATUSES dedupe returns a
+  // fresh download for finished/failed rows instead of a dead duplicate.
+  if (isSent(url) && !opts.force) return { sent: false, success: true, duplicate: true };
   try {
     const body = { url, filename, ...opts };
     // Exact browser headers win: the webRequest capture holds the Cookie /
@@ -1400,10 +1686,28 @@ async function sendToAiDM(url, filename, opts = {}) {
         if (/drive\.(?:usercontent\.)?google\.com/i.test(url)) {
           hosts.add('https://drive.google.com/');
         }
-        const all = await collectCookies(hosts);
+        const all = await collectCookies(hosts,
+          (opts.meta && opts.meta.pageUrl) || ref || undefined);
         if (all.length) body.cookies = all.join('; ');
       } catch (e) { /* cookies API unavailable or blocked */ }
     }
+    // Cloudflare-wall pre-flight (see swWallCheck): a challenge-walled host
+    // would only produce a dead 403 row in AiDM. Hand the file to Chrome
+    // natively instead — the browser's cookies + TLS pass where the engine
+    // cannot, and the user gets the actual file rather than an apology.
+    let wallBlocked = false;
+    try {
+      wallBlocked = await swWallCheck(url, ref);
+      if (wallBlocked) {
+        const native = await nativeDownloadToBrowser({ url, filename, referrer: ref });
+        if (native && native.success) {
+          markSent(url);
+          return { sent: true, success: true, native: true };
+        }
+        // Native refused too (rare) — fall through so the app row records
+        // the honest 403 instead of nothing happening.
+      }
+    } catch (e) { /* pre-flight must never block the normal path */ }
     // Resolver-backed page handoffs (YouTube / Twitter / Facebook) run a
     // FULL server-side extraction before answering — 5-20s normally, minutes
     // under a bot-check. The old 5s timeout aborted while the desktop was
@@ -1524,10 +1828,12 @@ async function sendVideoDetection(videoData) {
         }
         // Not-a-video filter: audio-typed responses (DASH audio slices as
         // .mp4) complete fine but contain no video — never offer them as
-        // video rows in the desktop quality picker.
+        // video rows in the desktop quality picker. Playlists are exempt
+        // (dropVideoCandidate sees o.url): mindgeek-class CDNs ship manifests
+        // as audio/x-mpegurl and the drop erased the real qualities.
         try {
           const mm = getStreamMeta(v.url);
-          if (dropVideoCandidate({ contentType: mm && mm.contentType })) continue;
+          if (dropVideoCandidate({ contentType: mm && mm.contentType, url: v.url })) continue;
         } catch (e) {}
         const n = normalizeSentUrl(v.url) || v.url;
         if (seen.has(n)) {
@@ -2079,6 +2385,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // Capsule link liveness check — see probeStreamUrl() above.
   if (msg.action === 'probe-streams') {
     probeStreamUrls(msg.urls, msg.referrer).then(probes => sendResponse({ probes }));
+    return true;
+  }
+
+  // CORS-free HLS master expansion (see expandHlsUrl above). The content
+  // script's own fetch is bound by the page's CORS policy, so private-CDN
+  // masters (stream-private-*, KVS …) never expanded there.
+  if (msg.action === 'expand-hls') {
+    expandHlsUrl(msg.url, msg.referrer).then(r => sendResponse(r));
+    return true;
+  }
+
+  // Batch master-candidate validation for reconstructed master URLs —
+  // used when only a child/variant playlist was sniffed (see
+  // reconstructMasterCandidates in content.js). `sources` maps each
+  // candidate to the sniffed row it was derived from (header inheritance).
+  if (msg.action === 'expand-hls-batch') {
+    expandHlsUrls(msg.urls, msg.referrer, msg.sources).then(r => sendResponse({ results: r }));
     return true;
   }
 

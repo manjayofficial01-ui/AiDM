@@ -469,6 +469,17 @@ function hlsFetchError(what, err) {
     if (err.status === 404) {
       return `Stream ${what} was not found (404). The stream may have ended or the link has expired.`;
     }
+    // 470-479 are vendor-specific "token / anti-hotlink rejection" codes on
+    // these CDNs (474 is the one private stream hosts actually answer with).
+    // The signed query alone is not the whole key: the edge also checks the
+    // browser context (Referer/UA/cookies) that the original player sent —
+    // which a bare pasted link cannot carry.
+    if (err.status >= 470 && err.status <= 479) {
+      return `The stream CDN refused this request (HTTP ${err.status} — its token/anti-hotlink code) fetching the ${what}. ` +
+        'This host checks the browser context the original player sent, so a bare link is not enough: ' +
+        'open the video page in Chrome, let the AiDM extension re-detect the stream, and download it from there ' +
+        '(or re-copy a fresh link and retry before it expires).';
+    }
     return `Server returned HTTP ${err.status} while fetching the ${what}.`;
   }
   if (isDnsLookupError(err)) {
@@ -1816,7 +1827,7 @@ class DownloadEngine extends EventEmitter {
         }
         if (!attrs.URI) throw new Error('Encrypted stream (AES-128) has no key URI');
         let keyUrl;
-        try { keyUrl = new URL(attrs.URI, mediaUrl).href; }
+        try { keyUrl = resolveHlsChild(attrs.URI, mediaUrl, hlsAuthQuery(mediaUrl)).href; }
         catch (e) { throw new Error('Encrypted stream has an invalid key URI'); }
         if (keyCache.has(keyUrl)) return keyCache.get(keyUrl);
         let kr;
@@ -2095,6 +2106,7 @@ function pickHlsVariant(variants, masterText) {
 }
 
 function parseHlsMaster(text, baseUrl) {
+  const authQuery = hlsAuthQuery(baseUrl);
   const lines = String(text || '').split('\n');
   const out = [];
   for (let i = 0; i < lines.length; i++) {
@@ -2115,7 +2127,7 @@ function parseHlsMaster(text, baseUrl) {
     const codecValue = codecs ? codecs[1] : '';
     try {
       out.push({
-        url: new URL(uri, baseUrl).toString(),
+        url: resolveHlsChild(uri, baseUrl, authQuery).toString(),
         bandwidth: bw ? parseInt(bw[1], 10) : 0,
         width: res ? parseInt(res[1], 10) : 0,
         height: res ? parseInt(res[2], 10) : 0,
@@ -2130,6 +2142,38 @@ function parseHlsMaster(text, baseUrl) {
   return out;
 }
 
+/**
+ * Query params that gate a tokened CDN tree (mindgeek validto/ip/hash, KVS
+ * md5/expires, Akamai hdnts, Wowza wmsAuthSign, …). When a parent playlist
+ * carries one, its RELATIVE child URIs (variants, segments, init maps, keys)
+ * usually need the same query — plain resolution drops it, and the CDN then
+ * rejects every child request (custom 4xx codes like the 474 these edges
+ * answer with). Children that carry their OWN query are left untouched —
+ * their signature is the authoritative one.
+ */
+const HLS_AUTH_QUERY_RE = /^(validto|validfrom|expires|expiry|exp|hash|sig|signature|sign|token|md5|wmsauthsign|hdnts|hdnea|hdntl|auth|authkey|policy|secure|sk|iptv|e|st|h)$/i;
+
+function hlsAuthQuery(parentUrl) {
+  try {
+    const q = new URL(String(parentUrl || '')).search;
+    if (!q || q.length < 3) return null;
+    let authed = false;
+    for (const [k] of new URLSearchParams(q)) {
+      if (HLS_AUTH_QUERY_RE.test(k)) { authed = true; break; }
+    }
+    return authed ? q : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/** Resolve a child URI against the parent, inheriting the parent's auth query. */
+function resolveHlsChild(uri, baseUrl, authQuery) {
+  const u = new URL(String(uri || ''), baseUrl);
+  if (authQuery && !u.search) u.search = authQuery;
+  return u;
+}
+
 function parseHlsByterange(line, fallbackOffset) {
   const m = /^#EXT-X-BYTERANGE:(\d+)(?:@(\d+))?\s*$/i.exec(String(line || '').trim());
   if (!m) return null;
@@ -2141,6 +2185,7 @@ function parseHlsByterange(line, fallbackOffset) {
 }
 
 function parseHlsMedia(text, baseUrl) {
+  const authQuery = hlsAuthQuery(baseUrl);
   const lines = String(text || '').split('\n');
   let mapUri = null;
   let mapRange = null;
@@ -2163,7 +2208,7 @@ function parseHlsMedia(text, baseUrl) {
     if (line.toUpperCase().startsWith('#EXT-X-MAP:')) {
       const m = /URI="([^"]+)"/i.exec(line);
       if (m) {
-        try { mapUri = new URL(m[1], baseUrl).toString(); } catch (e) {}
+        try { mapUri = resolveHlsChild(m[1], baseUrl, authQuery).toString(); } catch (e) {}
         const br = /BYTERANGE="(\d+)(?:@(\d+))?"/i.exec(line);
         if (br) {
           const length = parseInt(br[1], 10);
@@ -2186,7 +2231,7 @@ function parseHlsMedia(text, baseUrl) {
     if (line.startsWith('#')) continue;
 
     try {
-      segs.push({ url: new URL(line, baseUrl).toString(), range: pendingRange, key: currentKey });
+      segs.push({ url: resolveHlsChild(line, baseUrl, authQuery).toString(), range: pendingRange, key: currentKey });
     } catch (e) {}
     pendingRange = null;
   }

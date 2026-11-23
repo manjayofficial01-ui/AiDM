@@ -69,7 +69,11 @@ check('category filters are real buttons with pressed state', () => {
   const items = html.match(/<(button|div)[^>]*class="sidebar-item[^"]*"/g) || [];
   assert(items.length >= 11, 'all categories present');
   assert(items.every(tag => tag.startsWith('<button')), 'no pointer-only category divs');
-  assert((html.match(/data-category=/g) || []).length === (html.match(/aria-pressed=/g) || []).length,
+  // Count only real attributes (quoted `data-category="…"`). The v5.9.3
+  // toolbar added a quick-jump button whose onclick JS references
+  // `.sidebar-item[data-category=pending]` — an unquoted SELECTOR string
+  // that must not inflate the attribute count.
+  assert((html.match(/data-category="/g) || []).length === (html.match(/aria-pressed=/g) || []).length,
     'every category exposes aria-pressed');
   assert(/setAttribute\('aria-pressed', on \? 'true' : 'false'\)/.test(appSrc),
     'active state stays in sync');

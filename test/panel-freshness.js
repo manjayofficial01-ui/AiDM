@@ -118,5 +118,69 @@ check("content.js sends since=performance.timeOrigin with get-panel-data",
 check('background get-panel-data forwards the page floor to getTabStreams',
   /getTabStreams\(tabId,\s*since\)/.test(bgSrc));
 
-console.log('\npanel-freshness: ' + pass + ' passed, ' + fail + ' failed');
-process.exit(fail ? 1 : 0);
+// ── 5. a dead extension service worker is surfaced, never silent ────────────
+// 2026-11-23 report ("can't download YT/Twitter/Facebook anymore"): the
+// unpacked extension's background.js failed SW REGISTRATION after being
+// reloaded mid-edit; every click then failed while the app itself was fine.
+// The pill/popup must tell the user to reload instead of a bare "Failed".
+check('requestPanelData surfaces a dead background (bgDead) instead of empty data',
+  /get-panel-data[\s\S]{0,400}?bgDead:\s*true/.test(contentSrc));
+check('requestPanelData timeout also reports bgDead (silent dead port)',
+  /bgDead:\s*true,\s*bgDeadErr:\s*'timeout'/.test(contentSrc));
+check('capsule renders the reload banner when the background is dead',
+  /pd\s*&&\s*pd\.bgDead[\s\S]{0,200}?aidm-cap-banner/.test(contentSrc) &&
+  /chrome:\/\/extensions/.test(contentSrc));
+check('pill click distinguishes a dead extension from "AiDM offline"',
+  /receiving end does not exist\|message port closed/i.test(contentSrc) &&
+  /⚠ Reload extension/.test(contentSrc));
+
+// ── 6. the reload banner must actually RENDER (TDZ regression) ──────────────
+// v5.9.7 shipped the banner BEFORE the `let pd` declaration in
+// buildCapsulePanel: reading pd there hit the let-TDZ, the surrounding
+// try/catch swallowed the ReferenceError, and the banner never rendered —
+// the user saw a dead pill with no guidance. Presence checks (section 5)
+// passed on the broken code; only execution order catches this.
+const POPUP = path.join(__dirname, '..', 'chrome-extension', 'popup.js');
+const popupSrc = fs.readFileSync(POPUP, 'utf8');
+
+const declIdx = contentSrc.indexOf('let pd = { streams: [], sent: [] };');
+const useIdx = contentSrc.indexOf('if (pd && pd.bgDead)');
+check('banner reads pd AFTER its let declaration (no TDZ)',
+  declIdx >= 0 && useIdx > declIdx, 'decl@' + declIdx + ' use@' + useIdx);
+
+// Execute the SHIPPED segment (pd assignment → banner) with stubs and assert
+// the banner node reaches the panel; then prove the OLD order fails silently.
+const insIdx = contentSrc.indexOf('st.panel.insertBefore(warn, loading);');
+const segEnd = contentSrc.indexOf('} catch (e) {}', insIdx) + '} catch (e) {}'.length;
+const shippedSeg = contentSrc.slice(declIdx, segEnd);
+const bannerStart = contentSrc.lastIndexOf('try {', useIdx);
+const bannerBlock = contentSrc.slice(bannerStart, segEnd);
+check('shipped segment extracts cleanly', shippedSeg.includes('insertBefore(warn, loading)') && bannerBlock.length > 0);
+
+function runSeg(seg, pdResp) {
+  const inserted = [];
+  const st = { panel: { insertBefore: (n) => inserted.push(n), appendChild: () => {} } };
+  const doc = { createElement: () => ({ className: '', textContent: '', title: '' }) };
+  const fn = new Function('st', 'loading', 'document', 'requestPanelData', 'superseded',
+    'return (async () => {' + seg + '\n})();');
+  return fn(st, {}, doc, async () => pdResp, () => false).then(() => inserted);
+}
+
+(async () => {
+  const fixed = await runSeg(shippedSeg, { bgDead: true });
+  check('EXECUTED shipped segment renders the banner when bgDead',
+    fixed.length === 1 && fixed[0].className === 'aidm-cap-banner', JSON.stringify(fixed.map(n => n.className)));
+  const quiet = await runSeg(shippedSeg, { streams: [], sent: [] });
+  check('EXECUTED shipped segment stays quiet with a live background', quiet.length === 0);
+  // The v5.9.7 broken order: banner block BEFORE the declaration. Must NOT
+  // render (swallowed TDZ ReferenceError) — this is the regression signature.
+  const broken = await runSeg(bannerBlock + '\nlet pd = { streams: [], sent: [] };\ntry { pd = await requestPanelData(); } catch (e) {}', { bgDead: true });
+  check('OLD banner-before-declaration order provably renders nothing', broken.length === 0);
+
+  check('pill + popup dead-context regex covers invalidated extension contexts',
+    /receiving end does not exist\|message port closed\|extension context invalidated/i.test(contentSrc) &&
+    (popupSrc.match(/extension context invalidated/g) || []).length >= 2);
+
+  console.log('\npanel-freshness: ' + pass + ' passed, ' + fail + ' failed');
+  process.exit(fail ? 1 : 0);
+})();

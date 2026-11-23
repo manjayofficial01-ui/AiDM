@@ -25,6 +25,7 @@
 
 const twitterResolver = require('./twitter-resolver');
 const embedResolver = require('./embed-resolver');
+const streamtapeResolver = require('./streamtape-resolver');
 const facebookResolver = require('./facebook-resolver');
 const youtubeResolver = require('./youtube-resolver');
 const fileHostResolver = require('./filehost-resolver');
@@ -233,6 +234,51 @@ const embedMediaResolver = {
 };
 
 registerResolver(embedMediaResolver);
+
+// ── Streamtape / yesporn.io resolver (fourth provider) ──────────────────────
+// yesporn.io (and every KVS "async block" tube aggregate like it) holds no
+// media itself: video page → click-gated /embed/<id> shell → Streamtape
+// player iframe → one progressive MP4 behind an IP-bound signed /get_video
+// redirect. The resolver walks that chain and mints a FRESH signed link at
+// click time, so pasted page URLs, pasted embed/player URLs and links
+// sniffed off a playing player all download through the plain multi-segment
+// engine (Range verified; no Referer/Cookie required). Extension paths see
+// /get_video once STREAM_PATH_RE / PATH_RE include it.
+
+const streamtapeMediaResolver = {
+  name: 'streamtape',
+
+  supports(url) {
+    try { return streamtapeResolver.isStreamtapeUrl(url) || streamtapeResolver.isYespornUrl(url); } catch (e) { return false; }
+  },
+
+  async resolve(url) {
+    const r = await streamtapeResolver.resolveStreamtapeVideos(url);
+
+    const media = r.videos.map(v => ({
+      type: 'video',
+      url: v.url,
+      mime: 'video/mp4',
+      quality: v.quality || undefined,
+      format: 'mp4',
+      filename: v.filename,
+    }));
+
+    return {
+      provider: r.provider,
+      id: r.id,
+      title: r.title,
+      thumbnail: r.thumbnail,
+      duration: r.duration,
+      canonicalUrl: r.canonicalUrl,
+      referer: r.referer,
+      media,
+      pickerVideos: embedResolver.toPickerVideos(r.videos),
+    };
+  },
+};
+
+registerResolver(streamtapeMediaResolver);
 
 // ── Facebook / Instagram page resolver (third provider) ────────────────────
 // A pasted facebook.com/watch (reel, fb.watch, instagram reel/p/tv) URL used

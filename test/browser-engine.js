@@ -77,7 +77,7 @@ const bg = new Function(
 
 // isMediaRequestUrl needs the module-scope regexes — provide matching ones.
 const STREAM_REQ_RE = /\.(m3u8|mpd|mp4|m4v|webm|mkv|mov|ts|m4s|key|akamai)($|\?|#)/i;
-const STREAM_PATH_RE = /videoplayback|\/live\/|\/movie\/|\/series\/|\/hls\/|\/get_file\/|\/mp4\/|\.akamaihd\.net|\/secure\/|\/videos?\//i;
+const STREAM_PATH_RE = /videoplayback|\/live\/|\/movie\/|\/series\/|\/hls\/|\/get_file\/|\/get_video\?|\/mp4\/|\.akamaihd\.net|\/secure\/|\/videos?\//i;
 const FB_HOST_RE = /fbcdn\.net|scontent\.|facebook\.com|fb\.com|instagram\.com|cdninstagram\.com/i;
 const FB_PATH_RE = /\/v\/t|video\.php|watchparty|\/reel|\/watch\/|playable|bytestart|\/dash\/|\/hls\//i;
 const isMediaRequestUrl = new Function(
@@ -91,6 +91,11 @@ const { noteCapturedRequest, getCapturedRequest, buildAidmRefererRule } = bg;
 check('media type matches', isMediaRequestUrl('https://x.com/anything', 'media') === true);
 check('mp4 matches', isMediaRequestUrl('https://s45.bigcdn.cc/pubs/abc/1080.mp4', 'xmlhttprequest') === true);
 check('get_file matches', isMediaRequestUrl('https://site.example/get_file/abc123', 'xmlhttprequest') === true);
+// Streamtape's extensionless signed direct link (yesporn.io et al.) — the
+// player fetches it over XHR (`…&plain=1` warm-up) and the <video> media
+// element loads it directly; both must register (see test/streamtape-resolver.js).
+check('streamtape get_video matches', isMediaRequestUrl('https://streamtape.to/get_video?id=ak8oXaq7Doi0xg&expires=1795012006&ip=FRqsDHqnDS9X&token=b-RDhWSZnQis', 'xmlhttprequest') === true);
+check('streamtape get_video media type matches', isMediaRequestUrl('https://streamtape.to/get_video?id=x&expires=1&ip=y&token=z', 'media') === true);
 check('plain page does not match', isMediaRequestUrl('https://example.com/page.html', 'main_frame') === false);
 check('image does not match', isMediaRequestUrl('https://example.com/a.jpg', 'image') === false);
 

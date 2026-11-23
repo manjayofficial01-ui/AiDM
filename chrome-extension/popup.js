@@ -52,9 +52,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     chrome.runtime.sendMessage({ action: 'single-download', url }, (response) => {
       btnDownload.disabled = false;
       btnDownload.textContent = '⬇️ Download';
+      const lastErr = chrome.runtime.lastError ? String(chrome.runtime.lastError.message || '') : '';
       if (response && response.success) {
         urlInput.value = '';
-        showStatus('Download sent to AiDM!', 'success');
+        // Cloudflare-walled hosts skip the engine entirely — Chrome itself
+        // downloads the file (native fallback in background.js).
+        showStatus(response.native ? 'Protected CDN — Chrome is downloading it' : 'Download sent to AiDM!', 'success');
+      } else if (/receiving end does not exist|message port closed|extension context invalidated/i.test(lastErr) || !response) {
+        // The extension's own service worker never answered: it failed to
+        // register (e.g. loaded while its files were mid-edit) — only a
+        // manual reload fixes it; the app itself may be perfectly fine.
+        showStatus('AiDM extension is not responding — reload it in chrome://extensions (⟳)', 'error');
       } else {
         showStatus('Failed. Is AiDM running?', 'error');
       }
@@ -505,11 +513,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   /**
    * Not-a-video verdict (mirrors dropVideoCandidate in content.js and
    * background.js — keep the three in sync; test/facebook-junk.js asserts
-   * parity).
+   * parity). Playlists are exempt from the audio verdict: CDNs ship
+   * manifests as audio/x-mpegurl (legacy Apple type) — a manifest is NOT an
+   * audio rendition, and dropping it emptied the video list on mindgeek
+   * sites.
    */
   function dropVideoCandidateInline(o) {
     const ct = String((o && o.contentType) || '');
-    if (/^audio\//i.test(ct)) return 'audio';
+    if (/^audio\//i.test(ct) &&
+        !/\.(m3u8|mpd)(\?|#|$)/i.test(String((o && o.url) || ''))) return 'audio';
     if (o && o.probed) {
       if (!o.hasVideo) return 'audio';
       const dur = Number(o.durationSec) || 0;
@@ -616,7 +628,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           const meta = (metaMap && (metaMap[m.url] || metaMap[normalizeInline(m.url)])) || null;
           ct = meta && meta.contentType;
         } catch (e) {}
-        return !dropVideoCandidateInline({ contentType: ct });
+        return !dropVideoCandidateInline({ contentType: ct, url: m.url });
       });
     } catch (e) {}
 
@@ -714,9 +726,15 @@ document.addEventListener('DOMContentLoaded', async () => {
             },
           },
         }, (resp) => {
+          const lastErr = chrome.runtime.lastError ? String(chrome.runtime.lastError.message || '') : '';
           if (resp && resp.success) {
-            btn.textContent = resp.duplicate ? '✓ In AiDM' : '✓ Sent';
+            btn.textContent = resp.duplicate ? '✓ In AiDM' : (resp.native ? '⬇ Browser' : '✓ Sent');
             btn.classList.add('sent');
+          } else if (/receiving end does not exist|message port closed|extension context invalidated/i.test(lastErr)) {
+            // Extension background dead (failed SW registration) — reload it.
+            btn.textContent = '⚠ Reload ext';
+            btn.title = 'The AiDM extension background is not responding — reload the extension (chrome://extensions → ⟳).';
+            btn.disabled = false;
           } else {
             // "AiDM offline" (app not running / restarting) is actionable;
             // a bare "Failed" is not.

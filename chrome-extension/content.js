@@ -34,7 +34,11 @@
   const FB_HOST_RE = /fbcdn\.net|scontent\.|facebook\.com|fb\.com|instagram\.com|cdninstagram\.com/i;
   // Raw DASH/HLS segments must never become "download links" — they are why
   // one playing video exploded into dozens of duplicate rows.
-  const SEGMENT_RE = /\.m4s($|\?|#|;)|init\.mp4($|\?|#)|seg-?\d+|chunklist|fragment|frag-?\d+|\/range\//i;
+  // init[-_]*.mp4: fMP4 init segments carry rendition suffixes on mindgeek/
+  // project1content CDNs (init-v1-a1.mp4) — init\.mp4 alone missed them and
+  // they surfaced as junk rows next to the real qualities. "initial-cut.mp4"
+  // (no dash directly after init) is NOT matched — real files stay safe.
+  const SEGMENT_RE = /\.m4s($|\?|#|;)|init\.mp4($|\?|#)|init[-_][^/?#]*\.mp4($|\?|#)|seg-?\d+|chunklist|fragment|frag-?\d+|\/range\//i;
   function isSegmentUrl(u) {
     if (!u || typeof u !== 'string') return false;
     if (/\.m4s($|\?|#|;)/i.test(u)) return true;
@@ -144,7 +148,12 @@
   // Instagram / Twitter auth + cache busters) is applied ONLY for known media
   // CDN hosts, inside normalizeStreamUrl below.
   const TOKEN_PARAMS = new Set([
-    'sig', 'signature', 'token', 'expires', 'hdnts', 'hdntl', 'auth', 'se',
+    'sig', 'signature', 'token', 'expires', 'expiry', 'exp', 'hdnts', 'hdntl',
+    'auth', 'se', 'md5', 'wmsauthsign', 'token_hash', 'verify',
+    // mindgeek/Project1Content signed streams: the token trio rotates on every
+    // re-mint while the path stays the file's identity — the same URL with a
+    // fresh validto/ip/hash must dedupe (and match the sent list) as ONE row.
+    'validto', 'validfrom', 'ip', 'hash',
   ]);
 
   // ── Twitter / X helpers ────────────────────────────────────────────────────
@@ -539,6 +548,78 @@ function normalizeStreamUrl(u) {
       if (segs.length < 2) return null;
       return 'mpath:' + fbCanonicalHost(x.hostname) + x.pathname;
     } catch (e) { return null; }
+  }
+
+  // ── HLS master canonicalization (pure helpers) ──────────────────────────────
+  // hls.js-style players fetch the master playlist once and its variant/
+  // media playlists repeatedly. The MASTER is the deliverable — AiDM's HLS
+  // engine expands it into every quality — while a lone variant playlist
+  // downloads one rendition and reads like "a fragment of the video".
+  //
+  // Mindgeek/Project1Content CDNs (stream-private-ht.project1content.com/…
+  // /video/<hash>.mp4/master.m3u8?validto=&ip=&hash=) park every rendition
+  // under one release directory, so the master can be RECONSTRUCTED from a
+  // child playlist by climbing to the release root and appending
+  // master.m3u8 — keeping the signed query intact. The background validates
+  // reconstructed candidates against the live CDN (see expand-hls-batch in
+  // background.js). Pure functions — test/hls-master.js extracts these.
+
+  /** True when the URL is (pathwise) a master playlist. */
+  function isHlsMasterUrl(u) {
+    try {
+      const p = new URL(String(u || '')).pathname;
+      return /master\.m3u8$/i.test(p);
+    } catch (e) { return false; }
+  }
+
+  /**
+   * Release-root identity of an HLS playlist: the directory every variant of
+   * ONE video hangs off. Uses the last `/<something>.mp4/` segment as the
+   * root marker when present (mindgeek: …/video/<hash>.mp4/…); otherwise the
+   * playlist's own directory. Query-immune — the signed params rotate.
+   */
+  function hlsReleaseRootKey(u) {
+    try {
+      const x = new URL(String(u || ''));
+      if (!/^https?:$/i.test(x.protocol)) return null;
+      if (!/\.m3u8$/i.test(x.pathname)) return null;
+      const idx = x.pathname.toLowerCase().lastIndexOf('.mp4/');
+      if (idx >= 0) return 'hlsp:' + x.hostname.toLowerCase() + x.pathname.slice(0, idx + 5);
+      const cut = x.pathname.lastIndexOf('/');
+      if (cut <= 0) return null;
+      return 'hlsp:' + x.hostname.toLowerCase() + x.pathname.slice(0, cut + 1);
+    } catch (e) { return null; }
+  }
+
+  /**
+   * Candidate master URLs for a (child/variant) playlist, auth query kept:
+   *  1. release root (…/<hash>.mp4/) + master.m3u8  ← mindgeek shape
+   *  2. the playlist's own directory + master.m3u8
+   *  3. the parent directory + master.m3u8
+   * The original URL and non-masters dedupe out; callers probe each with the
+   * background 'expand-hls-batch' action before offering anything.
+   */
+  function reconstructMasterCandidates(u) {
+    const out = [];
+    try {
+      const x = new URL(String(u || ''));
+      if (!/^https?:$/i.test(x.protocol) || !/\.m3u8$/i.test(x.pathname)) return out;
+      const q = x.search; // validto/ip/hash etc. stay glued to the reconstruction
+      const seen = new Set([x.pathname.toLowerCase()]);
+      const push = (pathname) => {
+        if (!pathname) return;
+        if (seen.has(pathname.toLowerCase())) return;
+        seen.add(pathname.toLowerCase());
+        try { out.push(new URL(pathname + q, x.origin).href); } catch (e) {}
+      };
+      const idx = x.pathname.toLowerCase().lastIndexOf('.mp4/');
+      if (idx >= 0) push(x.pathname.slice(0, idx + 5) + 'master.m3u8');
+      const cut = x.pathname.lastIndexOf('/');
+      if (cut > 0) push(x.pathname.slice(0, cut + 1) + 'master.m3u8');
+      const cut2 = cut > 0 ? x.pathname.slice(0, cut).lastIndexOf('/') : -1;
+      if (cut2 > 0) push(x.pathname.slice(0, cut2 + 1) + 'master.m3u8');
+    } catch (e) {}
+    return out;
   }
 
   /**
@@ -994,13 +1075,24 @@ function normalizeStreamUrl(u) {
    * elements only, so an audio-typed response (DASH audio slices served as
    * .mp4, preview clips) can never be the requested download — yet such
    * files complete "successfully" and look exactly like "downloaded but no
-   * video". Returns 'audio' | 'preview' | null (keep).
-   * o: { contentType, probed, hasVideo, durationSec, sizeBytes }
+   * video". HLS/DASH playlists are the exception: many CDNs ship manifests
+   * with the LEGACY Apple types (audio/x-mpegurl, audio/mpegurl) — a
+   * playlist is a manifest, NOT an audio rendition. Classifying it as
+   * 'audio' deleted every sniffed master/variant row while the pill badge
+   * kept counting them ("badge 6 · 0 downloadable links",
+   * members.nubiles-porn.com, 2026-11-23). The check is inline so the
+   * shipped-code extraction in test/facebook-junk.js stays self-contained.
+   * Returns 'audio' | 'preview' | null (keep).
+   * o: { contentType, url, probed, hasVideo, durationSec, sizeBytes }
    * Pure function — test/facebook-junk.js asserts parity across the copies.
    */
   function dropVideoCandidate(o) {
     const ct = String((o && o.contentType) || '');
-    if (/^audio\//i.test(ct)) return 'audio';
+    // Playlists ship with the legacy Apple types (audio/x-mpegurl,
+    // audio/mpegurl) on many CDNs — a manifest is NOT an audio rendition.
+    // Inline check: the shipped-code tests extract this function alone.
+    if (/^audio\//i.test(ct) &&
+        !/\.(m3u8|mpd)(\?|#|$)/i.test(String((o && o.url) || ''))) return 'audio';
     if (o && o.probed) {
       if (!o.hasVideo) return 'audio';
       const dur = Number(o.durationSec) || 0;
@@ -1460,7 +1552,7 @@ function normalizeStreamUrl(u) {
     if (isFacebookVideoUrl(url)) return true;
     // Generic video hosts — but not if it's clearly an image
     if (VIDEO_HOSTS.some(p => p.test(url)) && !IMAGE_EXT.test(url)) return true;
-    if (/videoplayback|\/get_file\/|\/hls\/|\/dash\/|\/mp4\//i.test(url)) return true;
+    if (/videoplayback|\/get_file\/|\/get_video\?|\/hls\/|\/dash\/|\/mp4\//i.test(url)) return true;
     return false;
   }
 
@@ -2079,6 +2171,39 @@ function normalizeStreamUrl(u) {
     return videos;
   }
 
+  /**
+   * Scan iframes for KNOWN embed-provider players (Streamtape, yesporn.io's
+   * async-block shell). Tube aggregates (yesporn.io et al.) hold no media on
+   * the page itself — the real player is an iframe whose src IS resolvable:
+   * the desktop's streamtape resolver walks page → embed → signed /get_video
+   * and mints a fresh link at download time. Surfacing the iframe src as a
+   * row means detection works IMMEDIATELY, before the click-gate (ad
+   * popunder) ever fires and without waiting for the player to load.
+   */
+  function scanEmbedFrames() {
+    const rows = [];
+    try {
+      document.querySelectorAll('iframe[src]').forEach(f => {
+        const src = f.getAttribute('src') || f.src || '';
+        if (!/^https?:\/\//i.test(src)) return;
+        // Same-frame guard: on the embed pages themselves (streamtape.to/e/…,
+        // yesporn.io/embed/…) this frame IS the player, not a wrapper — its
+        // own <video>/network scans cover it; the wrapper row would duplicate.
+        if (/streamtape\.[a-z.]+\/e\/|yesporn\.io\/embed\//i.test(location.href)) return;
+        if (!/(?:^|\.)(?:streamtape\.(?:com|to|net|co)|streamta\.pe|stape\.io|yesporn\.io)\//i.test(src)) return;
+        if (!/\/(?:e|embed)\/[A-Za-z0-9_-]{4,64}\/?(?:$|[?#/])/i.test(src) && !/yesporn\.io\/embed\/\d+\/?/i.test(src)) return;
+        const info = detectQuality(src, f);
+        info.type = 'video';
+        info.source = 'embed-page';
+        info.format = 'video';
+        const t = String(f.title || f.getAttribute('aria-label') || document.title || '').trim();
+        if (t) info.title = t.slice(0, 120);
+        rows.push(info);
+      });
+    } catch (e) { /* swallow */ }
+    return rows;
+  }
+
   // ── Full Page Scan ───────────────────────────────────────────────────────────
 
   function fullScan() {
@@ -2104,6 +2229,9 @@ function normalizeStreamUrl(u) {
     //    Gated: skip the inline-script sweep unless the page mentions
     //    flashvars at all (MutationObserver-driven scans run this often).
     if (pageMentionsTokens(['flashvars'])) extractKvsFlashvars().forEach(track);
+
+    // 5b. Known embed-provider iframes (Streamtape / yesporn.io async block)
+    scanEmbedFrames().forEach(track);
 
     // 6. OpenGraph and Twitter meta tags
     scanOGAndMetaTags().forEach(track);
@@ -2653,6 +2781,26 @@ function normalizeStreamUrl(u) {
       transition: background 0.15s;
     }
     .aidm-cap-dl:hover { background: #0f4da8; }
+    .aidm-cap-dl-sent {
+      background: #24304a;
+      border-color: #33405f;
+      color: #9fb0d0;
+      font-size: 10px;
+      white-space: normal;
+      max-width: 130px;
+      text-align: center;
+      line-height: 1.3;
+    }
+    .aidm-cap-dl-sent:hover { background: #1c6fce; color: #fff; border-color: #0f4da8; }
+    .aidm-cap-banner {
+      padding: 8px 10px;
+      font-size: 11px;
+      line-height: 1.4;
+      background: #3d2a00;
+      color: #ffce6b;
+      border-bottom: 1px solid #5a3d00;
+      cursor: default;
+    }
     .aidm-cap-empty {
       padding: 14px 10px;
       text-align: center;
@@ -3170,7 +3318,24 @@ function normalizeStreamUrl(u) {
     } catch (e) { return false; }
   }
 
+  // Auth-query params that gate a tokened CDN tree (mindgeek validto/ip/hash,
+  // KVS md5/expires, Akamai hdnts …). Relative variant URIs under a tokened
+  // master must inherit the query — plain resolution drops it and every
+  // quality row 474s on click.
+  const HLS_AUTH_QUERY_RE = /^(validto|validfrom|expires|expiry|exp|hash|sig|signature|sign|token|md5|wmsauthsign|hdnts|hdnea|hdntl|auth|authkey|policy|secure|sk)$/i;
+  function hlsAuthQuery(parentUrl) {
+    try {
+      const q = new URL(String(parentUrl || '')).search;
+      if (!q || q.length < 3) return null;
+      for (const [k] of new URLSearchParams(q)) {
+        if (HLS_AUTH_QUERY_RE.test(k)) return q;
+      }
+      return null;
+    } catch (e) { return null; }
+  }
+
   function parseMasterVariants(text, baseUrl) {
+    const authQuery = hlsAuthQuery(baseUrl);
     const lines = String(text || '').split('\n');
     const out = [];
     for (let i = 0; i < lines.length; i++) {
@@ -3185,8 +3350,10 @@ function normalizeStreamUrl(u) {
       }
       if (!uri) continue;
       try {
+        const vUrl = new URL(uri, baseUrl);
+        if (authQuery && !vUrl.search) vUrl.search = authQuery;
         out.push({
-          url: new URL(uri, baseUrl).href,
+          url: vUrl.href,
           hls: true,
           encrypted: false,
           bandwidth: bw ? parseInt(bw[1], 10) : 0,
@@ -3202,6 +3369,33 @@ function normalizeStreamUrl(u) {
   function expandHls(url) {
     if (hlsExpandCache.has(url)) return hlsExpandCache.get(url);
     const p = (async () => {
+      // 1. Service-worker fetch first: a page-context fetch is bound by the
+      // page's CORS policy, and private CDNs (stream-private-*, KVS, IPTV)
+      // send no CORS headers — every cross-origin expansion used to fail
+      // silently, leaving master playlists as one quality-less row. The
+      // background's fetch carries host permissions and the exact captured
+      // browser context, so it answers where the page cannot.
+      try {
+        const r = await new Promise((resolve) => {
+          const t = setTimeout(() => resolve(null), 10500);
+          chrome.runtime.sendMessage({ action: 'expand-hls', url, referrer: location.href }, (resp) => {
+            clearTimeout(t);
+            if (chrome.runtime.lastError) return resolve(null);
+            resolve(resp);
+          });
+        });
+        if (r && r.ok) {
+          // EXT-X-STREAM-INF variants are video renditions by definition —
+          // audio-only playlists come from EXT-X-MEDIA, which is not parsed
+          // here, so no audio-rendition note is needed on this path.
+          if (r.isMaster) {
+            return { variants: r.variants || [], encrypted: !!r.encrypted, isMaster: true };
+          }
+          return { variants: [], encrypted: !!r.encrypted, isMaster: false };
+        }
+        // r.ok=false (unreachable/not a playlist) → fall through to the
+        // page-context fetch, which still handles same-origin manifests.
+      } catch (e) { /* background unavailable — page fetch below */ }
       try {
         const ctrl = new AbortController();
         const timer = setTimeout(() => ctrl.abort(), 10000);
@@ -3240,7 +3434,12 @@ function normalizeStreamUrl(u) {
     return new Promise((resolve) => {
       const done = (v) => resolve(v || { streams: [], sent: [] });
       try {
-        const timer = setTimeout(done, 1500);
+        // A live SW answers this trivial handler in milliseconds. Silence for
+        // the whole window means the background is not servicing messages
+        // (dead registration, stuck worker, closed port) — some runtimes never
+        // set lastError for that, so the timeout must report bgDead too or the
+        // reload banner stays hidden exactly when it is needed.
+        const timer = setTimeout(() => done({ streams: [], sent: [], bgDead: true, bgDeadErr: 'timeout' }), 1500);
         // `since` = this page load's navigation start. The background only
         // returns streams captured DURING the current page — without it, URLs
         // sniffed on a previous site in this same tab (kept for 10 min)
@@ -3248,13 +3447,92 @@ function normalizeStreamUrl(u) {
         // link that always failed.
         chrome.runtime.sendMessage({ action: 'get-panel-data', since: Math.round(performance.timeOrigin) }, (resp) => {
           clearTimeout(timer);
-          if (chrome.runtime.lastError) return done();
+          const lastErr = chrome.runtime.lastError ? String(chrome.runtime.lastError.message || '') : null;
+          if (lastErr) return done({ streams: [], sent: [], bgDead: true, bgDeadErr: lastErr });
           done(resp);
         });
       } catch (e) {
         done();
       }
     });
+  }
+
+  /**
+   * One master per HLS release root. Playlist candidates are grouped by
+   * release-root directory (hlsReleaseRootKey); a group that already holds a
+   * master.m3u8 keeps just the master (AiDM's engine expands every quality
+   * from it — variant playlists beside it only read like "fragments"). A
+   * master-less group gets its reconstructed master candidates validated in
+   * ONE background round-trip (expand-hls-batch); a validated master replaces
+   * the group, an unvalidated one leaves the group untouched.
+   */
+  async function canonicalizeHlsFamilies(cands) {
+    const families = new Map();
+    const nonHls = [];
+    for (const v of cands) {
+      if (!v || !v.url || !/\.m3u8($|\?|#)/i.test(v.url)) { nonHls.push(v); continue; }
+      const key = hlsReleaseRootKey(v.url) || ('hlpraw:' + v.url);
+      let arr = families.get(key);
+      if (!arr) { arr = []; families.set(key, arr); }
+      arr.push(v);
+    }
+    // Must be a COPY: the panel caller clears `cands` and refills it from this
+    // result — returning the input array wiped every non-HLS row (Facebook /
+    // Twitter / progressive-MP4 sites showed "badge N · 0 downloadable links").
+    if (!families.size) return cands.slice();
+    // Reconstruct masters for every master-less family, batched (background
+    // caps at 8 URLs per round-trip). `sources` maps each candidate to the
+    // sniffed row it came from — the background propagates that row's
+    // captured browser headers onto the reconstructed URL.
+    const probeUrls = [];
+    const probeSources = {};
+    const seenProbe = new Set();
+    const familyList = [];
+    for (const [key, rows] of families) {
+      familyList.push({ key, rows });
+      if (rows.some(v => isHlsMasterUrl(v.url))) continue;
+      for (const row of rows) {
+        for (const c of reconstructMasterCandidates(row.url)) {
+          if (seenProbe.has(c)) continue;
+          seenProbe.add(c);
+          probeUrls.push(c);
+          probeSources[c] = row.url;
+          if (probeUrls.length >= 8) break;
+        }
+        if (probeUrls.length >= 8) break;
+      }
+    }
+    let results = null;
+    if (probeUrls.length) {
+      results = await new Promise((resolve) => {
+        const t = setTimeout(() => resolve(null), 10500);
+        chrome.runtime.sendMessage({
+          action: 'expand-hls-batch', urls: probeUrls, sources: probeSources,
+          referrer: location.href,
+        }, (resp) => {
+          clearTimeout(t);
+          if (chrome.runtime.lastError) return resolve(null);
+          resolve(resp && resp.results ? resp.results : null);
+        });
+      });
+    }
+    const out = [...nonHls];
+    for (const { rows } of familyList) {
+      const masterRow = rows.find(v => isHlsMasterUrl(v.url));
+      if (masterRow) { out.push(masterRow); continue; }
+      if (results) {
+        const validated = Object.keys(results).filter(u => results[u] && results[u].ok && results[u].isMaster);
+        if (validated.length) {
+          // Prefer the candidate derived from the group's first row so the
+          // auth query stays consistent with what actually played.
+          const preferred = reconstructMasterCandidates(rows[0].url).find(u => validated.includes(u));
+          out.push({ ...rows[0], url: preferred || validated[0], hls: true });
+          continue;
+        }
+      }
+      out.push(...rows);
+    }
+    return out;
   }
 
   function isPlayingVideo(video) {
@@ -3642,6 +3920,22 @@ function normalizeStreamUrl(u) {
     let pd = { streams: [], sent: [] };
     try { pd = await requestPanelData(); } catch (e) {}
     if (superseded()) return; // closed, or a newer build took over
+    // Dead-background banner: a crashed/never-registered service worker makes
+    // EVERY download click fail while the pill itself still renders (the
+    // content script is local). Without this the user sees a working pill and
+    // dead downloads — indistinguishable from "AiDM is broken". Tell them the
+    // one action that fixes it. MUST run after the pd assignment above — an
+    // earlier placement read `pd` inside its let-TDZ and the swallowed
+    // ReferenceError meant the banner never rendered at all.
+    try {
+      if (pd && pd.bgDead) {
+        const warn = document.createElement('div');
+        warn.className = 'aidm-cap-banner';
+        warn.textContent = '⚠ AiDM extension background is not responding — reload it in chrome://extensions (⟳), then reopen this panel.';
+        warn.title = 'The extension service worker failed to start (often after its files changed while loaded). Downloads cannot reach the AiDM app until the extension is reloaded; the AiDM app itself is unaffected.';
+        st.panel.insertBefore(warn, loading);
+      }
+    } catch (e) {}
 
     // Facebook feed ranking (mirrors the Twitter per-video scoping, but
     // non-destructive): a feed or watch page holds EVERY related video's
@@ -3693,9 +3987,12 @@ function normalizeStreamUrl(u) {
       // Not-a-video filter: audio-typed responses complete fine but contain
       // no video track — offering them as video rows is the "downloaded but
       // no video" bug. (Probed no-track/preview drops happen at row render.)
+      // Playlists are exempt (dropVideoCandidate sees o.url): CDNs ship
+      // manifests as audio/x-mpegurl and a dropped manifest meant an EMPTY
+      // pill panel while the badge still counted the links.
       try {
         const nm = urlMeta(pd, v.url);
-        if (dropVideoCandidate({ contentType: nm && nm.contentType })) return;
+        if (dropVideoCandidate({ contentType: nm && nm.contentType, url: v.url })) return;
       } catch (e) {}
       // Per-video ranking tag (see below): 'mine' = attributable to THIS
       // video element, 'other' = belongs to a different video on the page,
@@ -3744,10 +4041,17 @@ function normalizeStreamUrl(u) {
       interceptedMediaUrls.forEach(u => { if (!isSegmentUrl(u)) pushCand(detectQuality(stripFbRange(u), video)); });
       // Merge page-level + webRequest-sniffed streams as extra candidates
       detectedVideos.forEach(pushCand);
+      // Sniffed HLS/DASH manifests are candidates too. The webRequest sniffer
+      // is the most reliable capture layer (it sees worker/iframe/pre-hook
+      // traffic the MAIN-world interceptor cannot), so excluding .m3u8/.mpd
+      // here discarded the ONLY copy of e.g. a mindgeek master playlist on
+      // pages where the player's own XHR was missed — the user then saw no
+      // video row at all (or only later variant/fragment traffic). Duplicate
+      // catches collapse in the seen2 pass below.
       (pd.streams || []).forEach(u => {
         if (isSegmentUrl(u)) return;
         if (isTwitterPlaylistUrl(u)) return;
-        if (isVideoOrAudio(u) && !/\.m3u8|\.mpd/i.test(u)) {
+        if (isVideoOrAudio(u)) {
           pushCand(detectQuality(stripFbRange(u), null));
         }
       });
@@ -3781,6 +4085,18 @@ function normalizeStreamUrl(u) {
       cands.forEach(v => attachFbAudioUrl(v));
     } catch (e) {}
 
+    // ── HLS family canonicalization (master-first per release root) ──────────
+    // Collapse master+variant playlist stacks to ONE master per video, and
+    // reconstruct the master from child playlists when only those were seen.
+    // Without this, an hls.js page showed the master AND its variant
+    // playlists as sibling rows (the "fragments of the video" report).
+    try {
+      const canonical = await canonicalizeHlsFamilies(cands);
+      if (superseded()) return;
+      cands.length = 0;
+      canonical.forEach(v => cands.push(v));
+    } catch (e) { /* canonicalization is best-effort — keep raw cands */ }
+
     // Expand HLS masters into per-quality rows
     const expanded = [];
     for (const v of cands) {
@@ -3797,16 +4113,28 @@ function normalizeStreamUrl(u) {
       }
       expanded.push(v.hls ? v : { ...v, hls: /\.m3u8($|\?|#)/i.test(v.url) });
     }
+    // Never strand the user: if expansion dropped every candidate (manifest
+    // unreachable at probe time), surface the canonical candidates as rows
+    // anyway — the desktop engine can often fetch what the panel could not,
+    // and an empty panel reads as "AiDM is broken".
+    if (!expanded.length && cands.length) {
+      cands.forEach(v => expanded.push(v.hls ? v : { ...v, hls: /\.m3u8($|\?|#)/i.test(v.url) }));
+    }
 
-    // Hide anything already sent to AiDM, then dedupe + sort
+    // Rows already sent to AiDM stay VISIBLE with a "✓ In AiDM" state — the
+    // old hard filter hid a URL FOREVER after one send, so any failed
+    // download left the pill permanently empty ("not able to provide
+    // download links"). Re-clicking re-sends: the desktop's LIVE_STATUSES
+    // dedupe returns a fresh download for finished/failed rows instead of a
+    // dead duplicate. Panel-internal duplicates still collapse below.
     const sentSet = new Set(pd.sent || []);
     const sentNorm = new Set((pd.sent || []).map(u => normalizeStreamUrl(u)).filter(Boolean));
     const seen2 = new Set();
     const tierOf = (q) => (QUALITY_MAP[q] ? QUALITY_MAP[q].tier : -99);
     let rows = expanded.filter(v => {
-      if (sentSet.has(v.url)) return false;
       const n = normalizeStreamUrl(v.url);
-      if ((n && sentNorm.has(n)) || seen2.has(n || v.url)) return false;
+      if (sentSet.has(v.url) || (n && sentNorm.has(n))) { v.sent = true; }
+      if (seen2.has(n || v.url)) return false;
       seen2.add(n || v.url);
       return true;
     }).sort((a, b) => tierOf(b.quality) - tierOf(a.quality));
@@ -3908,6 +4236,10 @@ function normalizeStreamUrl(u) {
     } else {
       const hasScope = !!((fbScope && fbScope.size) || (genScope && genScope.size));
       ordered = hasScope ? rows.filter(v => v && v._fbScope !== 'other') : rows;
+      // Fail-open (mirrors the Facebook branch): scoping must never leave the
+      // user with an empty panel while rows exist — a wrong blob→URL mapping
+      // or a mixed-family player would otherwise hide every real link.
+      if (hasScope && !ordered.length && rows.length) ordered = rows;
     }
     const mineRows = ordered;
     // DASH signal for the honest empty state (set by the background when
@@ -4070,7 +4402,11 @@ function normalizeStreamUrl(u) {
 
       const dl = document.createElement('button');
       dl.className = 'aidm-cap-dl';
-      dl.textContent = '⬇ Download';
+      // Already sent: keep the row and its button usable — a failed download
+      // must never strand the user with an empty pill. Re-clicking re-sends
+      // (the desktop returns a fresh download for finished/failed rows).
+      if (v.sent) { dl.classList.add('aidm-cap-dl-sent'); dl.textContent = '✓ In AiDM · click to re-download'; }
+      else dl.textContent = '⬇ Download';
       dl.addEventListener('click', (e) => {
         e.stopPropagation();
         // Live values: a metadata probe may have upgraded quality/resolution
@@ -4098,6 +4434,9 @@ function normalizeStreamUrl(u) {
             url: sendUrl,
             filename: fname,
             opts: {
+              // "✓ In AiDM" rows are re-downloads on purpose: skip the
+              // background's sent-guard so a failed attempt can be retried.
+              force: !!v.sent,
               // Facebook split-AV: the paired audio-only track for this video
               // (same efg video_id). The desktop downloads both and muxes them
               // with FFmpeg — without it the saved file has no sound.
@@ -4111,22 +4450,33 @@ function normalizeStreamUrl(u) {
               meta: { pageTitle: document.title, pageUrl: location.href, title: realTitle || undefined },
             },
           }, (resp) => {
-            if (chrome.runtime.lastError || !resp || !resp.success) {
-              // "AiDM offline" (app not running / restarting) is the number-
-              // one cause — say so instead of a meaningless "Failed". A
-              // resolver-backed handoff also shows what it is doing while it
-              // waits for the desktop's extraction to answer.
-              dl.textContent = resp && resp.offline ? 'AiDM offline' : 'Failed';
-              setTimeout(() => { dl.textContent = '⬇ Download'; }, resp && resp.offline ? 6000 : 2000);
+            // THREE failure classes, three messages — a bare "Failed" hides
+            // which side is broken. chrome.runtime.lastError must be read
+            // BEFORE it is cleared; "Receiving end does not exist" means the
+            // extension's own service worker never registered (e.g. loaded
+            // while its files were mid-edit) — only a manual reload in
+            // chrome://extensions fixes that; the app itself is fine.
+            const lastErr = chrome.runtime.lastError ? String(chrome.runtime.lastError.message || '') : '';
+            if (lastErr || !resp || !resp.success) {
+              const extDead = /receiving end does not exist|message port closed|extension context invalidated/i.test(lastErr);
+              dl.textContent = extDead ? '⚠ Reload extension'
+                : (resp && resp.offline ? 'AiDM offline' : 'Failed');
+              if (extDead) {
+                dl.title = 'The AiDM extension background is not responding — reload the extension (chrome://extensions → ⟳) and try again. The AiDM app itself is running.';
+              }
+              setTimeout(() => {
+                dl.textContent = '⬇ Download';
+                dl.title = '';
+              }, extDead ? 8000 : (resp && resp.offline ? 6000 : 2000));
               return;
             }
-            dl.textContent = resp.duplicate ? '✓ In AiDM' : '✓ Sent';
+            dl.textContent = resp.duplicate ? '✓ In AiDM' : (resp.native ? '⬇ Browser' : '✓ Sent');
             if (resp.duplicate) {
               setTimeout(() => {
                 if (row.isConnected) row.remove();
               }, 1200);
             } else {
-              setTimeout(() => { dl.textContent = '⬇ Download'; }, 2000);
+              setTimeout(() => { dl.textContent = '⬇ Download'; }, resp.native ? 4000 : 2000);
             }
           });
         } catch (err) {
@@ -4159,6 +4509,7 @@ function normalizeStreamUrl(u) {
             // exact "completed but no video" complaint.
             const verdict = dropVideoCandidate({
               contentType: null,
+              url: v.url,
               probed: true,
               hasVideo: file.width > 0 && file.height > 0,
               durationSec: file.durationSec || 0,

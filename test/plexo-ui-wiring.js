@@ -34,7 +34,9 @@ check('download-viz.js loads before app.js', vizIdx !== -1 && appIdx !== -1 && v
 
 // ── 2. the sparkline is the SVG ThroughputChart, not the old canvas ────────
 check('no <canvas> sparkline left', !/<canvas[^>]*id="speed-sparkline"/.test(html));
-check('sparkline is an SVG with viewBox', /<svg[^>]*id="speed-sparkline"[^>]*viewBox="0 0 72 22"/.test(html));
+// v5.9.3 Throughput Pulse enlarged the chart (SPARK_W 120 × SPARK_H 28, room
+// for the shimmer + halo layers) — the old 72×22 assertion predates it.
+check('sparkline is an SVG with viewBox', /<svg[^>]*id="speed-sparkline"[^>]*viewBox="0 0 120 28"/.test(html));
 for (const id of ['spark-area', 'spark-line', 'spark-head']) {
   check(`sparkline has #${id}`, html.includes(`id="${id}"`));
 }

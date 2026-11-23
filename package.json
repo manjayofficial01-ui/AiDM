@@ -1,6 +1,6 @@
 {
   "name": "aidm",
-  "version": "5.9.4",
+  "version": "5.9.9",
   "description": "AiDM - AI-powered download manager with a multi-connection engine, YouTube/DASH via yt-dlp, torrent/magnet, HTTP/2, and an IDM-style Chrome extension.",
   "main": "main.js",
   "scripts": {
@@ -14,6 +14,7 @@
     "test:engine-v4": "node test/engine-v4.js",
     "test:fb-dedup": "node test/fb-dedup.js",
     "test:re-download": "node test/re-download.js",
+    "test:hls-master": "node test/hls-master.js",
     "test:panel-freshness": "node test/panel-freshness.js",
     "test:dead-link-guard": "node test/dead-link-guard.js",
     "test:mydaddy-title": "node test/mydaddy-title.js",
