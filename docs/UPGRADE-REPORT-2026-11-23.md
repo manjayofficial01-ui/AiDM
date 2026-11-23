@@ -194,13 +194,19 @@ no TODO/FIXME/HACK, no commented-out code, no `debugger`, and no stray
 
 **Two things are not done, and one is deliberately so:**
 
-1. `dist2`–`dist5` (~502 MB of stale build output) are **still on disk**. They
-   were verified unreferenced, but the recycle bin refuses them: their
-   `app.asar` / `default_app.asar` files are held open by another process —
-   the same lock this repository already documents in `TOOLS.md` ("Qoder's
-   indexer locks freshly extracted files under `dist\win-unpacked.tmp\…`"),
-   plus two stale unpacked AiDM instances still running from them. Releasing
-   that lock is the only remaining step; the trash command is ready to run.
+1. `dist2`–`dist5` (~502 MB of stale build output) are **still in the repo, and
+   will leave it at the next restart**. They were verified unreferenced, but
+   the recycle bin refuses them: their `app.asar` / `default_app.asar` files
+   are held open by two leftover AiDM instances running from those very
+   folders (PIDs 27460 and 4016). Those instances run elevated under another
+   account — `Terminate` returns ACCESS_DENIED, and the UAC prompt cannot be
+   answered from an unattended shell — so the lock could not be released
+   here. A **recoverable** move is therefore registered for the next restart
+   (`HKCU\SYSTEM\CurrentControlSet\Control\Session Manager\PendingFileRenameOperations`):
+   each folder is renamed into `.openclaw\tmp\trash-2026-11-23\`, which takes
+   it out of the repo without destroying anything. If those two instances are
+   ended (tray → Quit, or Task Manager as administrator) the same folders can
+   be trashed immediately instead, with no restart needed.
 2. The MCP URL guard checks the link **before** the download starts. A
    redirect to a private address is not re-checked mid-transfer — stated
    plainly in `docs/MCP.md` rather than papered over.
