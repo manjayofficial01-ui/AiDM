@@ -107,6 +107,12 @@ Standard output carries the protocol and nothing else; every note, warning and e
 
 Every example below runs the server with `node` and the absolute path to `tools/aidm-mcp.js` on this machine. In JSON, backslashes are escaped, so `D:\000000 Lab\AiDM\aidm\tools\aidm-mcp.js` becomes `D:\\000000 Lab\\AiDM\\aidm\\tools\\aidm-mcp.js`.
 
+**In the installed app** the script cannot live inside `app.asar` — a plain
+`node` process cannot read a file in there — so it ships unpacked next to the
+app, at `<install folder>\resources\aidm-mcp\aidm-mcp.js`, with `src\mcp\`
+beside it so the relative layout still works. The Settings pane always shows
+the exact command to use for the build you are running.
+
 ### Claude Desktop
 
 `claude_desktop_config.json`:

@@ -1181,7 +1181,13 @@ ipcMain.handle('get-mcp-status', async () => {
     running: !!mcpBridge,
     level: settings.mcpAccessLevel || 'standard',
     file: bridgeFile(),
-    command: path.join(__dirname, 'tools', 'aidm-mcp.js'),
+    // Where the client program lives. In a packaged app the script cannot
+    // live inside the asar — a plain `node` process cannot read that — so it
+    // ships unpacked next to the app and the relative layout of
+    // src/mcp/ is preserved beside it.
+    command: app.isPackaged
+      ? path.join(process.resourcesPath, 'aidm-mcp', 'aidm-mcp.js')
+      : path.join(__dirname, 'tools', 'aidm-mcp.js'),
   };
 });
 

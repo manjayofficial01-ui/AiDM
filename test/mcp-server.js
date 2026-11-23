@@ -458,6 +458,8 @@ check('a normal host is not blocked', !safety.isBlockedHostName('example.com'));
   const init = replies.find((m) => m.id === 1);
   check('initialize is answered', !!init && !!init.result);
   eq('the server names itself', init && init.result.serverInfo.name, 'aidm');
+  eq('the server reports the app version',
+    init && init.result.serverInfo.version, require('../package.json').version);
   eq('the protocol version is answered', init && init.result.protocolVersion, '2025-06-18');
   check('the server says what it can do',
     init && typeof init.result.instructions === 'string' && init.result.instructions.length > 40);
@@ -565,6 +567,22 @@ check('a normal host is not blocked', !safety.isBlockedHostName('example.com'));
     indexHtml.includes('setting-mcp-enabled') && indexHtml.includes('setting-mcp-level'));
   check('the MCP entry point exists',
     fs.existsSync(path.join(repoRoot, 'tools', 'aidm-mcp.js')));
+
+  // A packaged app must ship the CLIENT outside the asar: a plain `node`
+  // process cannot read a file inside app.asar.
+  const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8'));
+  const extras = (pkg.build && pkg.build.extraResources) || [];
+  const clientResource = extras.find((e) => e.from === 'tools/aidm-mcp.js');
+  check('the packaged app ships the MCP client unpacked', !!clientResource);
+  eq('the client keeps its folder name', clientResource && clientResource.to, 'aidm-mcp/aidm-mcp.js');
+  const modules = extras.find((e) => e.from === 'src/mcp');
+  check('the client-side modules ship beside it', !!modules);
+  eq('the module layout is preserved', modules && modules.to, 'aidm-mcp/src/mcp');
+  check('every module the client needs is shipped',
+    modules && ['bridge-client.js', 'stdio-server.js', 'protocol.js', 'safety.js', 'tools.js', 'paths.js']
+      .every((f) => (modules.filter || []).includes(f)));
+  check('the packaged path is the unpacked one',
+    mainSrc.includes('process.resourcesPath') && mainSrc.includes("'aidm-mcp'"));
 
   try {
     fs.rmSync(tmp, { recursive: true, force: true });

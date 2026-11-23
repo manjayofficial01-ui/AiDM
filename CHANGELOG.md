@@ -3,7 +3,13 @@
 All releases, newest first. The README describes what AiDM *is*; this file
 records what changed in each version.
 
-## What's New in v5.10.0 — AI assistants (MCP), plus a hardening and layout pass
+## What's New in v6.0.0 — AI assistants (MCP), plus a hardening and layout pass
+
+**AiDM 6.0.0** — the first major release of the upgrade cycle. It carries a
+new capability (the MCP server below), the security and data-integrity fixes
+that came out of the five-surface audit, and a layout pass that puts the
+download table's actions back on screen at the app's minimum width. The
+upgrade's own report is in `docs/UPGRADE-REPORT-2026-11-23.md`.
 
 **New — an MCP server, so an AI assistant can work your downloads.** Mister
 Download Manager (v0.2.0, 2026-10-31), Swift Download Manager (v1.9.0) and

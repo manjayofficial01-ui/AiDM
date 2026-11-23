@@ -1,4 +1,4 @@
-# ⚡ AiDM — AI-Powered Download Manager v5.9.9
+# ⚡ AiDM — AI-Powered Download Manager v6.0.0
 
 > Classic IDM-style download manager with a next-generation modular download engine, dynamic in-flight segment splitting, positional random-access disk I/O, multi-mirror failover, atomic `.part.meta` crash recovery, Chrome browser integration, video quality detection, a yt-dlp + FFmpeg extraction engine for YouTube, a gallery-dl engine for 250+ gallery sites, Udemy course downloads, smart per-category file organization, ETA, dual-layer speed limiting, and streaming multi-algorithm checksum verification.
 
@@ -20,7 +20,7 @@
 ## 📜 Changelog
 
 Every release, with what changed and why, lives in **[CHANGELOG.md](CHANGELOG.md)**
-(newest first — v5.9.9 down to v3.0.0).
+(newest first — v6.0.0 down to v3.0.0).
 
 
 ## 📊 Research: Top 5 Download Managers Analyzed

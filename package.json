@@ -1,6 +1,6 @@
 {
   "name": "aidm",
-  "version": "5.10.0",
+  "version": "6.0.0",
   "description": "AiDM - AI-powered download manager with a multi-connection engine, YouTube/DASH via yt-dlp, torrent/magnet, HTTP/2, and an IDM-style Chrome extension.",
   "main": "main.js",
   "scripts": {
@@ -127,6 +127,23 @@
         "to": "chrome-extension/",
         "filter": [
           "**/*"
+        ]
+      },
+      {
+        "from": "tools/aidm-mcp.js",
+        "to": "aidm-mcp/aidm-mcp.js"
+      },
+      {
+        "from": "src/mcp",
+        "to": "aidm-mcp/src/mcp",
+        "filter": [
+          "bridge-client.js",
+          "stdio-server.js",
+          "protocol.js",
+          "safety.js",
+          "tools.js",
+          "paths.js",
+          "audit.js"
         ]
       }
     ],

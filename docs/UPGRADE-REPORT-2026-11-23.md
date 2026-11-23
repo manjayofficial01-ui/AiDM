@@ -1,8 +1,8 @@
-# Application Upgrade Report — AiDM v5.10.0
+# Application Upgrade Report — AiDM v6.0.0
 
 **Date:** 2026-11-23 · **Repository:** `D:\000000 Lab\AiDM\aidm` (branch `modernize/2026-10-28`)
 **Baseline:** 112/112 suites green at the start of the cycle · **Final:** 116/116 suites green in 101.2 s
-**Commits:** two local commits (`49e9b81` — the pre-existing v5.9.9 work as a checkpoint, then the upgrade). Nothing was pushed.
+**Commits:** local only, nothing pushed — `49e9b81` (the pre-existing v5.9.9 work as a checkpoint), `fc82782` (the upgrade), then the documentation and the 6.0.0 version bump.
 
 ## Application Upgrade Report
 
@@ -117,6 +117,13 @@ connection; every call is written to `mcp-audit.log` with query-string values
 redacted; and an imported settings file can never switch the bridge on.
 
 The bridge is **off by default** (Settings › AI › *AI assistants (MCP)*).
+
+The client program ships **unpacked** next to a packaged app
+(`<install>\resources\aidm-mcp\`, with `src\mcp\` beside it so the relative
+layout still resolves), because a plain `node` process cannot read a file
+inside `app.asar` — so the installed app is controllable by an assistant too,
+not just the development checkout. The Settings pane shows the exact command
+for the build you are running.
 
 Deliberately not built this cycle, and why: debrid integration (needs
 third-party accounts and their APIs), LAN/phone remote control (needs TLS and

@@ -31,6 +31,14 @@ const {
 const { findTool, toolCatalog, toolDescriptor, ToolInputError } = require('./tools');
 const { levelAllows, sanitizeText } = require('./safety');
 
+/** The app's own version, so the handshake reports what is actually running. */
+let APP_VERSION = '0.0.0';
+try {
+  APP_VERSION = require('../../package.json').version || APP_VERSION;
+} catch (e) {
+  // A packaged build without package.json next to it still answers.
+}
+
 /**
  * Build the answer to a tool call.
  * @param {string} name
@@ -112,7 +120,7 @@ function createStdioServer(options) {
         return okResponse(id, {
           protocolVersion: negotiateProtocolVersion(params.protocolVersion),
           capabilities: { tools: { listChanged: false } },
-          serverInfo: { name: 'aidm', version: '1.0.0' },
+          serverInfo: { name: 'aidm', version: APP_VERSION },
           instructions:
             'AiDM is a download manager. Use list_downloads to see the list, add_download to start a ' +
             'download, and pause_download / resume_download / cancel_download to steer one. ' +
