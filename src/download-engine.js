@@ -798,7 +798,9 @@ class DownloadEngine extends EventEmitter {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
     const reqHeaders = buildRequestHeaders(url, headers);
-    const wantsSingle = singleConnection === true || !!(preProbed && preProbed.singleConnection);
+    const usablePreProbed = preProbed && Number(preProbed.status) >= 200 && Number(preProbed.status) < 400
+      ? preProbed : null;
+    const wantsSingle = singleConnection === true || !!(usablePreProbed && usablePreProbed.singleConnection);
     const maxConn = wantsSingle ? 1 : Math.max(1, Math.min(totalSegments || 8, this.engineMaxConnections, 32));
     // Global budget (v5.9.0): the task starts at min(own ceiling, fair share)
     // when several downloads are already running. Its own ceiling is kept so
@@ -822,6 +824,7 @@ class DownloadEngine extends EventEmitter {
       onConflict: ['rename', 'overwrite', 'fail'].includes(onConflict) ? onConflict : 'rename',
       singleConnection: wantsSingle,
       skipProbe: skipProbe === true,
+      preProbed: usablePreProbed,
       nameLocked: nameLocked === true,
       resumable: resumable === false || resumeable === false ? false : true,
       // Only the caller/scheduler supplies a per-task rate. Passing the global
@@ -849,7 +852,7 @@ class DownloadEngine extends EventEmitter {
     this.activeTasks.set(id, task);
 
     const startTime = Date.now();
-    let totalSize = (preProbed && preProbed.contentLength) || 0;
+    let totalSize = (usablePreProbed && usablePreProbed.contentLength) || 0;
     let initialEmitted = false;
 
     // Create backward-compatible download record for getDownload(id)

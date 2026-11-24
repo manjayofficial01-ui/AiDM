@@ -83,6 +83,7 @@ function resolveConfig(options, defaults = {}) {
     // one-shot token, so the real download 400s. When set, prepare() skips the
     // network probe entirely and the task streams ONE plain GET.
     skipProbe: merged.skipProbe === true,
+    preProbed: merged.preProbed || null,
     // The file name was authored by the user (a rename in the location
     // dialog) or by an explicit caller choice: the response's
     // Content-Disposition must never retarget the final file. finalize()
@@ -568,6 +569,22 @@ class DownloadTask extends EventEmitter {
         acceptRanges: false,
         rangesBlocked: true,
         responseCookies: null,
+      };
+    } else if (this.config.preProbed) {
+      const probed = this.config.preProbed;
+      const headers = probed.headers || {};
+      info = {
+        url: this.config.url,
+        finalUrl: probed.finalUrl || this.config.url,
+        etag: probed.etag || headers.etag || null,
+        lastModified: probed.lastModified || headers['last-modified'] || null,
+        contentType: probed.contentType || null,
+        filename: probed.suggestedFilename || null,
+        size: Number.isFinite(probed.contentLength) && probed.contentLength > 0
+          ? probed.contentLength : null,
+        acceptRanges: probed.supportsRange === true,
+        rangesBlocked: probed.rangesBlocked === true,
+        responseCookies: probed.responseCookies || null,
       };
     } else {
       info = await this.probeWithMirrors(signal);

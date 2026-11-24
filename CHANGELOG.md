@@ -3,6 +3,33 @@
 All releases, newest first. The README describes what AiDM *is*; this file
 records what changed in each version.
 
+## What's New in v6.0.1 — Faster file and video detection
+
+**Fixed — detection no longer waits for avoidable delays.** The browser
+extension now runs its first page scan as soon as the DOM is ready instead of
+waiting 1.5 seconds. MIME metadata already captured by the browser immediately
+supplies missing filename extensions, categories, and the location dialog's
+type badge, so labels such as `MP4 Video` and `PDF File` appear before the
+server probe finishes.
+
+**Fixed — the desktop no longer probes the same file twice.** The download task
+now reuses the manager's fresh, successful filename/size/range probe, removing
+a duplicate network round trip before the transfer starts. Error responses such
+as 429/503 never become transfer geometry. Approvals older than one minute
+and resumes with bytes on disk are revalidated so stale size, ETag, redirect,
+or cookie metadata cannot drive a new transfer. Reuse is also bound to the
+exact URL that was probed, so Drive/Metalink resolution changes cannot carry
+old metadata onto the real payload. One-shot token URLs still skip probing
+exactly as before.
+
+**Also hardened:** Node 25's new pre-TLS `ERR_HTTP2_STREAM_CANCEL` shape now
+follows the existing HTTP/1.1 ALPN fallback instead of surfacing as a fatal
+transport error; the proxy test fixture handles expected socket resets without
+crashing the suite.
+
+New regression suites: `test/detection-latency.js` (16 checks) and
+`test/detection-scheduling.js` (4 checks). Full suite: **118/118 passed**.
+
 ## What's New in v6.0.0 — AI assistants (MCP), plus a hardening and layout pass
 
 **AiDM 6.0.0** — the first major release of the upgrade cycle. It carries a

@@ -4954,7 +4954,9 @@ function normalizeStreamUrl(u) {
 
   // ── Initial Scan ─────────────────────────────────────────────────────────────
 
-  setTimeout(() => { fullScan(); scheduleSyncCapsules(); }, 1500);
+  lastFullScanAt = Date.now(); // capsule host mutations must not queue a duplicate sweep
+  fullScan();
+  scheduleSyncCapsules();
   setTimeout(probe, 2500);
   // Hidden tabs don't need network sweeps or capsule syncs — nothing is
   // visible to update and the 8s/1s timers kept burning CPU per background

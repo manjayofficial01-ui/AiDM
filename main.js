@@ -400,7 +400,9 @@ function createWindow() {
       savePath: d.savePath,
       totalSize: (typeof d.totalSize === 'number' && d.totalSize > 0) ? d.totalSize : null,
       sizeEstimated: !!d.sizeEstimated,
-      contentType: (d._probe && d._probe.contentType) || null,
+      contentType: (d._probe && d._probe.contentType) ||
+        (d.meta && d.meta.contentType) ||
+        (d.quality && d.quality.contentType) || d.mimeType || null,
     });
   });
 

@@ -31,6 +31,7 @@ try { archiveExtract = require('./archive-extract'); } catch (e) { archiveExtrac
 // device instead of the disk (silent data loss). The engine's sanitizeFilename
 // guards server-side names; the manager applies the same guard to row names.
 const RESERVED_WIN_NAMES = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
+const PROBE_FRESH_MS = 60 * 1000;
 
 // Team A's real geometry reader (width/height/duration/audio-track presence
 // proven from the container bytes). Required defensively: a missing or broken
@@ -1303,7 +1304,9 @@ class DownloadManager extends EventEmitter {
       url: dl.url,
       totalSize: (typeof dl.totalSize === 'number' && dl.totalSize > 0) ? dl.totalSize : null,
       sizeEstimated: !!dl.sizeEstimated,
-      contentType: (dl._probe && dl._probe.contentType) || null,
+      contentType: (dl._probe && dl._probe.contentType) ||
+        (dl.meta && dl.meta.contentType) ||
+        (dl.quality && dl.quality.contentType) || dl.mimeType || null,
     });
     const emit = () => {
       if (this.downloads.has(dl.id) && dl.status === 'pending-approval') {
@@ -1507,7 +1510,7 @@ class DownloadManager extends EventEmitter {
   /** Export the download list with credentials scrubbed. */
   exportDownloads() {
     return Array.from(this.downloads.values()).map((d) => {
-      const { cookies, _probe, _normUrl, _probePromise, _customPath, _speedSamples, ...rest } = d;
+      const { cookies, _probe, _normUrl, _probePromise, _probePromiseUrl, _customPath, _speedSamples, ...rest } = d;
       return sanitizeDownloadPayload({
         ...rest,
         headers: d.headers || null,
@@ -2942,7 +2945,7 @@ class DownloadManager extends EventEmitter {
    */
   rowForIpc(d) {
     if (!d || typeof d !== 'object') return d;
-    const { cookies, headers, meta, _probe, _normUrl, _nameResolved, _customPath, _speedSamples, _probePromise, ...rest } = d;
+    const { cookies, headers, meta, _probe, _normUrl, _nameResolved, _customPath, _speedSamples, _probePromise, _probePromiseUrl, ...rest } = d;
     return sanitizeDownloadPayload({
       ...rest,
       headers: headers || null,
@@ -3244,6 +3247,10 @@ class DownloadManager extends EventEmitter {
         if (specificExt) ext = specificExt[1].toLowerCase();
         return this._cleanFilename(`${pageTitle}${q}.${ext}`) || urlBase;
       }
+      const knownExt = extFromMime(meta && meta.contentType) || extFromMime(quality && quality.contentType);
+      if (urlBase && knownExt && !plausibleExtension.test(urlBase)) {
+        return this._cleanFilename(`${urlBase}.${knownExt}`) || urlBase;
+      }
       return urlBase;
     } catch {
       return this._extractFilename(url);
@@ -3364,7 +3371,20 @@ class DownloadManager extends EventEmitter {
    * authenticated CDNs — probing without them gets 403 and a useless meta.
    */
   async _resolveFilename(download, extraHeaders = null, fetchImpl = null) {
-    if (download._nameResolved) return download._probe || null;
+    const resuming = Number(download.downloaded) > 0 ||
+      (Array.isArray(download._segProgress) && download._segProgress.some(bytes => Number(bytes) > 0));
+    const probedAt = download._probe && download._probe.probedAt;
+    const probeFresh = download.skipProbe ||
+      (download._probe && download._probe.probedUrl === download.url &&
+       Number.isFinite(probedAt) && Date.now() - probedAt <= PROBE_FRESH_MS);
+    if (download._nameResolved && !resuming && probeFresh) return download._probe || null;
+    const promiseUrlMismatch = download._probePromise && download._probePromiseUrl !== download.url;
+    if (download._nameResolved || promiseUrlMismatch) {
+      download._nameResolved = false;
+      download._probePromise = null;
+      download._probePromiseUrl = null;
+      download._probe = null;
+    }
     const probeHeaders = extraHeaders || download.headers || {};
 
     // Gmail attachment URLs (entry + CDN forms): the path carries no file name
@@ -3395,6 +3415,8 @@ class DownloadManager extends EventEmitter {
           status: 200, supportsRange: false, singleConnection: true,
           rangesBlocked: true, contentLength: 0,
           suggestedFilename: null, contentType: '', headers: {},
+          probedUrl: download.url,
+          probedAt: Date.now(),
         };
         this.emit('download-updated', download);
       }
@@ -3426,6 +3448,8 @@ class DownloadManager extends EventEmitter {
           suggestedFilename: null,
           contentType: '',
           headers: {},
+          probedUrl: download.url,
+          probedAt: Date.now(),
         },
         hlsSize: null,
       };
@@ -3437,19 +3461,20 @@ class DownloadManager extends EventEmitter {
     // Share one probe promise per row. A soft 8s race only delays the UI —
     // a late result still lands (name/size/guards) and must NOT be dropped
     // just because the race timed out first.
+    const probeUrl = download.url;
     if (!download._probePromise) {
       download._probePromise = (async () => {
         try {
           if (download.isHls) {
-            const hlsSize = await this.engine.probeHlsSize(download.url, probeHeaders);
+            const hlsSize = await this.engine.probeHlsSize(probeUrl, probeHeaders);
             return { kind: 'hls', hlsSize, meta: null };
           }
-          const meta = await this.engine.probeMeta(download.url, probeHeaders);
+          const meta = await this.engine.probeMeta(probeUrl, probeHeaders);
           if (meta && mediaContentTypeIsStream(meta.contentType || '')) {
-            if (isDashUrl(download.url) || /dash\+xml/.test(meta.contentType || '')) {
+            if (isDashUrl(probeUrl) || /dash\+xml/.test(meta.contentType || '')) {
               return { kind: 'dash', meta, hlsSize: null };
             }
-            const hlsSize = await this.engine.probeHlsSize(download.url, probeHeaders);
+            const hlsSize = await this.engine.probeHlsSize(probeUrl, probeHeaders);
             return { kind: 'hls', hlsSize, meta };
           }
           return { kind: 'file', meta, hlsSize: null };
@@ -3457,18 +3482,24 @@ class DownloadManager extends EventEmitter {
           return { kind: 'error', meta: null, hlsSize: null, error: e };
         }
       })();
+      download._probePromiseUrl = probeUrl;
     }
+    const probePromise = download._probePromise;
 
     const settled = await Promise.race([
-      download._probePromise,
+      probePromise,
       new Promise((r) => setTimeout(() => r(null), 8000)),
     ]);
+    if (download.url !== probeUrl || download._probePromise !== probePromise) {
+      return download._probe || null;
+    }
 
     if (!settled) {
       // Soft timeout: start the transfer with the URL-derived name and let the
       // late probe refine size/name and run the dead-link guard when it lands.
-      download._probePromise.then((late) => {
-        if (!this.downloads.has(download.id)) return;
+      probePromise.then((late) => {
+        if (!this.downloads.has(download.id) || download.url !== probeUrl ||
+            download._probePromise !== probePromise) return;
         this._applyProbeResult(download, late);
         this._enforceProbeGuards(download, late && late.meta);
       }).catch(() => {});
@@ -3483,6 +3514,7 @@ class DownloadManager extends EventEmitter {
   _applyProbeResult(download, result) {
     if (!result || result.kind === 'error') {
       download._nameResolved = true;
+      download._probe = null;
       return;
     }
     const meta = result.meta || null;
@@ -3503,7 +3535,9 @@ class DownloadManager extends EventEmitter {
     if (result.kind === 'hls') download.isHls = true;
     download._nameResolved = true;
     const probeOk = meta && meta.status >= 200 && meta.status < 400;
-    download._probe = probeOk ? meta : (hlsSize ? { contentLength: hlsSize.totalSize || hlsSize.size || 0 } : null);
+    download._probe = probeOk
+      ? { ...meta, probedUrl: download.url, probedAt: Date.now() }
+      : (hlsSize ? { contentLength: hlsSize.totalSize || hlsSize.size || 0, probedUrl: download.url, probedAt: Date.now() } : null);
 
     // Pick the real output container for HLS: fMP4 (`#EXT-X-MAP`) playlists
     // assemble into a genuine .mp4; everything else becomes .ts. Extensionless
@@ -3758,7 +3792,7 @@ class DownloadManager extends EventEmitter {
       // changing the live row needed for authenticated replay.
       // Keep `_segProgress` so a restart can resume mid-file.
       const data = Array.from(this.downloads.values()).map(d => {
-        const { cookies, headers, meta, _probe, _normUrl, _nameResolved, _customPath, _speedSamples, _probePromise, ...rest } = d;
+        const { cookies, headers, meta, _probe, _normUrl, _nameResolved, _customPath, _speedSamples, _probePromise, _probePromiseUrl, ...rest } = d;
         if (this.sessionVault) {
           try {
             if (cookies) this.sessionVault.save(d.id, cookies);

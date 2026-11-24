@@ -10,6 +10,11 @@ dist2/
 dist3/
 dist4/
 dist5/
+dist6/
+dist7/
+dist8/
+dist9/
+dist10/
 
 # Local environment / secrets
 .env

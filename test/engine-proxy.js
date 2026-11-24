@@ -46,6 +46,7 @@ function startEchoOrigin() {
 // CONNECT-only proxy. requireAuth checks a fixed credential pair.
 function startConnectProxy(opts = {}) {
   const server = net.createServer((sock) => {
+    sock.on('error', () => {});
     let buf = '';
     sock.on('data', (chunk) => {
       buf += chunk.toString('latin1');

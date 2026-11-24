@@ -113,6 +113,8 @@ function isAlpnFailure(err) {
   if (err.code === 'ERR_SSL_TLSV1_ALERT_NO_APPLICATION_PROTOCOL') return true;
   if (err.code === 'ERR_HTTP2_PROTOCOL_ERROR') return true;
   if (err.code === 'ERR_HTTP2_ERROR') return true;
+  if (err.code === 'ERR_HTTP2_STREAM_CANCEL' && err.cause &&
+      /before secure TLS connection was established/i.test(String(err.cause.message || ''))) return true;
   return /no application protocol|alpn|application protocol/i.test(err.message || '');
 }
 
