@@ -3,6 +3,49 @@
 All releases, newest first. The README describes what AiDM *is*; this file
 records what changed in each version.
 
+## What's New in v6.1.0 — Trust Control Center, Transfer Health and remote nodes
+
+**New — Settings › Trust puts every local door in one place.** It shows live
+local-API request and gate counters, rate-limit activity, paired and
+session-blocked extensions, the MCP bridge's state and access level, and the
+recent AI audit trail. Counters can be reset without changing any access
+decision, an extension can be revoked immediately, and the bridge token can be
+rotated in one click (connected assistants must reconnect).
+
+**New — Transfer Health on every download row.** The ⏱ action opens a dialog
+that explains the transfer from metrics the engine already collects: live and
+smoothed speed, ETA, connections, retries, mirror bans, learned server profile,
+segment states, checksum configuration, first-byte/tail timings and disk writer
+statistics. It says plainly when a server rejects byte ranges or applies its own
+throttle — no new network calls, no hashing, and no URLs, credentials or raw
+error text cross into the renderer.
+
+**New — a queue-only headless client.** `npm run remote -- pair` requests a
+short code, which the user approves in a native dialog before a token is
+issued. `status`, `list`, `add`, `pause`, `resume` and `cancel` then work from a
+shell or a NAS with JSON on stdout. Tokens are accepted only on an explicit
+endpoint allowlist — settings, resolvers, file removal and arbitrary paths stay
+out of reach — and can be revoked in Settings › Trust. Tokens are memory-only,
+so restarting AiDM disconnects every remote client. New `/api/pause` and
+`/api/resume` routes back the CLI.
+
+**Hardened — batch intake and destructive safety.** The Add dialog is now a
+real multi-line field (Ctrl+Enter starts a batch): magnet links are no longer
+silently dropped from mixed pastes, and the dialog's save path, segments and
+category carry over to every queued line. Bulk actions only touch visible,
+selected rows; "Delete from disk" no longer falls back to the whole list when
+nothing is selected, and Pause All includes in-flight `connecting` rows.
+`/api/batch` is rate-limited and uses a bounded worker pool instead of 200
+simultaneous resolver chains. AI connection tests no longer persist an unsaved
+API key when you press Cancel, and MCP bridge toggles are serialized.
+
+**Craft:** the saved theme is applied before first paint (no dark flash), and a
+malformed context-menu `danger` attribute was fixed.
+
+New regression suites: `test/trust-hardening.js`, `test/trust-center.js`,
+`test/transfer-health.js` and `test/remote-node.js`. Full suite:
+**122/122 passed**.
+
 ## What's New in v6.0.1 — Faster file and video detection
 
 **Fixed — detection no longer waits for avoidable delays.** The browser

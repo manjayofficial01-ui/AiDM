@@ -94,7 +94,11 @@ check('quality options are a keyboard radio group', () => {
 });
 check('dialogs expose dialog semantics and take initial focus', () => {
   const dialogs = html.match(/role="dialog" aria-modal="true"/g) || [];
-  assert(dialogs.length === 8, 'all eight modals are dialogs, got ' + dialogs.length);
+  // Dynamic count: adding a modal (e.g. Transfer Health) must not silently
+  // ship an overlay without dialog semantics.
+  const overlays = html.match(/class="modal-overlay"/g) || [];
+  assert(dialogs.length === overlays.length,
+    `every overlay must be a labelled dialog (${dialogs.length}/${overlays.length})`);
   assert(/aria-labelledby="[a-z-]+-title"/.test(html), 'dialogs are labelled by their heading');
   assert(/function openOverlay[\s\S]{0,1800}?\.focus\(\)/.test(appSrc), 'opening moves focus inside');
   assert(/overlayReturnFocus[\s\S]{0,300}?prev\.focus/.test(appSrc), 'closing restores focus');

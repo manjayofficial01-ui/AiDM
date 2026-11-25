@@ -5,6 +5,7 @@ const resolvers = require('./resolvers.js');
 const { sanitizeDownloadPayload: sanitizeApiPayload } = require('./download-privacy');
 const { isExtensionOrigin, isPairedExtension, normalizeExtensionOrigin } = require('./extension-pairing');
 const { isAllowedSavePath } = require('./save-paths');
+const { RemoteAccess } = require('./remote-access');
 
 // Headers the extension is allowed to attach to a download so the desktop
 // engine can replay anti-hotlink checks (Referer/Origin/UA). Everything
@@ -25,13 +26,23 @@ class RateLimiter {
     this.max = max;
     this.windowMs = windowMs;
     this.hits = [];
+    // Lifetime counters power the Trust pane: an in-window count alone
+    // hides a caller that has been hammering an endpoint all session.
+    this.allowed = 0;
+    this.rejected = 0;
   }
   allow() {
     const now = Date.now();
     this.hits = this.hits.filter(t => now - t < this.windowMs);
-    if (this.hits.length >= this.max) return false;
+    if (this.hits.length >= this.max) { this.rejected++; return false; }
     this.hits.push(now);
+    this.allowed++;
     return true;
+  }
+  reset() {
+    this.hits = [];
+    this.allowed = 0;
+    this.rejected = 0;
   }
 }
 
@@ -46,6 +57,16 @@ const RESOLVE_LIMITERS = {
   // When /api/download routes a page URL through the resolver, this caps how
   // often a runaway tab can force resolution.
   '/api/download': new RateLimiter(30, 60 * 1000),
+  // A batch fans out to the resolver once per line. Without its own cap a
+  // single /api/batch call bypassed every resolve limit and could spawn 200
+  // concurrent probes from one request.
+  '/api/batch': new RateLimiter(10, 60 * 1000),
+  // Device-code bootstrap: short codes, explicit human approval. Polling is
+  // allowed at a normal interactive rate, code requests are deliberately rare.
+  '/api/device-code': new RateLimiter(5, 60 * 1000),
+  '/api/device-token': new RateLimiter(60, 60 * 1000),
+  '/api/pause': new RateLimiter(60, 60 * 1000),
+  '/api/resume': new RateLimiter(60, 60 * 1000),
   // UI-churn endpoints a runaway (or hostile paired) caller could otherwise
   // spam — video-detected pops the modal quality picker each time.
   '/api/video-detected': new RateLimiter(30, 60 * 1000),
@@ -54,6 +75,16 @@ const RESOLVE_LIMITERS = {
   '/api/cancel': new RateLimiter(60, 60 * 1000),
   '/api/reject': new RateLimiter(60, 60 * 1000),
 };
+
+/**
+ * Endpoints a remote device-code token may reach. Settings, file deletion,
+ * video-detected UI churn and all resolvers are deliberately excluded — a
+ * headless node manages the QUEUE, nothing else.
+ */
+const REMOTE_QUEUE_ENDPOINTS = new Set([
+  '/api/status', '/api/downloads', '/api/download', '/api/batch',
+  '/api/pause', '/api/resume', '/api/cancel',
+]);
 
 function sanitizeHeaders(input) {
   const out = {};
@@ -196,7 +227,8 @@ class IPCServer {
   /**
    * @param {object} downloadManager
    * @param {{ pairedOrigins?: () => string[],
-   *           onUnpairedExtension?: (origin: string) => boolean|Promise<boolean> }} [options]
+   *           onUnpairedExtension?: (origin: string) => boolean|Promise<boolean>,
+   *           onDeviceCode?: (code: string) => void }} [options]
    *   `pairedOrigins` reads the persisted allowlist (settings) at call time;
    *   `onUnpairedExtension` asks the user (native prompt) and persists an
    *   approval. Missing handlers mean "deny" — never an implicit allow.
@@ -218,6 +250,48 @@ class IPCServer {
     // session so a retry loop cannot re-prompt on every request.
     this._pairingPrompts = new Map();
     this._blockedOrigins = new Set();
+    this.remote = new RemoteAccess();
+    this._onDeviceCode = typeof options.onDeviceCode === 'function' ? options.onDeviceCode : null;
+    // Read-only telemetry for the Trust pane. No request bodies, URLs or
+    // credentials are retained — only counts of gate decisions.
+    this._activity = { requests: 0, rejectedHost: 0, rejectedOrigin: 0, rejectedExtension: 0 };
+  }
+
+  /** Snapshot for the Settings › Trust pane. Never throws. */
+  getStats() {
+    const limiters = Object.entries(RESOLVE_LIMITERS).map(([endpoint, limiter]) => ({
+      endpoint,
+      inWindow: limiter.hits.length,
+      max: limiter.max,
+      windowMs: limiter.windowMs,
+      allowed: limiter.allowed,
+      rejected: limiter.rejected,
+    }));
+    return {
+      running: !!this.server,
+      port: this.port,
+      activity: { ...this._activity },
+      limiters,
+      pairedOrigins: (() => { try { return (this._pairedOrigins() || []).slice(); } catch (e) { return []; } })(),
+      blockedOrigins: [...this._blockedOrigins],
+      pendingPairings: [...this._pairingPrompts.keys()],
+    };
+  }
+
+  /** Remote-node snapshot for Settings › Trust. */
+  getRemoteStatus() {
+    return { enabled: true, ...this.remote.status() };
+  }
+
+  /** Revoke every issued remote token. Pairings/extensions are untouched. */
+  revokeRemoteTokens() {
+    return this.remote.revokeAll();
+  }
+
+  /** Reset counters only — pairing and access decisions are untouched. */
+  resetStats() {
+    this._activity = { requests: 0, rejectedHost: 0, rejectedOrigin: 0, rejectedExtension: 0 };
+    for (const limiter of Object.values(RESOLVE_LIMITERS)) limiter.reset();
   }
 
   /**
@@ -360,11 +434,78 @@ class IPCServer {
         res.setHeader('Vary', 'Origin');
       }
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-AiDM-Token');
 
       if (req.method === 'OPTIONS') {
         res.writeHead(200);
         res.end();
+        return;
+      }
+
+      // Remote device tokens are additive: without the header every existing
+      // caller behaves exactly as before. With it, only the queue allowlist
+      // is reachable — even a valid token cannot touch settings or files.
+      const remoteHeader = req.headers['x-aidm-token'];
+      if (remoteHeader) {
+        const grant = this.remote.verify(String(remoteHeader));
+        if (!grant) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'remote-token-invalid' }));
+          return;
+        }
+        const route = String(req.url || '').split('?')[0];
+        if (!REMOTE_QUEUE_ENDPOINTS.has(route) || !['GET', 'POST'].includes(req.method)) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'remote-scope-denied', scope: grant.scope }));
+          return;
+        }
+        req._remoteScope = grant.scope;
+      }
+
+      // POST /api/device-code — bootstrap for a headless client. The code
+      // alone grants nothing: the main process must show a native dialog and
+      // the user must approve before /api/device-token will issue a token.
+      if (req.method === 'POST' && req.url === '/api/device-code') {
+        if (!RESOLVE_LIMITERS['/api/device-code'].allow()) {
+          return this._rejectLimited(res, 'Too many pairing requests — try again in a minute');
+        }
+        const issued = this.remote.requestCode();
+        if (!issued) {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'pairing-unavailable' }));
+          return;
+        }
+        try {
+          if (this._onDeviceCode) Promise.resolve(this._onDeviceCode(issued.code)).catch(() => {
+            try { this.remote.setDecision(issued.code, false); } catch (e) { /* deny on error */ }
+          });
+          else this.remote.setDecision(issued.code, false);
+        } catch (e) { this.remote.setDecision(issued.code, false); }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, code: issued.code, scope: this.remote.scope, expiresAt: issued.expiresAt }));
+        return;
+      }
+
+      // POST /api/device-token — poll with the code after approving in the app.
+      if (req.method === 'POST' && req.url === '/api/device-token') {
+        if (!RESOLVE_LIMITERS['/api/device-token'].allow()) {
+          return this._rejectLimited(res, 'Too many pairing polls — slow down');
+        }
+        this._readBody(req, 8 * 1024).then((body) => {
+          let code = '';
+          try { code = String((JSON.parse(body || '{}')).code || ''); } catch (e) { /* malformed */ }
+          const result = this.remote.exchange(code);
+          if (result.error) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: result.error }));
+            return;
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        }).catch((err) => {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        });
         return;
       }
 
@@ -753,6 +894,32 @@ class IPCServer {
         return;
       }
 
+      // POST /api/pause and /api/resume — the two queue operations a remote
+      // node needs beyond add/cancel. Same body shape as /api/cancel.
+      for (const action of ['pause', 'resume']) {
+        if (req.method === 'POST' && req.url === `/api/${action}`) {
+          if (!RESOLVE_LIMITERS[`/api/${action}`].allow()) {
+            return this._rejectLimited(res, 'Too many requests — try again in a minute');
+          }
+          this._readBody(req, 64 * 1024).then((body) => {
+            try {
+              const { id } = JSON.parse(body);
+              if (!id || typeof id !== 'string') throw new Error('Missing id');
+              const dl = action === 'pause' ? this.dm.pauseDownload(id) : this.dm.resumeDownload(id);
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: true, action, result: dl === undefined ? null : !!dl }));
+            } catch (err) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: err.message }));
+            }
+          }).catch((err) => {
+            res.writeHead(413, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: err.message }));
+          });
+          return;
+        }
+      }
+
       // POST /api/reject — reject a pending download (drops the row).
       // Symmetric with IPC reject-download.
       if (req.method === 'POST' && req.url === '/api/reject') {
@@ -781,6 +948,11 @@ class IPCServer {
       // body far below the data:-URL endpoint's 128 MB so a 200-URL batch
       // can't be used as a memory-amplification vector.
       if (req.method === 'POST' && req.url === '/api/batch') {
+        if (!RESOLVE_LIMITERS['/api/batch'].allow()) {
+          res.writeHead(429, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Too many batch requests — try again in a minute' }));
+          return;
+        }
         this._readBody(req, 32 * 1024 * 1024).then(async (body) => {
           try {
             const parsed = JSON.parse(body);
@@ -793,22 +965,32 @@ class IPCServer {
             // could turn a googlevideo URL or a YouTube page URL into a
             // plain row, exactly the bug class the single endpoint already
             // guards against.
-            const results = await Promise.all(urls.map(async (url) => {
-              try {
-                // Cookies travel in their own field, NOT through
-                // sanitizeHeaders (which allowlists only Referer/Origin/UA/
-                // Accept-Language). Batch used to forward no cookies at all,
-                // so a pasted list of Gmail/Drive links came back 400 or,
-                // worse, silently saved the Google sign-in page as the file.
-                const r = await this._routeDownload({ url, headers: batchHeaders, cookies: parsed.cookies });
-                // Surface the URL alongside non-success results so the caller
-                // can tell which entry failed.
-                if (r.body && r.body.success === false) return { url, ...sanitizeApiPayload(r.body) };
-                return { url, ...sanitizeApiPayload(r.body) };
-              } catch (err) {
-                return { url, error: (err && err.message) || String(err) };
+            // Bounded fan-out: 200 URLs used to open 200 simultaneous
+            // resolver/network chains, starving the engine and the proxy.
+            // A small worker pool keeps the queue moving without the burst.
+            const concurrency = Math.min(8, urls.length);
+            const results = new Array(urls.length);
+            let cursor = 0;
+            const worker = async () => {
+              while (cursor < urls.length) {
+                const i = cursor++;
+                const url = urls[i];
+                try {
+                  // Cookies travel in their own field, NOT through
+                  // sanitizeHeaders (which allowlists only Referer/Origin/UA/
+                  // Accept-Language). Batch used to forward no cookies at all,
+                  // so a pasted list of Gmail/Drive links came back 400 or,
+                  // worse, silently saved the Google sign-in page as the file.
+                  const r = await this._routeDownload({ url, headers: batchHeaders, cookies: parsed.cookies });
+                  // Surface the URL alongside every result so the caller can
+                  // tell which entry succeeded or failed.
+                  results[i] = { url, ...sanitizeApiPayload(r.body || {}) };
+                } catch (err) {
+                  results[i] = { url, error: (err && err.message) || String(err) };
+                }
               }
-            }));
+            };
+            await Promise.all(Array.from({ length: concurrency }, worker));
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: true, downloads: results }));
           } catch (err) {
@@ -827,8 +1009,10 @@ class IPCServer {
     };
 
     this.server = http.createServer((req, res) => {
+      this._activity.requests++;
       // Host gate (DNS rebinding) - runs before routing; see isLocalHost().
       if (!isLocalHost(req.headers.host)) {
+        this._activity.rejectedHost++;
         res.writeHead(403, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Host not allowed' }));
         return;
@@ -853,6 +1037,7 @@ class IPCServer {
         if (!paired) {
           this._approveExtension(origin).then((allowed) => {
             if (!allowed) {
+              this._activity.rejectedExtension++;
               // No CORS reflection: an unpaired caller gets neither data nor
               // a readable error.
               res.writeHead(403, { 'Content-Type': 'application/json', 'Vary': 'Origin' });
@@ -873,6 +1058,7 @@ class IPCServer {
       // else — including web pages on localhost-resolving domains — is
       // refused before routing.
       if (!isTrustedOrigin(origin, this._pairedOrigins())) {
+        this._activity.rejectedOrigin++;
         res.writeHead(403, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Origin not allowed' }));
         return;
@@ -881,6 +1067,7 @@ class IPCServer {
       // is a cross-site request the browser sends with the user's session —
       // refuse it before routing so the side effect never happens.
       if (origin && isLocalHttpOrigin(origin) && req.method !== 'GET' && req.method !== 'HEAD') {
+        this._activity.rejectedOrigin++;
         res.writeHead(403, { 'Content-Type': 'application/json', 'Vary': 'Origin' });
         res.end(JSON.stringify({ error: 'Origin not allowed for state changes' }));
         return;

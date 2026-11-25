@@ -40,6 +40,15 @@ contextBridge.exposeInMainWorld('aidm', {
   getNetworkInterfaces: () => ipcRenderer.invoke('get-network-interfaces'),
   // AI assistants (MCP): whether the local bridge is on and what it allows.
   getMcpStatus: () => ipcRenderer.invoke('get-mcp-status'),
+  // Per-download Transfer Health (existing engine metrics, no new network calls).
+  getTransferHealth: (id) => ipcRenderer.invoke('get-transfer-health', id),
+  // Settings › Trust: read-only gate telemetry, token rotation, counter reset.
+  getTrustStatus: () => ipcRenderer.invoke('get-trust-status'),
+  resetApiStats: () => ipcRenderer.invoke('reset-api-stats'),
+  rotateMcpToken: () => ipcRenderer.invoke('rotate-mcp-token'),
+  // Headless node: device-code tokens, scoped to queue operations only.
+  getRemoteStatus: () => ipcRenderer.invoke('get-remote-status'),
+  revokeRemoteTokens: () => ipcRenderer.invoke('revoke-remote-tokens'),
 
   // yt-dlp engine (Settings › YouTube): detected version + one-click update
   getYtDlpStatus: () => ipcRenderer.invoke('yt-dlp-status'),
@@ -56,6 +65,7 @@ contextBridge.exposeInMainWorld('aidm', {
   aiExplainError: (error, url) => ipcRenderer.invoke('ai-explain-error', { error, url }),
   aiSummarize: (text, title) => ipcRenderer.invoke('ai-summarize', { text, title }),
   aiHealth: () => ipcRenderer.invoke('ai-health'),
+  aiHealthDraft: (draft) => ipcRenderer.invoke('ai-health-draft', draft),
   aiModels: () => ipcRenderer.invoke('ai-models'),
   exportDownloads: () => ipcRenderer.invoke('export-downloads'),
   importDownloads: (items) => ipcRenderer.invoke('import-downloads', items),

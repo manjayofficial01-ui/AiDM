@@ -1110,6 +1110,71 @@ class DownloadEngine extends EventEmitter {
     return this.activeSegments.get(id) || this.activeTasks.get(id) || null;
   }
 
+  /**
+   * Read-only Transfer Health snapshot. Everything comes from the live task
+   * and persisted server profiles — no new network calls, no file hashing.
+   * URLs, tokens and full error messages never leave the main process.
+   * @param {string} id
+   * @param {object} [row] the manager's persisted row, when available
+   */
+  getTransferHealth(id, row) {
+    const task = this.activeTasks.get(id);
+    const out = {
+      id,
+      live: !!task,
+      state: task ? task.stateValue : null,
+      savedState: row && row.status ? row.status : null,
+      progress: null,
+      telemetry: null,
+      remote: null,
+      serverProfile: null,
+      checksum: null,
+      engine: {
+        http2: this.engineHttp2,
+        maxConnections: this.engineMaxConnections,
+        globalSpeedLimit: this.globalSpeedLimit,
+      },
+    };
+    if (task) {
+      try {
+        const p = task.getProgress();
+        // Keep the classification, drop the message (it can carry a signed URL).
+        if (p.error) p.error = { code: p.error.code || 'UNKNOWN' };
+        out.progress = p;
+      } catch (e) { /* a task mid-teardown has no snapshot */ }
+      try { out.telemetry = task.getTelemetry(); } catch (e) { /* same */ }
+      try {
+        const info = task.info || {};
+        let finalHost = '';
+        if (info.finalUrl) {
+          try { finalHost = new URL(info.finalUrl).host; } catch (e) { /* not a URL */ }
+        }
+        out.remote = {
+          finalHost,
+          contentType: String(info.contentType || '').slice(0, 80),
+          contentLength: Number.isFinite(info.size) ? info.size : null,
+          acceptRanges: !!info.acceptRanges,
+          rangesBlocked: !!info.rangesBlocked,
+          resumable: !!(task.config && task.config.resumable),
+        };
+      } catch (e) { /* no probe yet */ }
+    }
+    try {
+      const url = (task && task.config && task.config.url) || (row && row.url);
+      if (url) {
+        const origin = new URL(url).origin;
+        out.serverProfile = this.serverProfiles.snapshot().find((p) => p.origin === origin) || null;
+      }
+    } catch (e) { /* magnets and non-URL rows have no origin */ }
+    if (row && row.checksum) {
+      out.checksum = {
+        mode: typeof row.checksum === 'string' ? row.checksum : String(row.checksum.algorithm || 'auto'),
+        pieces: Array.isArray(row.pieces) ? row.pieces.length : (Number(row.pieces) || 0),
+      };
+    }
+    return out;
+  }
+
   /** Background SHA-256 calculation emitting download-hash */
   _hashFileAsync(downloadId, filepath) {
     try {

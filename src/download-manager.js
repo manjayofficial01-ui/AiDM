@@ -1531,7 +1531,10 @@ class DownloadManager extends EventEmitter {
       try {
         if (typeof item === 'string') {
           const url = item.trim();
-          if (!url || !/^https?:\/\//i.test(url)) { out.skipped++; continue; }
+          // Magnets are first-class here: addDownload() routes them into the
+          // torrent engine via isTorrentUrl(). The old http-only filter made
+          // a mixed paste (http + magnet) silently lose every magnet line.
+          if (!url || !/^(https?:\/\/|magnet:\?)/i.test(url)) { out.skipped++; continue; }
           const row = this.addDownload({ url });
           if (row && row.duplicate) out.skipped++;
           else if (row) out.added++;

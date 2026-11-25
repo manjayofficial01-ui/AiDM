@@ -3,6 +3,19 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- Apply the saved theme before first paint so a light/auto user never sees a dark flash. -->
+  <script>
+    (function () {
+      try {
+        var saved = localStorage.getItem('aidm-theme');
+        if (saved !== 'light' && saved !== 'dark' && saved !== 'auto') return;
+        var resolved = saved === 'auto'
+          ? (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+          : saved;
+        document.documentElement.setAttribute('data-theme', resolved);
+      } catch (e) { /* storage may be unavailable; the default theme stays */ }
+    })();
+  </script>
   <title>AiDM - Download Manager</title>
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -71,7 +84,7 @@
       <button class="tool-btn" id="btn-pause-all" title="Pause All" aria-label="Pause All"><span class="btn-icon"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-pause"></use></svg></span></button>
       <button class="tool-btn" id="btn-resume-all" title="Resume All" aria-label="Resume All"><span class="btn-icon"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none"><use href="#i-play"></use></svg></span></button>
       <button class="tool-btn" id="btn-delete" title="Remove from list (files stay on disk)" aria-label="Remove from list"><span class="btn-icon"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-list-x"></use></svg></span></button>
-      <button class="tool-btn" id="btn-delete-all" title="Delete from disk (optional file removal)" aria-label="Delete from disk"><span class="btn-icon"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-trash"></use></svg></span></button>
+      <button class="tool-btn" id="btn-delete-all" title="Delete selected downloads (optional file removal)" aria-label="Delete selected downloads from disk"><span class="btn-icon"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-trash"></use></svg></span></button>
       <button class="tool-btn" id="btn-refresh" title="Refresh list (F5)" aria-label="Refresh list (F5)"><span class="btn-icon"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-refresh"></use></svg></span></button>
       <button class="tool-btn" id="btn-clear-completed" title="Clear completed from list (files stay on disk)" aria-label="Clear completed from list"><span class="btn-icon"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-check"></use></svg></span></button>
     </div>
@@ -258,8 +271,8 @@
       </div>
       <div class="modal-body">
         <div class="form-group" id="group-url">
-          <label for="input-url">Download URL</label>
-          <input type="text" id="input-url" placeholder="https://example.com/file.zip  ·  paste multiple URLs (one per line) for batch" spellcheck="false" autocomplete="off" aria-describedby="input-url-error" />
+          <label for="input-url">Download URL <span class="field-hint">· one link per line for batch · Ctrl+Enter to start</span></label>
+          <textarea id="input-url" rows="2" placeholder="https://example.com/file.zip&#10;magnet:?xt=urn:btih:…  (one link per line)" spellcheck="false" autocomplete="off" aria-describedby="input-url-error"></textarea>
           <div class="field-error" id="input-url-error" role="alert"></div>
         </div>
         <div class="form-row">
@@ -352,6 +365,7 @@
           <button type="button" role="tab" aria-selected="false" class="settings-tab" data-settings-tab="ai">AI</button>
           <button type="button" role="tab" aria-selected="false" class="settings-tab" data-settings-tab="features">Features</button>
           <button type="button" role="tab" aria-selected="false" class="settings-tab" data-settings-tab="browser">Browser</button>
+          <button type="button" role="tab" aria-selected="false" class="settings-tab" data-settings-tab="trust">Trust</button>
         </aside>
         <div class="settings-panes">
           <section class="settings-pane active" data-settings-pane="general">
@@ -743,10 +757,39 @@
               <input type="text" id="setting-force-key" maxlength="12" placeholder="Shift" />
               <p class="settings-hint" style="margin-top:4px;">Holding <b>Alt</b> while clicking always lets the browser handle the download.</p>
             </div>
+          </section>
+
+          <section class="settings-pane" data-settings-pane="trust">
+            <h4>Trust Control Center</h4>
+            <p class="settings-hint">Every door into this app, in one place. Counters are session-only and never contain URLs, filenames or credentials.</p>
+            <div class="settings-section">
+              <h4>Local API (127.0.0.1)</h4>
+              <div class="settings-hint" id="trust-api-status">Checking…</div>
+              <div class="trust-metrics" id="trust-api-counters"></div>
+              <div class="trust-limiters" id="trust-limiters"></div>
+              <button type="button" class="tool-btn small" id="btn-reset-api-stats">Reset counters</button>
+            </div>
+            <div class="settings-section">
+              <h4>Remote node (device code)</h4>
+              <p class="settings-hint">A headless client pairs with a short code you approve here. Its token can only add, list, pause, resume and cancel downloads — never change settings, resolve media or touch files. Tokens end when AiDM restarts.</p>
+              <div class="settings-hint" id="trust-remote-status">Checking…</div>
+              <button type="button" class="tool-btn small danger-ghost" id="btn-revoke-remote">Revoke remote tokens</button>
+            </div>
             <div class="settings-section">
               <h4>Trusted Extensions</h4>
-              <p class="settings-hint">A browser extension may control AiDM only after you allow it once. Remove an entry to revoke access — the next request from that extension asks again.</p>
+              <p class="settings-hint">An extension may control AiDM only after you allow it once. Remove an entry to revoke access — the next request asks again.</p>
               <div id="trusted-extensions" class="trusted-extensions" role="list"></div>
+              <div class="settings-hint" id="trust-denied">Blocked this session: none.</div>
+            </div>
+            <div class="settings-section">
+              <h4>AI Bridge</h4>
+              <div class="settings-hint" id="trust-mcp-status">Checking…</div>
+              <button type="button" class="tool-btn small danger-ghost" id="btn-rotate-mcp-token">Rotate token</button>
+              <p class="settings-hint">Rotating issues a new one-time token and disconnects every assistant that is currently paired. They must reconnect with the updated connection file.</p>
+            </div>
+            <div class="settings-section">
+              <h4>Recent AI activity</h4>
+              <div class="trust-audit" id="trust-audit" role="list"></div>
             </div>
           </section>
         </div>
@@ -935,7 +978,7 @@
     <button type="button" class="ctx-item" data-action="copy-hash"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-hash"></use></svg> Copy SHA-256</button>
     <div class="ctx-divider"></div>
     <button type="button" class="ctx-item" data-action="remove"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-list-x"></use></svg> Remove from list</button>
-    <button type="button" class="ctx-item" danger" data-action="delete-file"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-trash"></use></svg> Delete from disk…</button>
+    <button type="button" class="ctx-item danger" data-action="delete-file"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-trash"></use></svg> Delete from disk…</button>
   </div>
 
   <!-- Delete Files Confirmation Modal (IDM-style) -->
@@ -998,6 +1041,35 @@
       <div class="modal-footer">
         <button class="tool-btn" id="btn-cancel-options">Cancel</button>
         <button class="tool-btn primary" id="btn-apply-options">Apply</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="health-overlay" style="display:none;">
+    <div class="modal options-modal" role="dialog" aria-modal="true" aria-labelledby="health-title">
+      <div class="modal-header">
+        <h3 id="health-title"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><use href="#i-clock"></use></svg> Transfer Health</h3>
+        <button class="modal-close" id="health-close" aria-label="Close"><svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-close"></use></svg></button>
+      </div>
+      <div class="modal-body">
+        <div class="options-file" id="health-file-name"></div>
+        <div class="settings-hint" id="health-verdict">Checking…</div>
+        <div class="trust-metrics" id="health-metrics"></div>
+        <div class="settings-section">
+          <h4>Why this speed?</h4>
+          <div class="trust-limiters" id="health-reasons" role="list"></div>
+        </div>
+        <div class="settings-section">
+          <h4>Segments &amp; mirrors</h4>
+          <div class="trust-limiters" id="health-segments" role="list"></div>
+        </div>
+        <div class="settings-section">
+          <h4>Transfer timeline</h4>
+          <div class="trust-limiters" id="health-timeline" role="list"></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="tool-btn" id="btn-health-close">Close</button>
       </div>
     </div>
   </div>

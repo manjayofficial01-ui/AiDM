@@ -1,4 +1,4 @@
-# ⚡ AiDM — AI-Powered Download Manager v6.0.1
+# ⚡ AiDM — AI-Powered Download Manager v6.1.0
 
 > Classic IDM-style download manager with a next-generation modular download engine, dynamic in-flight segment splitting, positional random-access disk I/O, multi-mirror failover, atomic `.part.meta` crash recovery, Chrome browser integration, video quality detection, a yt-dlp + FFmpeg extraction engine for YouTube, a gallery-dl engine for 250+ gallery sites, Udemy course downloads, smart per-category file organization, ETA, dual-layer speed limiting, and streaming multi-algorithm checksum verification.
 
@@ -20,7 +20,7 @@
 ## 📜 Changelog
 
 Every release, with what changed and why, lives in **[CHANGELOG.md](CHANGELOG.md)**
-(newest first — v6.0.1 down to v3.0.0).
+(newest first — v6.1.0 down to v3.0.0).
 
 
 ## 📊 Research: Top 5 Download Managers Analyzed
@@ -194,6 +194,8 @@ history survive, since they live in `~/.aidm_downloads.json` and
 1. **Add downloads:** the ＋ button (`Ctrl+N`), drag-and-drop a URL onto the window, paste a batch (one URL per line), or just copy a link — the clipboard monitor catches it
 2. **In the browser:** right-click any link → *Download with AiDM*, click the floating pill on a playing video, or use the popup's *Scan Page* / *Grab Site*
 3. **Automate:** ⏰ runs the queue on a one-time / daily / weekly timetable, and `AiDM.exe <url> [<url>…]` queues from the command line
+4. **Inspect & control:** the ⏱ button on any row opens **Transfer Health** (live speed, retries, mirrors, server profile, verification state). **Settings › Trust** shows paired extensions, API gate counters, the MCP bridge and remote tokens in one place.
+5. **Headless queue client:** with AiDM running, `npm run remote -- pair` asks you to approve a short code; the resulting token grants only add/list/pause/resume/cancel. Then `npm run remote -- status|list|add <url>|pause <id>|resume <id>|cancel <id>` (stdout is JSON; errors go to stderr). Tokens die when AiDM restarts and can be revoked in Settings › Trust.
 
 ---
 

@@ -809,14 +809,17 @@ body.sidebar-collapsed .sidebar-collapse { right: 50%; transform: translateX(50%
 /* Inline validation (AUD-014 / APP-012): a field-level error the user can see
    and a screen reader can announce, instead of a silent no-op submit. */
 .form-group.has-error input,
-.form-group.has-error select {
+.form-group.has-error select,
+.form-group.has-error textarea {
   border-color: var(--state-danger-border);
   box-shadow: 0 0 0 3px var(--state-danger-bg);
 }
 /* Focus must not paint the error field with the neutral accent ring. */
 .form-group.has-error input:focus,
 .form-group.has-error select:focus,
-.form-group.has-error input:focus-visible {
+.form-group.has-error textarea:focus,
+.form-group.has-error input:focus-visible,
+.form-group.has-error textarea:focus-visible {
   border-color: var(--state-danger-border);
   box-shadow: 0 0 0 3px var(--state-danger-bg);
   outline: none;
@@ -981,6 +984,9 @@ textarea:focus-visible {
   color: var(--text-secondary); margin-bottom: 5px;
   letter-spacing: .2px;
 }
+.form-group label .field-hint {
+  font-weight: 400; opacity: .8; letter-spacing: 0;
+}
 .form-group input[type="text"],
 .form-group input[type="number"],
 .form-group input[type="password"],
@@ -1082,6 +1088,35 @@ textarea:focus-visible {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .trusted-extension-empty { font-size: 11.5px; color: var(--text-muted); line-height: 1.5; }
+
+/* Trust Control Center: read-only counters and audit rows. */
+.trust-metrics {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: 8px; margin: 8px 0;
+}
+.trust-metric {
+  padding: 8px 10px; background: var(--bg-elevated);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.trust-metric-label { display: block; font-size: 10.5px; color: var(--text-muted); }
+.trust-metric-value {
+  display: block; font-size: 15px; font-weight: 600;
+  color: var(--text-primary); font-variant-numeric: tabular-nums;
+}
+.trust-limiters, .trust-audit {
+  display: flex; flex-direction: column; gap: 6px; margin: 8px 0 10px;
+}
+.trust-row {
+  display: flex; align-items: center; gap: 10px; padding: 6px 10px;
+  background: var(--bg-elevated); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); font-size: 11px; color: var(--text-secondary);
+}
+.trust-row .trust-name {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-family: var(--font-mono);
+}
+.trust-row .trust-value { font-variant-numeric: tabular-nums; color: var(--text-primary); }
+.trust-empty { font-size: 11.5px; color: var(--text-muted); }
 
 /* Settings left-nav tabs */
 .settings-layout {

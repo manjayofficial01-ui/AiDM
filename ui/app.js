@@ -15,6 +15,25 @@ let marqueeEndTime = 0; // timestamp of last marquee drag — suppresses stray c
 // (and every fetch start) bumps this; the fetch only assigns when unchanged.
 let downloadsGeneration = 0;
 
+/**
+ * Bulk actions must only touch rows the user can currently see. Changing a
+ * category/search filter used to leave `selectedIds` pointing at hidden rows,
+ * so "Delete from disk" could remove files for downloads that were no longer
+ * on screen. Prune on every filter change and re-check at action time.
+ */
+function visibleSelectedIds() {
+  const visible = new Set(filterDownloads(downloads).map((d) => d.id));
+  return [...selectedIds].filter((id) => visible.has(id));
+}
+function pruneSelectionToVisible() {
+  const visible = new Set(filterDownloads(downloads).map((d) => d.id));
+  let changed = false;
+  for (const id of [...selectedIds]) {
+    if (!visible.has(id)) { selectedIds.delete(id); changed = true; }
+  }
+  return changed;
+}
+
 const downloadList = document.getElementById('download-list');
 const emptyState = document.getElementById('empty-state');
 const totalSpeed = document.getElementById('total-speed');
@@ -528,6 +547,7 @@ function activateCategory(category) {
     i.classList.toggle('active', on);
     i.setAttribute('aria-pressed', on ? 'true' : 'false');
   });
+  pruneSelectionToVisible();
   renderDownloads();
 }
 
@@ -775,6 +795,7 @@ function renderDownloadRow(dl) {
           ${dl.status === 'completed' && dl.extractDir ? `<button class="action-btn" data-action="open-extract" title="${escapeAttr(dl.extractNote || 'Open extracted folder')}"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-archive"></use></svg></button>` : ''}
           ${dl.status === 'error' && dl.aiHint ? `<button class="action-btn" data-action="ai-hint" title="${escapeAttr(dl.aiHint)}"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><use href="#i-sparkles"></use></svg></button>` : ''}
           ${dl.status === 'error' && dl.ytLogPath ? `<button class="action-btn" data-action="open-log" title="Open error log"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-clipboard"></use></svg></button>` : ''}
+          <button class="action-btn" data-action="health" title="Transfer health &amp; diagnostics" aria-label="Transfer health for ${escapeAttr(dl.filename)}"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-clock"></use></svg></button>
           ${dl.status !== 'completed' ? `<button class="action-btn" data-action="options" title="Download options" aria-label="Download options for ${escapeAttr(dl.filename)}"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-gear"></use></svg></button>` : ''}
           <button class="action-btn danger" data-action="remove" title="Remove from list (file stays on disk)"><svg class="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><use href="#i-list-x"></use></svg></button>
         </div>
@@ -1026,6 +1047,7 @@ async function handleAction(action, id) {
     case 'pause': await window.aidm.pauseDownload(id); break;
     case 'resume': await window.aidm.resumeDownload(id); break;
     case 'cancel': await window.aidm.cancelDownload(id); break;
+    case 'health': showHealthModal(id); break;
     case 'options': {
       const dl = downloads.find((d) => d.id === id);
       if (dl) showOptionsModal(dl);
@@ -1273,7 +1295,7 @@ async function applyOptionsModal() {
 
 /** True when any modal overlay is visible (so Delete key doesn't fight with inputs). */
 function isAnyModalOpen() {
-  return ['modal-overlay', 'quality-overlay', 'settings-overlay', 'scheduler-overlay', 'ai-overlay', 'delete-overlay', 'options-overlay', 'grab-overlay']
+  return ['modal-overlay', 'quality-overlay', 'settings-overlay', 'scheduler-overlay', 'ai-overlay', 'delete-overlay', 'options-overlay', 'grab-overlay', 'health-overlay']
     .some(id => {
       const el = document.getElementById(id);
       return el && el.style.display !== 'none' && el.style.display !== '';
@@ -1282,7 +1304,7 @@ function isAnyModalOpen() {
 
 // ── Shared overlay plumbing (backdrop close, focus trap, focus restore) ──────
 
-const OVERLAY_IDS = ['modal-overlay', 'quality-overlay', 'settings-overlay', 'scheduler-overlay', 'ai-overlay', 'delete-overlay', 'options-overlay', 'grab-overlay'];
+const OVERLAY_IDS = ['modal-overlay', 'quality-overlay', 'settings-overlay', 'scheduler-overlay', 'ai-overlay', 'delete-overlay', 'options-overlay', 'grab-overlay', 'health-overlay'];
 const OVERLAY_HIDE = {
   'modal-overlay': hideAddModal,
   'quality-overlay': hideQualityPicker,
@@ -1292,6 +1314,7 @@ const OVERLAY_HIDE = {
   'delete-overlay': hideDeleteModal,
   'options-overlay': hideOptionsModal,
   'grab-overlay': hideGrabModal,
+  'health-overlay': hideHealthModal,
 };
 const overlayReturnFocus = new Map();
 
@@ -2032,14 +2055,15 @@ function setupEventListeners() {
     if (el) el.addEventListener('click', fn);
   };
   bindSel('btn-sel-pause', async () => {
-    for (const id of selectedIds) await window.aidm.pauseDownload(id);
+    for (const id of visibleSelectedIds()) await window.aidm.pauseDownload(id);
   });
   bindSel('btn-sel-resume', async () => {
-    for (const id of selectedIds) await window.aidm.resumeDownload(id);
+    for (const id of visibleSelectedIds()) await window.aidm.resumeDownload(id);
   });
   bindSel('btn-sel-remove', removeSelectedFromList);
   bindSel('btn-sel-delete', () => {
-    if (selectedIds.size > 0) showDeleteModal([...selectedIds]);
+    const ids = visibleSelectedIds();
+    if (ids.length > 0) showDeleteModal(ids);
   });
   bindSel('btn-sel-clear', () => {
     selectedIds.clear();
@@ -2055,10 +2079,11 @@ function setupEventListeners() {
 
   const searchClear = document.getElementById('search-clear');
   const syncSearchClear = () => { if (searchClear) searchClear.style.display = searchInput.value ? 'flex' : 'none'; };
-  searchInput.addEventListener('input', () => { syncSearchClear(); renderDownloads(); });
+  searchInput.addEventListener('input', () => { syncSearchClear(); pruneSelectionToVisible(); renderDownloads(); });
   if (searchClear) searchClear.addEventListener('click', () => {
     searchInput.value = '';
     syncSearchClear();
+    pruneSelectionToVisible();
     renderDownloads();
     searchInput.focus();
   });
@@ -2126,8 +2151,11 @@ function setupEventListeners() {
     // Typing dismisses the inline error immediately — an error that outlives
     // the mistake reads as a second failure.
     urlInput.addEventListener('input', () => setUrlError(null));
+    // Textarea keeps pasted line breaks: Ctrl/Cmd+Enter submits a batch,
+    // a single link still submits on Enter, Shift+Enter adds a line.
+    const urlIsMultiline = () => (urlInput.value || '').includes('\n');
     urlInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey || (!e.shiftKey && !urlIsMultiline()))) {
         e.preventDefault();
         startNewDownload();
       }
@@ -2158,6 +2186,36 @@ function setupEventListeners() {
   const impBtn = document.getElementById('btn-import-downloads');
   if (impBtn) impBtn.addEventListener('click', importDownloadsJson);
   document.getElementById('btn-ai-test').addEventListener('click', testAiConnection);
+  const resetStatsBtn = document.getElementById('btn-reset-api-stats');
+  if (resetStatsBtn) resetStatsBtn.addEventListener('click', async () => {
+    try {
+      await window.aidm.resetApiStats();
+      showNotification('Trust counters reset — access decisions are unchanged');
+      refreshTrustOverview();
+    } catch (e) { showNotification(`Could not reset counters: ${(e && e.message) || e}`, 'error'); }
+  });
+  const revokeRemoteBtn = document.getElementById('btn-revoke-remote');
+  if (revokeRemoteBtn) revokeRemoteBtn.addEventListener('click', async () => {
+    try {
+      const n = await window.aidm.revokeRemoteTokens();
+      showNotification(n ? `Revoked ${n} remote token(s)` : 'No remote tokens to revoke', n ? 'success' : 'info');
+      refreshTrustOverview();
+    } catch (e) { showNotification(`Could not revoke remote tokens: ${(e && e.message) || e}`, 'error'); }
+  });
+  const rotateTokenBtn = document.getElementById('btn-rotate-mcp-token');
+  if (rotateTokenBtn) rotateTokenBtn.addEventListener('click', async () => {
+    if (!window.confirm('Rotate the AI bridge token? Every connected assistant will be disconnected and must reconnect.')) return;
+    rotateTokenBtn.disabled = true;
+    try {
+      const res = await window.aidm.rotateMcpToken();
+      showNotification(res && res.rotated
+        ? 'New AI bridge token issued — assistants must reconnect'
+        : `Token not rotated: ${(res && res.reason) || 'bridge unavailable'}`, res && res.rotated ? 'success' : 'warn');
+      refreshMcpStatus();
+      refreshTrustOverview();
+    } catch (e) { showNotification(`Could not rotate token: ${(e && e.message) || e}`, 'error'); }
+    finally { rotateTokenBtn.disabled = false; }
+  });
   document.getElementById('btn-browse-settings').addEventListener('click', async () => {
     const f = await window.aidm.selectFolder();
     if (f) document.getElementById('setting-savepath').value = f;
@@ -2178,6 +2236,7 @@ function setupEventListeners() {
       // The YouTube pane shows the LIVE yt-dlp version — refresh it every
       // time the tab opens (the user may have updated it elsewhere).
       if (id === 'youtube') { refreshYtDlpStatus(); refreshGalleryDlStatus(); }
+      if (id === 'trust') refreshTrustOverview();
     });
   });
 
@@ -2242,18 +2301,21 @@ function setupEventListeners() {
   document.getElementById('options-close').addEventListener('click', hideOptionsModal);
   document.getElementById('btn-cancel-options').addEventListener('click', hideOptionsModal);
   document.getElementById('btn-apply-options').addEventListener('click', applyOptionsModal);
+  document.getElementById('health-close').addEventListener('click', hideHealthModal);
+  document.getElementById('btn-health-close').addEventListener('click', hideHealthModal);
 
   // Keyboard shortcuts
   document.addEventListener('keydown', (e) => {
     if (e.ctrlKey && e.key === 'n') { e.preventDefault(); showAddModal(); }
     if (e.ctrlKey && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); searchInput.focus(); }
     if (e.key === 'F5') { e.preventDefault(); refreshList(); }
-    if (e.key === 'Escape') { hideAddModal(); hideSettingsModal(); hideQualityPicker(); hideContextMenu(); hideAiModal(); hideDeleteModal(); hideOptionsModal(); hideSchedulerModal(); hideGrabModal(); }
+    if (e.key === 'Escape') { hideAddModal(); hideSettingsModal(); hideQualityPicker(); hideContextMenu(); hideAiModal(); hideDeleteModal(); hideOptionsModal(); hideSchedulerModal(); hideGrabModal(); hideHealthModal(); }
     const typing = !!(e.target.matches && e.target.matches('input, textarea, select'));
     if (!typing && !isAnyModalOpen()) {
       // Delete key opens the delete dialog (with disk checkbox) for the selection
-      if (e.key === 'Delete' && selectedIds.size > 0) {
-        showDeleteModal([...selectedIds]);
+      if (e.key === 'Delete') {
+        const ids = visibleSelectedIds();
+        if (ids.length > 0) showDeleteModal(ids);
       }
       // Table navigation only when focus isn't on a control (so Enter on a
       // focused button still activates the button, not open-file).
@@ -2265,7 +2327,8 @@ function setupEventListeners() {
         // "open the menu for this item" shortcuts (WCAG 2.1.1).
         if ((e.key === 'F10' && e.shiftKey) || e.key === 'ContextMenu') {
           const focused = e.target.closest && e.target.closest('tr[data-id]');
-          const id = focused ? focused.dataset.id : [...selectedIds][0];
+          const visibleIds = visibleSelectedIds();
+          const id = focused ? focused.dataset.id : visibleIds[0];
           const dl = downloads.find(d => d.id === id);
           const tr = dl && rowEls.get(dl.id);
           if (dl && tr) {
@@ -2277,8 +2340,8 @@ function setupEventListeners() {
         if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
           e.preventDefault();
           moveSelection(e.key === 'ArrowDown' ? 1 : -1);
-        } else if (e.key === 'Enter' && selectedIds.size === 1) {
-          const id = [...selectedIds][0];
+        } else if (e.key === 'Enter' && visibleSelectedIds().length === 1) {
+          const id = visibleSelectedIds()[0];
           const dl = downloads.find(d => d.id === id);
           if (dl && dl.status === 'completed') handleAction('open-file', id);
         }
@@ -2371,13 +2434,23 @@ async function startNewDownload() {
   }
   setUrlError(null);
 
-  // Multi-URL paste (one per line): batch-add them all. A magnet among many
-  // lines still goes through the single path only when it is the sole entry.
-  const urls = lines.filter((s) => /^https?:\/\//i.test(s));
-  if (urls.length > 1) {
+  const filename = document.getElementById('input-filename').value.trim() || undefined;
+  const savePath = document.getElementById('input-savepath').value.trim() || undefined;
+  const segments = parseInt(document.getElementById('input-segments').value) || 8;
+  const category = document.getElementById('input-category').value;
+
+  // Multi-line paste (including magnets) is a real batch now: every line
+  // goes through importDownloads with the dialog's shared settings instead
+  // of HTTP lines being kept and magnet lines silently discarded.
+  if (lines.length > 1) {
+    const common = { savePath, segments };
+    if (category && category !== 'auto') common.category = category;
+    const items = lines.map((url) => ({ url, ...common }));
     try {
-      const res = await window.aidm.batchUrls(urls);
-      showNotification(`Queued ${res.added} link(s)${res.skipped ? `, skipped ${res.skipped}` : ''}`, 'success');
+      const res = await window.aidm.batchUrls(items);
+      const skipped = res.skipped || 0;
+      showNotification(`Queued ${res.added} link(s)${skipped ? `, skipped ${skipped} (duplicate or unsupported)` : ''}`, skipped ? 'info' : 'success');
+      if (res.errors && res.errors.length) showNotification(res.errors[0], 'error');
       hideAddModal();
     } catch (e) {
       showNotification(`Batch add failed: ${(e && e.message) || e}`, 'error');
@@ -2385,12 +2458,7 @@ async function startNewDownload() {
     return;
   }
 
-  const url = urls[0] || raw;
-  const filename = document.getElementById('input-filename').value.trim() || undefined;
-  const savePath = document.getElementById('input-savepath').value.trim() || undefined;
-  const segments = parseInt(document.getElementById('input-segments').value) || 8;
-  const category = document.getElementById('input-category').value;
-
+  const url = lines[0];
   // Pass explicit category so the manager can override auto-detect when the
   // user picked one (it only affects save-path routing, not detection).
   const opts = { url, filename, savePath, segments };
@@ -2850,6 +2918,260 @@ function showApprovalModal(dl) {
 
 // ── Settings Modal ────────────────────────────────────────────────────────────
 
+/** One read-only Trust row. All values are textContent — never markup. */
+function trustRow(name, value) {
+  const row = document.createElement('div');
+  row.className = 'trust-row';
+  row.setAttribute('role', 'listitem');
+  const label = document.createElement('span');
+  label.className = 'trust-name';
+  label.textContent = String(name);
+  const val = document.createElement('span');
+  val.className = 'trust-value';
+  val.textContent = String(value);
+  row.appendChild(label);
+  row.appendChild(val);
+  return row;
+}
+
+/**
+ * Settings › Trust. Reads one snapshot from the main process: local API gate
+ * counters, paired/blocked extensions, MCP bridge state and the audit tail.
+ * A failure is shown in place — trust UI must never silently look healthy.
+ */
+async function refreshTrustOverview() {
+  const apiStatus = document.getElementById('trust-api-status');
+  if (!apiStatus || !window.aidm || typeof window.aidm.getTrustStatus !== 'function') return;
+  apiStatus.textContent = 'Checking…';
+  try {
+    const snap = await window.aidm.getTrustStatus();
+    const api = snap.api || null;
+    const counters = document.getElementById('trust-api-counters');
+    const limiters = document.getElementById('trust-limiters');
+    const mcpStatus = document.getElementById('trust-mcp-status');
+    const audit = document.getElementById('trust-audit');
+    const denied = document.getElementById('trust-denied');
+    const remoteStatus = document.getElementById('trust-remote-status');
+
+    apiStatus.textContent = api && api.running
+      ? `Listening on 127.0.0.1:${api.port}. State changes require a paired extension or a native caller.`
+      : 'Local API is not listening — the browser extension cannot reach AiDM.';
+
+    if (counters) {
+      counters.textContent = '';
+      const a = api ? api.activity : { requests: 0, rejectedHost: 0, rejectedOrigin: 0, rejectedExtension: 0 };
+      const paired = api && Array.isArray(api.pairedOrigins) ? api.pairedOrigins.length : 0;
+      [['Requests', a.requests], ['Bad Host', a.rejectedHost], ['Bad Origin', a.rejectedOrigin],
+        ['Unpaired ext', a.rejectedExtension], ['Paired', paired]].forEach(([label, value]) => {
+        const box = document.createElement('div');
+        box.className = 'trust-metric';
+        const l = document.createElement('span');
+        l.className = 'trust-metric-label';
+        l.textContent = label;
+        const v = document.createElement('span');
+        v.className = 'trust-metric-value';
+        v.textContent = String(value);
+        box.appendChild(l);
+        box.appendChild(v);
+        counters.appendChild(box);
+      });
+    }
+
+    if (limiters) {
+      limiters.textContent = '';
+      const rows = (api && Array.isArray(api.limiters) ? api.limiters : [])
+        .filter((l) => l.inWindow || l.allowed || l.rejected);
+      if (!rows.length) {
+        const empty = document.createElement('div');
+        empty.className = 'trust-empty';
+        empty.textContent = 'No rate-limit activity this session.';
+        limiters.appendChild(empty);
+      } else {
+        rows.forEach((l) => limiters.appendChild(trustRow(
+          l.endpoint,
+          `${l.inWindow}/${l.max} now · ${l.rejected} blocked`,
+        )));
+      }
+    }
+
+    if (mcpStatus) {
+      const mcp = snap.mcp || {};
+      mcpStatus.textContent = mcp.running
+        ? `AI bridge listening at ${mcp.level} access. Connection file: ${mcp.file}`
+        : mcp.enabled ? 'AI bridge is enabled but not listening yet.' : 'AI bridge is off — nothing can drive AiDM through MCP.';
+    }
+
+    if (audit) {
+      audit.textContent = '';
+      const entries = Array.isArray(snap.audit) ? snap.audit : [];
+      if (!entries.length) {
+        const empty = document.createElement('div');
+        empty.className = 'trust-empty';
+        empty.textContent = 'No AI-assistant calls recorded yet.';
+        audit.appendChild(empty);
+      } else {
+        entries.forEach((e) => {
+          const ts = e.ts && !Number.isNaN(new Date(e.ts).getTime())
+            ? new Date(e.ts).toLocaleTimeString() : 'time unknown';
+          audit.appendChild(trustRow(`${e.outcome || 'event'} · ${e.tool || 'tool'}`, ts));
+        });
+      }
+    }
+
+    if (remoteStatus) {
+      const r = snap.remote || {};
+      remoteStatus.textContent = r.enabled === false
+        ? 'Remote pairing is unavailable.'
+        : `${r.activeTokens || 0} active token(s) · ${r.pendingCodes || 0} awaiting approval · scope: ${r.scope || 'queue'}`;
+    }
+
+    if (denied) {
+      const list = Array.isArray(snap.deniedThisSession) ? snap.deniedThisSession : [];
+      denied.textContent = list.length
+        ? `Blocked this session: ${list.join(', ')}`
+        : 'Blocked this session: none.';
+    }
+  } catch (e) {
+    apiStatus.textContent = `Trust status unavailable: ${(e && e.message) || e}`;
+  }
+}
+
+// ── Transfer Health ────────────────────────────────────────────────────────
+// An honest read-only view of engine metrics that ALREADY exist. No new
+// network calls, no hashing, no claims a download manager cannot keep.
+
+let healthTargetId = null;
+
+function fmtMs(n) {
+  if (n === null || n === undefined || !Number.isFinite(Number(n))) return '—';
+  const v = Number(n);
+  return v < 1000 ? `${Math.round(v)} ms` : `${(v / 1000).toFixed(1)} s`;
+}
+
+function showHealthModal(id) {
+  const dl = downloads.find((d) => d.id === id);
+  healthTargetId = id;
+  document.getElementById('health-file-name').textContent = dl ? dl.filename : id;
+  document.getElementById('health-verdict').textContent = 'Reading engine diagnostics…';
+  openOverlay('health-overlay');
+  refreshHealth();
+}
+
+function hideHealthModal() {
+  closeOverlay('health-overlay');
+  healthTargetId = null;
+}
+
+async function refreshHealth() {
+  const id = healthTargetId;
+  if (!id || !window.aidm || typeof window.aidm.getTransferHealth !== 'function') return;
+  const verdict = document.getElementById('health-verdict');
+  try {
+    const h = await window.aidm.getTransferHealth(id);
+    if (id !== healthTargetId) return; // the dialog was closed while awaiting
+    if (!h) {
+      verdict.textContent = 'No diagnostics are available for this row.';
+      return;
+    }
+    const p = h.progress || {};
+    const t = h.telemetry || {};
+    const dl = downloads.find((d) => d.id === id);
+
+    const speed = Number(p.smoothedSpeed || p.speed || (dl && dl.speed) || 0);
+    verdict.textContent = h.live
+      ? `Live engine task · ${formatSpeed(speed)} · ${p.connections || 0}/${p.targetConnections || 0} connections`
+      : `No live engine task attached (${h.savedState || h.state || 'inactive'}). Showing only saved-state diagnostics.`;
+
+    const metrics = document.getElementById('health-metrics');
+    metrics.textContent = '';
+    const put = (label, value) => {
+      const box = document.createElement('div');
+      box.className = 'trust-metric';
+      const l = document.createElement('span');
+      l.className = 'trust-metric-label';
+      l.textContent = label;
+      const v = document.createElement('span');
+      v.className = 'trust-metric-value';
+      v.textContent = String(value);
+      box.appendChild(l);
+      box.appendChild(v);
+      metrics.appendChild(box);
+    };
+    put('Speed', formatSpeed(speed));
+    put('ETA', p.etaSeconds != null ? formatEta(p.etaSeconds) : '—');
+    put('Connections', `${p.connections || 0}/${p.targetConnections || 0}`);
+    put('Retries', t.retries || 0);
+    put('Repairs', t.pieceRepairs || 0);
+    put('Engine', h.live ? 'Segmented' : (dl && dl.isTorrent ? 'WebTorrent' : 'External'));
+
+    const reasons = document.getElementById('health-reasons');
+    reasons.textContent = '';
+    const reason = (text) => reasons.appendChild(trustRow('·', text));
+    if (!h.live) reason('No segmented-engine task is attached. Queued, torrent, yt-dlp and completed rows are tracked by their own engines.');
+    if (h.remote && (h.remote.rangesBlocked || !h.remote.acceptRanges)) {
+      reason('The server blocks byte ranges, so parallel segments cannot speed this transfer up.');
+    } else if (p.resumable === false && h.live) {
+      reason('This transfer is not resumable — the engine is using a single connection.');
+    }
+    if (p.connections != null && p.targetConnections != null && p.connections < p.targetConnections) {
+      reason(`Only ${p.connections} of ${p.targetConnections} target connections are active — the per-host or global connection budget may be limiting this host.`);
+    }
+    if (dl && Number(dl.speedLimit) > 0) reason(`A per-download cap of ${formatSpeed(Number(dl.speedLimit))} is active.`);
+    if (h.engine && h.engine.globalSpeedLimit > 0) reason(`A global cap of ${formatSpeed(h.engine.globalSpeedLimit)} is active.`);
+    if (t.retries || t.backoffs) reason(`${t.retries || 0} retries and ${t.backoffs || 0} backoffs were needed — the connection has been unstable.`);
+    if (t.slowDrops || t.rampCollapses || t.rampShrinks) {
+      reason(`Adaptive tuning shrank the connection count ${(t.rampCollapses || 0) + (t.rampShrinks || 0)} time(s) after slowdowns.`);
+    }
+    const mirrors = t.mirrors || [];
+    const banned = mirrors.filter((m) => m.banned).length;
+    const failures = mirrors.reduce((sum, m) => sum + (Number(m.failures) || 0), 0);
+    if (banned || failures) reason(`${banned} mirror(s) banned, ${failures} failure(s) recorded during failover.`);
+    if (h.serverProfile) {
+      const sp = h.serverProfile;
+      const ema = Number(sp.speedEma) || 0;
+      reason(`Learned server profile: ${formatSpeed(ema)} EMA from ${sp.samples || 0} sample(s), ${sp.failures || 0} failure(s), score ${Math.round(sp.score || 0)}.`);
+      if (Number(sp.quarantineUntil) > Date.now()) reason('This origin is temporarily quarantined after repeated failures.');
+    }
+    if (h.checksum) reason(`Checksum verification (${h.checksum.mode}${h.checksum.pieces ? `, ${h.checksum.pieces} pieces` : ''}) runs after completion — it is not consuming bandwidth now.`);
+    reason('AiDM cannot beat server-side throttling: throughput is bounded by the origin, your link and disk.');
+
+    const segs = document.getElementById('health-segments');
+    segs.textContent = '';
+    const list = p.segments || [];
+    if (list.length) {
+      const done = list.filter((s) => s.state === 'done' || s.status === 'done').length;
+      const active = list.filter((s) => s.state === 'active').length;
+      segs.appendChild(trustRow('Summary', `${done} done · ${active} active · ${list.length - done - active} pending`));
+      list.filter((s) => s.state === 'active').slice(0, 8).forEach((s) => {
+        const total = Math.max(0, (Number(s.end) || 0) - (Number(s.start) || 0) + 1);
+        segs.appendChild(trustRow(`Segment ${s.id}`, `${formatBytes(s.downloaded || 0)} / ${formatBytes(total)}`));
+      });
+    } else {
+      segs.appendChild(trustRow('Segments', 'No segmented-engine detail available'));
+    }
+    mirrors.slice(0, 8).forEach((m) => segs.appendChild(trustRow(
+      m.host,
+      `${m.banned ? 'banned' : m.active ? 'active' : 'idle'}${m.failures ? ` · ${m.failures} failures` : ''}`,
+    )));
+
+    const timeline = document.getElementById('health-timeline');
+    timeline.textContent = '';
+    const w = t.writer || {};
+    [['First byte', fmtMs(t.timeToFirstByteMs)],
+      ['95% reached', fmtMs(t.tail5Ms)],
+      ['99% reached', fmtMs(t.tail1Ms)],
+      ['Elapsed', fmtMs(t.elapsedMs)],
+      ['Connection launches', t.connectionLaunches || 0],
+      ['Peak connections', t.peakConnections || 0],
+      ['Restarts', t.restarts || 0],
+      ['Bytes written', w.bytesWritten ? formatBytes(w.bytesWritten) : '—'],
+      ['Disk sync time', w.syncTotalMs ? fmtMs(w.syncTotalMs) : '—'],
+      ['Bad pieces', t.badPieceCount || 0]].forEach(([label, value]) => timeline.appendChild(trustRow(label, value)));
+  } catch (e) {
+    verdict.textContent = `Health unavailable: ${(e && e.message) || e}`;
+  }
+}
+
 /**
  * Trusted extensions (AUD-012): the exact origins the user allowed to drive
  * the local API. Rendering is textContent-only — an origin is data, never
@@ -2888,6 +3210,7 @@ function renderTrustedExtensions() {
         if (saved && typeof saved === 'object') settings = saved;
         else settings.trustedExtensionOrigins = next;
         renderTrustedExtensions();
+        refreshTrustOverview();
         showNotification('Extension access revoked', 'success');
       } catch (e) {
         showNotification(`Could not update trusted extensions: ${(e && e.message) || e}`, 'error');
@@ -2902,6 +3225,7 @@ function renderTrustedExtensions() {
 async function showSettingsModal() {
   settings = await window.aidm.getSettings();
   renderTrustedExtensions();
+  refreshTrustOverview();
   document.getElementById('setting-concurrent').value = settings.maxConcurrentDownloads;
   document.getElementById('setting-segments').value = settings.defaultSegments;
   document.getElementById('setting-proxy-url').value = settings.proxyUrl || '';
@@ -3650,18 +3974,15 @@ async function testAiConnection() {
   const hint = document.getElementById('ai-status-hint');
   hint.textContent = 'Testing…';
   try {
-    // Save current form values first so test uses them (without persisting key display)
-    const aiKeyInput = document.getElementById('setting-ai-key').value.trim();
+    // Test the DRAFT in the form. Saving here used to make Cancel a lie: an
+    // untested/typed key was written to disk before the user decided.
     const draft = {
-      ...settings,
-      aiBaseURL: document.getElementById('setting-ai-baseurl').value.trim() || 'https://tokenharbor.ai/v1',
-      aiPrimaryModel: document.getElementById('setting-ai-primary').value,
-      aiFallbackModel: document.getElementById('setting-ai-fallback').value,
-      ...(aiKeyInput ? { aiApiKey: aiKeyInput } : {}),
+      baseURL: document.getElementById('setting-ai-baseurl').value.trim(),
+      apiKey: document.getElementById('setting-ai-key').value.trim(),
+      primaryModel: document.getElementById('setting-ai-primary').value,
+      fallbackModel: document.getElementById('setting-ai-fallback').value,
     };
-    await window.aidm.saveSettings(draft);
-    settings = draft;
-    const r = await window.aidm.aiHealth();
+    const r = await window.aidm.aiHealthDraft(draft);
     hint.textContent = r.ok ? `✅ Connected (${r.model}, ${r.latencyMs}ms${r.fallbackUsed ? ', via fallback' : ''})` : '⚠️ Unexpected reply';
   } catch (err) {
     hint.textContent = `❌ ${err.message || err}`;
@@ -3694,7 +4015,10 @@ async function refreshMcpStatus() {
 // ── Batch Actions ─────────────────────────────────────────────────────────────
 
 async function pauseAll() {
-  for (const dl of downloads) if (dl.status === 'downloading') await window.aidm.pauseDownload(dl.id);
+  // "connecting" is an in-flight phase with live sockets — it must pause too.
+  for (const dl of downloads) {
+    if (dl.status === 'downloading' || dl.status === 'connecting') await window.aidm.pauseDownload(dl.id);
+  }
 }
 async function resumeAll() {
   for (const dl of downloads) if (dl.status === 'paused' || dl.status === 'error') await window.aidm.resumeDownload(dl.id);
@@ -3705,11 +4029,11 @@ async function resumeAll() {
 
 /** List-only removal of the current selection (IDM "Remove from list"). */
 async function removeSelectedFromList() {
-  if (selectedIds.size === 0) {
+  const ids = visibleSelectedIds();
+  if (ids.length === 0) {
     showNotification('Nothing selected — click a row or tick its checkbox first');
     return;
   }
-  const ids = [...selectedIds];
   for (const id of ids) {
     try { await window.aidm.removeDownload(id); } catch (e) {}
   }
@@ -3720,14 +4044,21 @@ async function removeSelectedFromList() {
   showNotification(`Removed ${ids.length} item(s) from list`);
 }
 
-/** Open the delete dialog for the selection, or the whole list if nothing is selected. */
+/**
+ * Open the delete dialog for the VISIBLE selection. There is deliberately no
+ * "if nothing is selected, delete everything" fallback: one stray click on
+ * the trash button used to arm a whole-list, delete-from-disk confirmation
+ * whose copy still said "N selected downloads". Select all (Ctrl+A / header
+ * checkbox) first when the whole list really is the target.
+ */
 function deleteSelectedOrAll() {
-  if (selectedIds.size > 0) {
-    showDeleteModal([...selectedIds]);
-  } else if (downloads.length > 0) {
-    showDeleteModal(downloads.map(d => d.id));
-  } else {
+  const ids = visibleSelectedIds();
+  if (ids.length > 0) {
+    showDeleteModal(ids);
+  } else if (downloads.length === 0) {
     showNotification('List is already empty');
+  } else {
+    showNotification('Select the downloads to delete first (Ctrl+A selects all visible rows)');
   }
 }
 

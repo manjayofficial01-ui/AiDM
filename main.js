@@ -216,7 +216,7 @@ function syncAiConfig() {
  * ceiling for every connection — a client may ask for less, never for more.
  * @returns {Promise<void>}
  */
-async function syncMcpBridge() {
+async function syncMcpBridgeOnce() {
   if (!downloadManager) return;
   const settings = downloadManager.getSettings();
   const wanted = settings.mcpEnabled === true;
@@ -239,6 +239,13 @@ async function syncMcpBridge() {
     console.warn('[AiDM] MCP bridge:', e && e.message);
     mcpBridge = null;
   }
+}
+
+let mcpBridgeSync = Promise.resolve();
+/** Serialize bridge toggles so two fast changes cannot start two listeners. */
+function syncMcpBridge() {
+  mcpBridgeSync = mcpBridgeSync.then(syncMcpBridgeOnce, syncMcpBridgeOnce);
+  return mcpBridgeSync;
 }
 
 // Origins the user blocked this session. A denial is deliberately NOT
@@ -341,6 +348,28 @@ function createWindow() {
     // takes effect without restarting the server.
     pairedOrigins: () => downloadManager.getSettings().trustedExtensionOrigins || [],
     onUnpairedExtension: (origin) => requestExtensionPairing(origin),
+    // Headless-node foundation: a remote CLI asks for a short code; the user
+    // approves it in a native dialog before a queue-only token is issued.
+    onDeviceCode: (code) => {
+      const opts = {
+        type: 'question',
+        buttons: ['Allow queue access', 'Block'],
+        defaultId: 1, cancelId: 1, noLink: true,
+        title: 'Allow remote AiDM control?',
+        message: 'A remote client wants to manage your download queue.',
+        detail: `Verification code: ${code}\n\nApproving grants ADD / LIST / PAUSE / RESUME / CANCEL only. ` +
+          'It never grants settings access, file deletion or arbitrary file paths. ' +
+          'If you did not start this client, choose Block.',
+      };
+      const parent = (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) ? mainWindow : null;
+      try {
+        const p = parent ? dialog.showMessageBox(parent, opts) : dialog.showMessageBox(opts);
+        Promise.resolve(p).then((r) => ipcServer && ipcServer.remote.setDecision(code, r.response === 0))
+          .catch(() => ipcServer && ipcServer.remote.setDecision(code, false));
+      } catch (e) {
+        try { ipcServer.remote.setDecision(code, false); } catch (e2) { /* never grant on error */ }
+      }
+    },
   });
 
   // ── Download scheduler (v4.3.0, original implementation) ──────────────
@@ -857,6 +886,13 @@ ipcMain.handle('get-downloads', async () => {
   return downloadManager.getAllDownloads().map(ipcRow);
 });
 
+/** Settings-free diagnostics for the per-download Health view. */
+ipcMain.handle('get-transfer-health', async (event, id) => {
+  if (!downloadManager || !downloadManager.engine || typeof id !== 'string') return null;
+  const row = downloadManager.getAllDownloads().find((d) => d.id === id);
+  return downloadManager.engine.getTransferHealth(id, row);
+});
+
 /**
  * Guard against path traversal: the renderer sends a path, but we only open
  * files that actually exist on disk and refuse null-bytes / relative tricks.
@@ -1329,6 +1365,26 @@ ipcMain.handle('ai-health', async () => {
   return getAiService().healthCheck();
 });
 
+ipcMain.handle('ai-health-draft', async (event, draft) => {
+  // Test the UNSAVED form values. The old "Test" button saved the whole
+  // draft first, so Cancel still left a half-checked API key on disk.
+  const saved = downloadManager.getSettings();
+  const d = draft || {};
+  const base = String(d.baseURL || '').trim() || String(saved.aiBaseURL || '');
+  const tester = new AiService({
+    baseURL: base,
+    primaryModel: d.primaryModel || saved.aiPrimaryModel,
+    fallbackModel: d.fallbackModel || saved.aiFallbackModel,
+  });
+  // Constructor falls back to the env key; a custom host must never inherit
+  // a credential meant for the default provider.
+  const usingDefaultHost = !base || hostOf(base) === hostOf(DEFAULT_BASE_URL);
+  tester.apiKey = (usingDefaultHost ? (process.env.TOKENHARBOR_API_KEY || '') : '') ||
+    String(d.apiKey || '').trim();
+  tester.keyHost = hostOf(tester.baseURL);
+  return tester.healthCheck();
+});
+
 ipcMain.handle('ai-models', async () => {
   syncAiConfig();
   return { models: await getAiService().listModels() };
@@ -1400,9 +1456,76 @@ ipcMain.handle('api-status', async () => {
   });
 });
 
+/**
+ * Settings › Trust: a single read-only snapshot of every local door —
+ * the HTTP API gates, paired/blocked extensions, MCP bridge and audit tail.
+ * Counters, never request bodies or credentials, leave the main process.
+ */
+ipcMain.handle('get-trust-status', async () => {
+  const settings = downloadManager ? downloadManager.getSettings() : {};
+  const api = ipcServer && typeof ipcServer.getStats === 'function' ? ipcServer.getStats() : null;
+  let audit = [];
+  try { audit = new AuditLog({}).read(6).reverse(); } catch (e) { /* no log yet */ }
+  return {
+    api,
+    mcp: {
+      enabled: settings.mcpEnabled === true,
+      running: !!mcpBridge,
+      level: settings.mcpAccessLevel || 'standard',
+      file: bridgeFile(),
+    },
+    deniedThisSession: [...deniedExtensionOrigins],
+    remote: ipcServer && typeof ipcServer.getRemoteStatus === 'function'
+      ? ipcServer.getRemoteStatus()
+      : { enabled: false, activeTokens: 0, pendingCodes: 0, scope: 'queue' },
+    audit,
+  };
+});
+
+ipcMain.handle('get-remote-status', async () => {
+  if (!ipcServer || typeof ipcServer.getRemoteStatus !== 'function') {
+    return { enabled: false, activeTokens: 0, pendingCodes: 0, scope: 'queue' };
+  }
+  return ipcServer.getRemoteStatus();
+});
+
+ipcMain.handle('revoke-remote-tokens', async () => {
+  if (!ipcServer || typeof ipcServer.revokeRemoteTokens !== 'function') return 0;
+  const n = ipcServer.revokeRemoteTokens();
+  try {
+    new AuditLog({}).append({ tool: 'revoke-remote-tokens', level: 'standard', outcome: 'ok', detail: { count: n } });
+  } catch (e) { /* audit is best-effort */ }
+  return n;
+});
+
+ipcMain.handle('reset-api-stats', async () => {
+  if (!ipcServer || typeof ipcServer.resetStats !== 'function') return false;
+  ipcServer.resetStats();
+  return true;
+});
+
+/** Issue a fresh bridge token: every currently paired assistant must reconnect. */
+ipcMain.handle('rotate-mcp-token', async () => {
+  if (!mcpBridge) return { rotated: false, reason: 'The AI bridge is off' };
+  const old = mcpBridge;
+  mcpBridge = null;
+  try { await old.stop(); } catch (e) { /* the file is removed by stop() */ }
+  await syncMcpBridge();
+  let level = 'standard';
+  try { level = (downloadManager.getSettings().mcpAccessLevel || level); } catch (e) {}
+  try {
+    new AuditLog({}).append({ tool: 'rotate-token', level, outcome: mcpBridge ? 'ok' : 'failed' });
+  } catch (e) { /* audit must never break the UI */ }
+  return { rotated: !!mcpBridge };
+});
+
 ipcMain.handle('batch-urls', async (event, { urls }) => {
   if (!Array.isArray(urls)) throw new Error('urls must be an array');
-  return downloadManager.importDownloads(urls.filter((u) => typeof u === 'string'));
+  // Strings come from the grabber; objects come from the Add dialog and carry
+  // shared options (save path, segments, category) for every pasted line.
+  const items = urls.filter((u) => typeof u === 'string' ||
+    (u && typeof u === 'object' && typeof u.url === 'string'));
+  return downloadManager.importDownloads(items);
 });
 
 // ── Site grabber (v5.4.0) ────────────────────────────────────────────────────
